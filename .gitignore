@@ -1,1 +1,4 @@
 /.idea/
+
+# Generierte Sphinx-Dokumentation
+sphinx/build/
