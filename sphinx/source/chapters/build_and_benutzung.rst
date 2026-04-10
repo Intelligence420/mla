@@ -5,23 +5,39 @@ Build & Benutzung
 Voraussetzungen
 ---------------
 
-.. todo::
+Die Software wurde für Linux (Ubuntu/WSL) entwickelt. Folgende Pakete werden benötigt:
 
-   Voraussetzungen hier ergänzen (OS, Pakete, Abhängigkeiten).
+* Python 3
+* PyTorch (auf dem Uni-Rechner mit CUDA, lokal optional CPU-only)
+* Sphinx + ``sphinx_rtd_theme`` (für diese Dokumentation)
 
-Kompilierung / Setup
+Eine ausführliche Installationsanleitung befindet sich in der Datei ``SETUP.md`` im Projektroot.
+
+Setup (Virtual Environment)
+---------------------------
+
+.. code-block:: bash
+
+   # venv erstellen
+   python3 -m venv .venv
+   source .venv/bin/activate
+
+   # Abhängigkeiten installieren
+   pip install -r requirements.txt
+
+Alternativ können Sphinx und das Theme auch global installiert werden (siehe ``SETUP.md``).
+
+Assignment ausführen
 --------------------
 
-.. todo::
+.. code-block:: bash
 
-   Build- bzw. Setup-Anleitung hier ergänzen.
+   # venv aktivieren (falls nicht global installiert)
+   source .venv/bin/activate
 
-Ausführung
-----------
-
-.. todo::
-
-   Anleitung zur Ausführung des Programms hier ergänzen.
+   # Beispiel: Assignment 01
+   cd assignments/01_assignment
+   python3 src/assignment_01.py
 
 Dokumentation generieren
 ------------------------

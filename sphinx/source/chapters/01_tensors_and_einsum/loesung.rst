@@ -1,8 +1,8 @@
-.. _ch01:
+.. _ch01_loesung:
 
-#######################
-Tensors and Einsum
-#######################
+#####################
+Lösung / Bearbeitung
+#####################
 
 .. contents:: Inhaltsverzeichnis
    :local:
@@ -11,7 +11,7 @@ Tensors and Einsum
 Einleitung
 ==========
 
-Dieses Kapitel dokumentiert die Bearbeitung des ersten Assignments:
+Dieses Kapitel dokumentiert unsere Lösung des ersten Assignments:
 *Tensors and Einsum*. Ziel ist die Implementierung grundlegender
 Tensor-Operationen in Python/PyTorch – vom Dot Product über
 Matrix-Multiplikation bis hin zu komplexeren Einsum-Kontraktionen.
@@ -30,22 +30,22 @@ Task 2: Matrix-Matrix Multiplication
 
 *TODO: Implementierungsbeschreibung ergänzen.*
 
-Task 3: Einsum ``acsxp, bspy -> abcxy``
-=========================================
+Task 3: Einsum
+===============
 
 .. Beschreibt die Implementierung von einsum_loops und einsum_gemm.
 
 *TODO: Implementierungsbeschreibung ergänzen.*
 
 Ergebnisse & Tests
-==================
+===================
 
 .. Zeigt Testergebnisse und eventuelle Laufzeitvergleiche.
 
 *TODO: Testergebnisse einfügen.*
 
 Beiträge
-========
+=========
 
 .. list-table::
    :header-rows: 1

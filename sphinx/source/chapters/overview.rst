@@ -5,9 +5,9 @@ Overview
 Das MLA-Projekt ist ein semesterbegleitendes Projekt im Rahmen des Kurses
 *Machine Learning Accelerators* an der Friedrich-Schiller-Universität Jena.
 
-.. todo::
-
-   Projektbeschreibung hier ergänzen.
+Ziel des Projekts ist die schrittweise Auseinandersetzung mit Tensor-Operationen,
+Einsum-Kontraktionen und der Beschleunigung von Machine-Learning-Workloads
+mittels PyTorch und GPU-Computing.
 
 Team
 ====
@@ -29,11 +29,12 @@ Team
 Tech-Stack
 ==========
 
-.. todo::
-
-   Tech-Stack hier ergänzen (Sprache, Frameworks, Build-System, etc.).
+* **Sprache:** Python 3
+* **ML-Framework:** PyTorch
+* **Benutzer-Dokumentation:** Sphinx mit Read-the-Docs-Theme
+* **Versionskontrolle:** Git
 
 Projekt-Repository
 ==================
 
-Zu finden in Git-Hub: https://github.com/Intelligence420/mla
+Zu finden auf GitHub: https://github.com/Intelligence420/mla

@@ -1,0 +1,7 @@
+# Dokumentation (Sphinx) — lokal & remote
+sphinx
+sphinx_rtd_theme
+
+# ML-Framework — nur auf dem Uni-Rechner (GPU) nötig
+torch
+sympy

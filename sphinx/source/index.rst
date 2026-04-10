@@ -8,9 +8,9 @@
 .. toctree::
    :hidden:
    :numbered:
-   :maxdepth: 2
+   :maxdepth: 3
    :caption: Assignments
 
-   chapters/01_tensors_and_einsum
+   chapters/01_tensors_and_einsum/index
 
 .. include:: chapters/overview.rst
