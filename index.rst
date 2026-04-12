@@ -15,3 +15,5 @@ documentation for details.
    :maxdepth: 2
    :caption: Contents:
 
+   assignments/01_assignment/assignment_01
+   assignments/01_assignment/report_01
