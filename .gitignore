@@ -1,2 +1,16 @@
 /.idea/
-/.venv/
+
+# Virtual Environment
+.venv/
+
+# Generierte Sphinx-Dokumentation
+sphinx/build/
+
+# Python-Artefakte
+__pycache__/
+*.pyc
+
+# Moritz Dateien
+WORKFLOW.md
+CLAUDE.md
+SETUP.md

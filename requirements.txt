@@ -1,2 +1,7 @@
-torch==2.11.0
-sphinx==8.2.3
+# Dokumentation (Sphinx) — lokal & remote
+sphinx
+sphinx_rtd_theme
+
+# ML-Framework — nur auf dem Uni-Rechner (GPU) nötig
+torch
+sympy
