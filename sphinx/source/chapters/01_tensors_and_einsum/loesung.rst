@@ -1,8 +1,8 @@
 .. _ch01_loesung:
 
-#####################
-Loesung / Bearbeitung
-#####################
+#######################
+Lösung und Bearbeitung
+#######################
 
 .. contents:: Inhaltsverzeichnis
    :local:
@@ -11,9 +11,9 @@ Loesung / Bearbeitung
 Einleitung
 ==========
 
-Dieses Kapitel dokumentiert unsere Loesung des ersten Assignments:
+Dieses Kapitel dokumentiert unsere Lösung des ersten Assignments:
 *Tensors and Einsum*. Ziel ist die Implementierung grundlegender
-Tensor-Operationen in Python/PyTorch -- vom Dot Product ueber
+Tensor-Operationen in Python/PyTorch – vom Dot Product über
 Matrix-Multiplikation bis hin zu komplexeren Einsum-Kontraktionen.
 
 Task 1: Dot Product
@@ -32,8 +32,8 @@ ist definiert als:
 Implementierung
 ---------------
 
-Die Funktion ``dot_product(a, b)`` iteriert mit einer for-Schleife ueber alle Elemente
-der Eingabevektoren und akkumuliert die elementweisen Produkte:
+Die Funktion ``dot_product(a, b)`` iteriert mit einer for-Schleife über alle
+Elemente der Eingabevektoren und akkumuliert die elementweisen Produkte:
 
 .. code-block:: python
 
@@ -43,8 +43,8 @@ der Eingabevektoren und akkumuliert die elementweisen Produkte:
            result += a[i] * b[i]
        return result
 
-Die Funktion ist fuer beliebige Vektorlaengen geeignet, da ``a.size()[0]`` die Laenge
-dynamisch bestimmt. Die Korrektheit wird gegen ``torch.dot`` geprueft.
+Die Funktion ist für beliebige Vektorlängen geeignet, da ``a.size()[0]`` die
+Länge dynamisch bestimmt. Die Korrektheit wird gegen ``torch.dot`` geprüft.
 
 Task 2: Matrix-Matrix Multiplication
 ======================================
@@ -52,7 +52,7 @@ Task 2: Matrix-Matrix Multiplication
 Aufgabenstellung
 ----------------
 
-Das Matrixprodukt :math:`C = A \cdot B` fuer
+Das Matrixprodukt :math:`C = A \cdot B` für
 :math:`A \in \mathbb{R}^{m \times k}`,
 :math:`B \in \mathbb{R}^{k \times n}` ist elementweise definiert als:
 
@@ -78,16 +78,16 @@ die Summationsformel umsetzen:
                    C[i, j] += A[i, l] * B[l, j]
        return C
 
-Die aeusseren Schleifen iterieren ueber die Zeilen von :math:`A` (Index i) und die
-Spalten von :math:`B` (Index j). Die innere Schleife (Index l) summiert die
-Produkte entlang der gemeinsamen Dimension k.
+Die äußeren Schleifen iterieren über die Zeilen von :math:`A` (Index i) und
+die Spalten von :math:`B` (Index j). Die innere Schleife (Index l) summiert
+die Produkte entlang der gemeinsamen Dimension k.
 
 Implementierung: ``matmul_dot``
 -------------------------------
 
-Die zweite Variante nutzt die bereits implementierte ``dot_product``-Funktion wieder.
-Jedes Element :math:`c_{ij}` wird als Skalarprodukt der i-ten Zeile von :math:`A`
-mit der j-ten Spalte von :math:`B` berechnet:
+Die zweite Variante nutzt die bereits implementierte ``dot_product``-Funktion
+wieder. Jedes Element :math:`c_{ij}` wird als Skalarprodukt der i-ten Zeile
+von :math:`A` mit der j-ten Spalte von :math:`B` berechnet:
 
 .. code-block:: python
 
@@ -100,8 +100,9 @@ mit der j-ten Spalte von :math:`B` berechnet:
                C[i, j] = dot_product(A[i, :], B[:, j])
        return C
 
-Durch die Verwendung von Slicing (``A[i, :]`` und ``B[:, j]``) werden 1D-Views
-auf die Eingabematrizen erzeugt, die direkt an ``dot_product`` uebergeben werden.
+Durch die Verwendung von Slicing (``A[i, :]`` und ``B[:, j]``) werden
+1D-Views auf die Eingabematrizen erzeugt, die direkt an ``dot_product``
+übergeben werden.
 
 Task 3: Einsum ``acsxp, bspy -> abcxy``
 =========================================
@@ -122,14 +123,15 @@ Die Einsum-Operation ``acsxp, bspy -> abcxy`` berechnet:
 
    C_{abcxy} = \sum_{s} \sum_{p} A_{acsxp} \cdot B_{bspy}
 
-Die Indizes s und p werden kontrahiert (summiert), waehrend a, b, c, x, y
+Die Indizes s und p werden kontrahiert (summiert), während a, b, c, x, y
 als freie Indizes im Ergebnis verbleiben.
-Feste Tensorgroessen: ``A: (2, 4, 5, 4, 3)``, ``B: (3, 5, 3, 5)``, ``C: (2, 3, 4, 4, 5)``.
+Feste Tensorgrößen: ``A: (2, 4, 5, 4, 3)``, ``B: (3, 5, 3, 5)``,
+``C: (2, 3, 4, 4, 5)``.
 
 Implementierung: ``einsum_loops``
 ---------------------------------
 
-Die erste Variante iteriert explizit ueber alle sieben Indexdimensionen
+Die erste Variante iteriert explizit über alle sieben Indexdimensionen
 (a, b, c, x, y, s, p):
 
 .. code-block:: python
@@ -148,22 +150,25 @@ Die erste Variante iteriert explizit ueber alle sieben Indexdimensionen
                                    C[a, b, c, x, y] += A[a, c, s, x, p] * B[b, s, p, y]
        return C
 
-Die fuenf aeusseren Schleifen (a, b, c, x, y) addressieren jedes Element des
-Ergebnistensors. Die beiden inneren Schleifen (s, p) fuehren die Kontraktion durch.
+Die fünf äußeren Schleifen (a, b, c, x, y) adressieren jedes Element des
+Ergebnistensors. Die beiden inneren Schleifen (s, p) führen die Kontraktion
+durch.
 
 Implementierung: ``einsum_gemm``
 --------------------------------
 
-Die zweite Variante reduziert die innere Berechnung auf eine Matrixmultiplikation (GEMM).
-Die Kontraktion ueber p bei festem s entspricht dem Matrixprodukt:
+Die zweite Variante reduziert die innere Berechnung auf eine
+Matrixmultiplikation (GEMM). Die Kontraktion über p bei festem s entspricht
+dem Matrixprodukt:
 
 .. math::
 
    C_{abcxy} \mathrel{+}= \underbrace{A_{acs\cdot\cdot}}_{x \times p} \;\cdot\; \underbrace{B_{bs\cdot\cdot}}_{p \times y}
 
 Durch Slicing mit ``A[a, c, s, :, :]`` (Shape :math:`x \times p`) und
-``B[b, s, :, :]`` (Shape :math:`p \times y`) ergibt sich ein :math:`x \times y`
-Matrixprodukt, das ueber alle Werte von s akkumuliert wird:
+``B[b, s, :, :]`` (Shape :math:`p \times y`) ergibt sich ein
+:math:`x \times y` Matrixprodukt, das über alle Werte von s akkumuliert
+wird:
 
 .. code-block:: python
 
@@ -179,19 +184,19 @@ Matrixprodukt, das ueber alle Werte von s akkumuliert wird:
        return C
 
 Diese Variante ist deutlich effizienter als ``einsum_loops``, da die innerste
-Berechnung durch PyTorchs optimierte Matrixmultiplikation (``@``-Operator) ersetzt
-wird und die zwei innersten Schleifen (x und y sowie p) entfallen.
+Berechnung durch PyTorchs optimierte Matrixmultiplikation (``@``-Operator)
+ersetzt wird und die zwei innersten Schleifen (x und y sowie p) entfallen.
 
 Verifikation
 ============
 
-Alle Implementierungen werden gegen die PyTorch-Referenzfunktionen geprueft:
+Alle Implementierungen werden gegen die PyTorch-Referenzfunktionen geprüft:
 
-* **Task 1:** ``dot_product`` vs. ``torch.dot`` -- bestanden
-* **Task 2:** ``matmul_loops`` und ``matmul_dot`` vs. ``torch.matmul`` -- bestanden
-* **Task 3:** ``einsum_loops`` und ``einsum_gemm`` vs. ``torch.einsum`` -- bestanden
+* **Task 1:** ``dot_product`` vs. ``torch.dot`` – bestanden
+* **Task 2:** ``matmul_loops`` und ``matmul_dot`` vs. ``torch.matmul`` – bestanden
+* **Task 3:** ``einsum_loops`` und ``einsum_gemm`` vs. ``torch.einsum`` – bestanden
 
-Beitraege
+Beiträge
 =========
 
 .. list-table::

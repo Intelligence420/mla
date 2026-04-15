@@ -1,1 +1,1 @@
-git@github.com:Intelligence420/mla.git
+https://github.com/Intelligence420/mla

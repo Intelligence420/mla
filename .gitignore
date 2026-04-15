@@ -10,7 +10,11 @@ sphinx/build/
 __pycache__/
 *.pyc
 
+# Abgabe-Archive (vom scripts/create_submission.sh erzeugt)
+/submission_*.tar.xz
+
 # Moritz Dateien
 WORKFLOW.md
 CLAUDE.md
 SETUP.md
+scripts/
