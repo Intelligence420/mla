@@ -13,6 +13,8 @@ def dot_product(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
     result = torch.tensor(0.0)
     # TODO: implement using a for loop
+    for i in range(a.size()[0]):
+        result += a[i] * b[i]
 
     return result
 
@@ -31,6 +33,10 @@ def matmul_loops(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     
     C = torch.zeros(m, n)
     # TODO: implement using three nested for loops
+    for i in range(m):
+        for j in range(n):
+            for l in range(k):
+                C[i, j] += A[i, l] * B[l, j]
 
     return C
 
@@ -45,6 +51,9 @@ def matmul_dot(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     
     C = torch.zeros(m, n)
     # TODO: implement using two for loops and calls to dot_product
+    for i in range(m):
+        for j in range(n):
+            C[i, j] = dot_product(A[i, :], B[:, j])
 
     return C
 
@@ -65,6 +74,14 @@ def einsum_loops(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
 
     C = torch.zeros(size_a, size_b, size_c, size_x, size_y)
     # TODO: implement using for loops over all seven index dimensions
+    for a in range(size_a):
+        for b in range(size_b):
+            for c in range(size_c):
+                for x in range(size_x):
+                    for y in range(size_y):
+                        for s in range(size_s):
+                            for p in range(size_p):
+                                C[a, b, c, x, y] += A[a, c, s, x, p] * B[b, s, p, y]
 
     return C
 
@@ -81,6 +98,11 @@ def einsum_gemm(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
 
     C = torch.zeros(size_a, size_b, size_c, size_x, size_y)
     # TODO: implement with for loops over a, b, c, s and a matmul for the inner GEMM
+    for a in range(size_a):
+        for b in range(size_b):
+            for c in range(size_c):
+                for s in range(size_s):
+                    C[a, b, c, :, :] += A[a, c, s, :, :] @ B[b, s, :, :]
 
     return C
 
