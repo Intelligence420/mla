@@ -5,5 +5,7 @@ sphinx_rtd_theme
 # ML-Framework — nur auf dem Uni-Rechner (GPU) nötig
 torch
 sympy
+
+cuda.tile
 cupy
-cuda-tile
+
