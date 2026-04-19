@@ -1,4 +1,4 @@
-.. _ch02_report:
+.. _ch02_loesung:
 
 #######################################
 Report: GPU Architecture and cuTile
