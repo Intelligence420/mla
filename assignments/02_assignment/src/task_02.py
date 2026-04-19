@@ -90,7 +90,7 @@ def row_sum(mat: torch.Tensor) -> torch.Tensor:
 
 
 # ===========================================================================
-# Verification
+# Verifikation
 # ===========================================================================
 
 def verify(M: int, K: int):
@@ -118,8 +118,8 @@ if __name__ == "__main__":
     # Verschiedene Shapes — auch nicht-Zweierpotenzen für K
     print(f"Task 2: Matrix Reduction Kernel")
     verify(64, 128)
-    verify(128, 100)    # Zero-Padding nötig
-    verify(256, 37)     # Zero-Padding nötig
+    verify(128, 100)    
+    verify(256, 37)     
     
     print(f"Theoretischer Einfluss von M und K auf Parallelisierung / pro-block load:")
     print(f"- M = #Zeilen: größere M  -> mehr Blöcke können parallel arbeiten ->bessere Ausnutzung der GPU ")
