@@ -30,3 +30,12 @@ def report_device_properties():
 
 if __name__ == "__main__":
     report_device_properties()
+
+"""Ergebnisse
+========================================
+ClockRate: 2418000
+L2CacheSize: 25165824
+MaxSharedMemoryPerMultiprocessor: 102400
+Einheiten sind: L2CacheSize, MaxSharedMemoryPerMultiprocessor → Bytes, ClockRate → kHz
+========================================
+"""

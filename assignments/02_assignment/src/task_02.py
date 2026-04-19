@@ -110,7 +110,8 @@ def verify(M: int, K: int):
     #   equal_nan (bool, optional) – if True, then two NaN s will be considered equal. Default: False
 
 
-    print(f"M={M}, K={K} → allclose={close}")
+    close = torch.allclose(result, expected, atol=1e-2, rtol=1e-2)
+    print(f"  M={M}, K={K} → allclose={close}")
     assert close, f"Mismatch for shape ({M}, {K})"
 
 
@@ -126,3 +127,15 @@ if __name__ == "__main__":
     print(f"               kleinere M -> Gpu unterausgelastet, je weniger, desto weniger 'lohnt' sich Parallelisierung")
     print(f"- K = #Spalten: größere K -> desto mehr Arbeit pro Zeile -> höherer pro-block load ")
     print(f"               kleinere K -> GPU unterausgelastet, da die Blöcke schnell fertig sind.")
+
+"""Ergebnisse
+Task 2: Matrix Reduction Kernel
+  M=64, K=128 → allclose=True
+  M=128, K=100 → allclose=True
+  M=256, K=37 → allclose=True
+Theoretischer Einfluss von M und K auf Parallelisierung / pro-block load:
+- M = #Zeilen: größere M  -> mehr Blöcke können parallel arbeiten ->bessere Ausnutzung der GPU 
+               kleinere M -> Gpu unterausgelastet, je weniger, desto weniger 'lohnt' sich Parallelisierung
+- K = #Spalten: größere K -> desto mehr Arbeit pro Zeile -> höherer pro-block load 
+               kleinere K -> GPU unterausgelastet, da die Blöcke schnell fertig sind.
+"""

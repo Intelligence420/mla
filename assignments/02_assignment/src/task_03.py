@@ -146,3 +146,12 @@ if __name__ == "__main__":
     verify()
     print("Task 3b: Benchmark")
     benchmark()
+
+"""Ergebnisse
+Task 3a: 4D Elementwise Addition — Verifikation
+  Variante 1 (tile KL, grid MN) passed
+  Variante 2 (tile MN, grid KL) passed
+Task 3b: Benchmark
+  Variante 1 (tile KL): 0.1393 ms
+  Variante 2 (tile MN): 0.4958 ms
+"""

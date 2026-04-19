@@ -26,8 +26,22 @@ def copy_kernel(src, dst,
     pid_n = ct.bid(1)
 
     # Tile laden und speichern
-    tile = ct.load(src, index=(pid_m, pid_n), shape=(tile_m, tile_n))
+    # padding_mode=ZERO nötig, da tile_n auf Zweierpotenz aufgerundet wird
+    tile = ct.load(src, index=(pid_m, pid_n), shape=(tile_m, tile_n),
+                   padding_mode=ct.PaddingMode.ZERO)
     ct.store(dst, index=(pid_m, pid_n), tile=tile)
+
+
+# ===========================================================================
+# Helper
+# ===========================================================================
+
+def next_power_of_2(n: int) -> int:
+    """Nächste Zweierpotenz >= n."""
+    p = 1
+    while p < n:
+        p *= 2
+    return p
 
 
 # ===========================================================================
@@ -39,10 +53,14 @@ def copy_matrix(src: torch.Tensor, tile_m: int, tile_n: int) -> torch.Tensor:
     M, N = src.shape
     dst = torch.empty_like(src)
 
+    # Tile-Dimensionen müssen Zweierpotenzen sein
+    tile_m_pow2 = next_power_of_2(tile_m)
+    tile_n_pow2 = next_power_of_2(tile_n)
+
     # Grid berechnen + Kernel starten
-    grid = (ct.cdiv(M, tile_m), ct.cdiv(N, tile_n), 1)
+    grid = (ct.cdiv(M, tile_m_pow2), ct.cdiv(N, tile_n_pow2), 1)
     ct.launch(torch.cuda.current_stream().cuda_stream,
-              grid, copy_kernel, (src, dst, tile_m, tile_n))
+              grid, copy_kernel, (src, dst, tile_m_pow2, tile_n_pow2))
 
     return dst
 
@@ -120,3 +138,18 @@ if __name__ == "__main__":
     verify()
     print("Task 4b: Bandwidth Benchmark")
     bandwidth_benchmark()
+
+"""Ergebnisse
+Task 4a: Copy Kernel — Verification
+  Copy kernel verified.
+Task 4b: Bandwidth Benchmark
+  N=  16  time=0.0048 ms  BW=27.48 GB/s
+  N=  32  time=0.0065 ms  BW=40.24 GB/s
+  N=  48  time=0.0063 ms  BW=62.25 GB/s
+  N=  64  time=0.0081 ms  BW=64.49 GB/s
+  N=  80  time=0.0082 ms  BW=80.06 GB/s
+  N=  96  time=0.0105 ms  BW=75.14 GB/s
+  N= 112  time=0.0106 ms  BW=86.67 GB/s
+  N= 128  time=0.0109 ms  BW=96.17 GB/s
+  Plot saved to bandwidth_plot.png
+  """
