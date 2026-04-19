@@ -24,11 +24,10 @@ def copy_kernel(src, dst,
     # Block-IDs für 2D-Grid
     pid_m = ct.bid(0)
     pid_n = ct.bid(1)
-    
-    # Tile laden und dann speichern speichern
+
+    # Tile laden und speichern
     tile = ct.load(src, index=(pid_m, pid_n), shape=(tile_m, tile_n))
     ct.store(dst, index=(pid_m, pid_n), tile=tile)
-    
 
 
 # ===========================================================================
@@ -40,7 +39,10 @@ def copy_matrix(src: torch.Tensor, tile_m: int, tile_n: int) -> torch.Tensor:
     M, N = src.shape
     dst = torch.empty_like(src)
 
-    
+    # Grid berechnen + Kernel starten
+    grid = (ct.cdiv(M, tile_m), ct.cdiv(N, tile_n), 1)
+    ct.launch(torch.cuda.current_stream().cuda_stream,
+              grid, copy_kernel, (src, dst, tile_m, tile_n))
 
     return dst
 
@@ -86,18 +88,35 @@ def bandwidth_benchmark():
         tile_n = N                            # tile_N = N (full width)
         src = torch.randn(M, N, dtype=torch.float16, device="cuda")
 
+        # Runtime messen
+        time_ms = triton.testing.do_bench(
+            lambda: copy_matrix(src, tile_m, tile_n))
+        time_s = time_ms / 1000.0
+
+        # Bandwidth berechnen
+        bw = 2 * M * N * element_size / (time_s * 1e9)
+        bandwidths.append(bw)
+        print(f"  N={N:4d}  time={time_ms:.4f} ms  BW={bw:.2f} GB/s")
+
+    # Plot erstellen
+    plt.figure(figsize=(8, 5))
+    plt.plot(ns, bandwidths, marker="o")
+    plt.xlabel("N (last dimension)")
+    plt.ylabel("Effective Bandwidth (GB/s)")
+    plt.title("Copy Kernel Bandwidth (M=2048, tile_M=64, tile_N=N)")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("bandwidth_plot.png", dpi=150)
+    plt.show()
+    print("  Plot saved to bandwidth_plot.png")
 
 
 # ===========================================================================
-# Task runner
+# Main
 # ===========================================================================
 
-def main():
+if __name__ == "__main__":
     print("Task 4a: Copy Kernel — Verification")
     verify()
     print("Task 4b: Bandwidth Benchmark")
     bandwidth_benchmark()
-
-
-if __name__ == "__main__":
-    main()
