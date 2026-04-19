@@ -25,10 +25,20 @@ def add_4d_tile_KL(A, B, C,
                    tile_k: ct.Constant[int],
                    tile_l: ct.Constant[int]):
     """Each block handles one (K, L) slice for a fixed (m, n) position."""
-    # Block-IDs -> Indizes in M- und N-Dimension
+    # Block-IDs → Indizes in M- und N-Dimension
     pid_m = ct.bid(0)
     pid_n = ct.bid(1)
 
+    # Tiles laden — ganzes (K, L)-Slice pro Block
+    a_tile = ct.load(A, index=(pid_m, pid_n, 0, 0),
+                    shape=(1, 1, tile_k, tile_l),
+                     padding_mode=ct.PaddingMode.ZERO)
+    b_tile = ct.load(B, index=(pid_m, pid_n, 0, 0),
+                    shape=(1, 1, tile_k, tile_l),
+                    padding_mode=ct.PaddingMode.ZERO)
+
+    # Elementweise addieren + speichern
+    ct.store(C, index=(pid_m, pid_n, 0, 0), tile=a_tile + b_tile)
 
 
 # ===========================================================================
@@ -40,11 +50,20 @@ def add_4d_tile_MN(A, B, C,
                    tile_m: ct.Constant[int],
                    tile_n: ct.Constant[int]):
     """Each block handles one (M, N) slice for a fixed (k, l) position."""
-    # Block-IDs -> Indizes in K- und L-Dimension
+    # Block-IDs → Indizes in K- und L-Dimension
     pid_k = ct.bid(0)
     pid_l = ct.bid(1)
 
+    # Tiles laden — ganzes (M, N)-Slice pro Block
+    a_tile = ct.load(A, index=(0, 0, pid_k, pid_l),
+                    shape=(tile_m, tile_n, 1, 1),
+                    padding_mode=ct.PaddingMode.ZERO)
+   b_tile = ct.load(B, index=(0, 0, pid_k, pid_l),
+                    shape=(tile_m, tile_n, 1, 1),
+                    padding_mode=ct.PaddingMode.ZERO)
 
+    # Elementweise addieren + speichern
+    ct.store(C, index=(0, 0, pid_k, pid_l), tile=a_tile + b_tile)
 
 
 # ===========================================================================
@@ -56,6 +75,11 @@ def add_4d_variant1(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     M, N, K, L = A.shape
     C = torch.empty_like(A)
 
+    # Grid + Tile-Größen setzen + Kernel starten
+    tile_k, tile_l = K, L  #(Zweierpotenzen bei M=16, N=128, K=16, L=128)
+    grid = (M, N, 1)
+    ct.launch(torch.cuda.current_stream().cuda_stream,
+             grid, add_4d_tile_KL, (A, B, C, tile_k, tile_l))
 
     return C
 
@@ -65,6 +89,11 @@ def add_4d_variant2(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     M, N, K, L = A.shape
     C = torch.empty_like(A)
 
+    # Grid + Tile-Größen setzen + Kernel starten
+    tile_m, tile_n = M, N  #(Zweierpotenzen bei M=16, N=128, K=16, L=128)
+    grid = (K, L, 1)
+    ct.launch(torch.cuda.current_stream().cuda_stream,
+            grid, add_4d_tile_MN, (A, B, C, tile_m, tile_n))
 
     return C
 
@@ -76,7 +105,7 @@ def add_4d_variant2(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
 def verify():
     """Check both variants against PyTorch native A + B."""
     M, N, K, L = 16, 128, 16, 128
-    A = torch.randn(M, N, K, L, dtype=torch.float16, device="cuda")
+    A = torch.randn(M, N, K, L, dtype=torch.float16, device="cuda") # zufällige zahlen
     B = torch.randn(M, N, K, L, dtype=torch.float16, device="cuda")
     expected = A + B
 
@@ -101,14 +130,14 @@ def benchmark():
     A = torch.randn(M, N, K, L, dtype=torch.float16, device="cuda")
     B = torch.randn(M, N, K, L, dtype=torch.float16, device="cuda")
 
-    # Laufzeit messen -> https://triton-lang.org/main/python-api/generated/triton.testing.do_bench.html
+    # Laufzeit messen: https://triton-lang.org/main/python-api/generated/triton.testing.do_bench.html 
     t1 = triton.testing.do_bench(lambda: add_4d_variant1(A, B))
     t2 = triton.testing.do_bench(lambda: add_4d_variant2(A, B))
     print(f"  Variante 1 (tile KL): {t1:.4f} ms")
     print(f"  Variante 2 (tile MN): {t2:.4f} ms")
-    
+    pass
 
-    
+
 # ===========================================================================
 # Main
 # ===========================================================================
