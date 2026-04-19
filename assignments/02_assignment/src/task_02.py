@@ -18,7 +18,7 @@ import torch
 @ct.kernel
 def row_sum_kernel(mat, output, tile_k: ct.Constant[int]):
     """Reduce one row of *mat* by summing along K."""
-    # Block-ID holen → jeder Block verarbeitet eine Zeile
+    # Block-ID holen -> jeder Block verarbeitet eine Zeile
     pid = ct.bid(0)
     # Bedeutung: "Gib mir meine Block-ID entlang Grid-Achse 0."
     # Oder nach Skript Bedeutung: "gets the 1D block ID"
