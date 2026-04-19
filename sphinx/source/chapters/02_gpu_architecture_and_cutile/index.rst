@@ -13,4 +13,4 @@ zu Bandbreiten-Benchmarks.
    :maxdepth: 1
 
    aufgabe
-   report
+   loesung
