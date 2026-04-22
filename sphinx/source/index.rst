@@ -13,5 +13,6 @@
 
    chapters/01_tensors_and_einsum/index
    chapters/02_gpu_architecture_and_cutile/index
+   chapters/03_matrix_multiplication_with_cutile/index
 
 .. include:: chapters/overview.rst
