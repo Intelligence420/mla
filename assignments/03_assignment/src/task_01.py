@@ -133,7 +133,7 @@ def benchmark():
 
     t_fp16 = triton.testing.do_bench(lambda: run_fp16(A16, B16))
     t_fp32 = triton.testing.do_bench(lambda: run_fp32(A32, B32))
-    speedup = t_fp32 / t_fp16
+    speedup = t_fp32 / t_fp16 
 
     print(f"  kernel_fp16: {t_fp16:.4f} ms")
     print(f"  kernel_fp32: {t_fp32:.4f} ms")
@@ -151,5 +151,5 @@ if __name__ == "__main__":
     benchmark()
 
 """Ergebnisse
-(wird nach Messung auf dem Uni-Rechner ausgefüllt)
+
 """
