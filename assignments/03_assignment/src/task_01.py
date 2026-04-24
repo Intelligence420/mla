@@ -151,5 +151,12 @@ if __name__ == "__main__":
     benchmark()
 
 """Ergebnisse
-
+(.venv) mla08@flambe:~/MLA/mla$ python3 assignments/03_assignment/src/task_01.py 
+Task 1a: FP16 vs FP32 — Verifikation
+  kernel_fp16 → allclose=True
+  kernel_fp32 → allclose=True
+Task 1b: FP16 vs FP32 — Benchmark
+  kernel_fp16: 0.0336 ms
+  kernel_fp32: 1.7305 ms
+  Speedup FP16 über FP32: 51.52x
 """

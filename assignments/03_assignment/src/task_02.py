@@ -124,5 +124,10 @@ if __name__ == "__main__":
     verify()
 
 """Ergebnisse
-(wird nach Messung auf dem Uni-Rechner ausgefüllt)
+(.venv) mla08@flambe:~/MLA/mla$ python3 assignments/03_assignment/src/task_02.py 
+Task 2: Simple Matmul Kernel — Verifikation
+  (M,N,K)=(256,256,256), tile=(64,64,64) → allclose=True
+  (M,N,K)=(512,256,128), tile=(64,64,64) → allclose=True
+  (M,N,K)=(300,200,100), tile=(64,64,64) → allclose=True
+  (M,N,K)=(129,257,65), tile=(32,64,32) → allclose=True
 """
