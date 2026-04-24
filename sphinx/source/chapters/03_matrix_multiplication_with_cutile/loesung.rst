@@ -79,85 +79,159 @@ Die FP32-Variante ist strukturell identisch. ``C`` wird in beiden Fällen
 als FP32-Tensor alloziert, weil ``ct.mma`` den Akkumulator stets in FP32
 hält.
 
+Ergänzung aus Interesse: FP8 und FP64
+--------------------------------------
+
+Da ``ct.mma`` laut `cuTile-Doku
+<https://docs.nvidia.com/cuda/cutile-python/generated/cuda.tile.mma.html>`_
+auch FP8 (E4M3) und FP64 als Input-Datentypen akzeptiert, haben wir die
+beiden Pflicht-Varianten um zwei zusätzliche Kernels ergänzt – identisch
+aufgebaut, nur mit anderem Input-/Akkumulator-dtype:
+
+* ``kernel_fp8``  – Inputs in ``torch.float8_e4m3fn``, Akkumulator FP32
+* ``kernel_fp64`` – Inputs und Akkumulator in FP64
+
+Das erlaubt einen Vergleich über die gesamte Präzisionsskala, mit der
+Blackwell-Tensor-Cores umgehen können.
+
 Verifikation
 -------------
 
-Beide Kernels bestehen ``torch.allclose`` gegen ``torch.matmul``. Für den
-FP16-Kernel wurde die Toleranz großzügiger gewählt (``atol=1e-1``,
-``rtol=1e-2``), da FP16 über 4096 Akkumulationen bereits sichtbare
-Rundungsfehler anhäuft:
+Alle vier Kernels bestehen ``torch.allclose`` gegen ``torch.matmul``.
+Die Toleranzen wurden pro Präzision skaliert (FP8 hat nur 3 Mantissa-Bits,
+daher sehr großzügig; FP64 dagegen extrem scharf):
 
 .. code-block:: text
 
    Task 1a: FP16 vs FP32 — Verifikation
      kernel_fp16 → allclose=True
      kernel_fp32 → allclose=True
+   Task 1a-extra: FP8 und FP64 — Verifikation
+     kernel_fp8  → allclose=True
+     kernel_fp64 → allclose=True
 
 Erkenntnisse: Benchmark und Speedup
 ------------------------------------
 
-Gemessene Laufzeiten (``triton.testing.do_bench``, DGX Spark, Blackwell):
+Gemessene Laufzeiten (``triton.testing.do_bench``, DGX Spark, GB10):
 
 .. code-block:: text
 
-   Task 1b: FP16 vs FP32 — Benchmark
-     kernel_fp16: 0.0336 ms
-     kernel_fp32: 1.7305 ms
-     Speedup FP16 über FP32: 51.52x
+   Task 1b: FP8 / FP16 / FP32 / FP64 — Benchmark
+     kernel_fp8 : 0.0235 ms  (  1.425 TFLOPS,  72.75x vs FP32)
+     kernel_fp16: 0.0274 ms  (  1.225 TFLOPS,  62.54x vs FP32)
+     kernel_fp32: 1.7128 ms  (  0.020 TFLOPS,   1.00x vs FP32)
+     kernel_fp64: 9.5736 ms  (  0.004 TFLOPS,   0.18x vs FP32)
 
 Umgerechnet in TFLOPS (:math:`2 \cdot M \cdot N \cdot K \approx 33{,}55\,\text{MFLOP}`):
 
 .. list-table::
    :header-rows: 1
-   :widths: 25 25 25 25
+   :widths: 20 20 25 20 15
 
    * - Kernel
      - Laufzeit
      - Durchsatz
-     - Speedup
+     - Vergleich zu FP32
+     - Mantissa-Bits
+   * - ``kernel_fp8``
+     - 0,024 ms
+     - 1,43 TFLOPS
+     - **72,8× schneller**
+     - 3
    * - ``kernel_fp16``
-     - 0,0336 ms
-     - ≈ 1,0 TFLOPS
-     - **51,5×**
+     - 0,027 ms
+     - 1,23 TFLOPS
+     - **62,5× schneller**
+     - 10
    * - ``kernel_fp32``
-     - 1,7305 ms
-     - ≈ 0,019 TFLOPS
-     - 1×
+     - 1,713 ms
+     - 0,020 TFLOPS
+     - 1× (Referenz)
+     - 23
+   * - ``kernel_fp64``
+     - 9,574 ms
+     - 0,004 TFLOPS
+     - **5,6× langsamer**
+     - 52
 
-**Was bedeutet der 51×-Unterschied?**
+.. figure:: ../../../../assignments/03_assignment/src/tflops_vs_dtype.png
+   :align: center
+   :alt: Laufzeit und Durchsatz pro Datentyp
+   :width: 90%
 
-Der Sprung lässt sich fast vollständig über die GPU-Ausführungspfade
-erklären:
+   Links: Kernel-Laufzeit pro Datentyp (log-Skala). Rechts: Rechendurchsatz
+   in TFLOPS (log-Skala). Beide Achsen logarithmisch, weil die Spanne
+   über fast vier Größenordnungen geht.
 
-* Bei FP16-Inputs bindet ``ct.mma`` an die **Tensor Cores** der
-  Blackwell-SM. Tensor Cores führen pro SM-Takt ein ganzes Matrix-Tile
-  als Fused-Multiply-Add aus und erreichen damit für FP16 ein Vielfaches
-  des skalaren Durchsatzes.
-* Bei FP32-Inputs steht kein direkter Tensor-Core-Pfad zur Verfügung
-  (ohne expliziten TF32-Downcast). ``ct.mma`` fällt auf die regulären
-  **CUDA Cores** zurück, die elementweise multiplizieren und addieren.
-  Der pro-SM-Durchsatz ist dadurch um Größenordnungen geringer.
+.. admonition:: Kurz erklärt: SM und CTA
+   :class: note
 
-Das theoretisch zu erwartende Verhältnis zwischen FP16-Tensor-Core- und
-FP32-CUDA-Core-Durchsatz liegt bei Blackwell im Bereich ``32×–64×``. Die
-gemessenen ``51,5×`` liegen exakt in diesem Fenster.
+   Eine GPU besteht aus vielen **Streaming Multiprocessors (SMs)** – das
+   sind die eigentlichen Recheneinheiten. Der GB10 in der DGX Spark hat
+   davon 48 Stück. Ein Kernel-Launch verteilt Arbeit auf das Grid, und
+   jeder Grid-Block (ein **CTA**, *Cooperative Thread Array*) wird einem
+   SM zugewiesen und dort ausgeführt. Mit ``grid = (1, 1, 1)`` starten
+   wir also nur **ein CTA auf einem von 48 SMs** – der Rest der GPU
+   steht still.
 
-**Warum sind die absoluten TFLOPS so klein?**
+**Warum ist FP16 so viel schneller als FP32?**
 
-Mit ``grid = (1, 1, 1)`` läuft nur **ein CTA**, also nur **ein SM** von
-den rund 100 SMs der GPU. Der Rest der GPU steht still. Zusätzlich ist
-die Gesamtarbeit winzig (33 MFLOP) – bei FP16 sind das nur 34 µs, ein
-signifikanter Anteil davon geht an Kernel-Launch-Overhead. Die Messung
-zeigt daher die *Single-SM-Effizienz* des Tensor-Core-Pfads, nicht den
-Peak der GPU. Für realistische Peak-Zahlen braucht es das Größen- und
-Tile-Sweep aus Task 3.
+Jeder Blackwell-SM enthält zwei Arten von Recheneinheiten:
+
+* **Tensor Cores** – spezialisierte Hardware, die eine komplette
+  Matrix-Multiply-Accumulate-Operation auf einem kleinen Tile *in einem
+  Schritt* ausführt. Diese schnellen Pfade existieren aber nur für
+  *niedrigpräzise* Datentypen (FP8, FP16, BF16, TF32, INT8).
+* **CUDA Cores** – die klassischen skalaren Recheneinheiten, die
+  elementweise multiplizieren und addieren. Das ist der einzige Pfad
+  für "echtes" FP32 – und damit deutlich langsamer.
+
+Bei FP16-Inputs nutzt ``ct.mma`` die Tensor Cores und rechnet einen
+ganzen ``64×64×64``-Tile-Block in wenigen Takten. Bei FP32 gibt es
+keinen FP32-Tensor-Core-Pfad, daher läuft dieselbe Rechnung über die
+CUDA Cores – Schritt für Schritt.
+
+Zum Einordnen: Community-Peak-Messungen für dieselbe GPU
+[`NVIDIA Dev Forum, Thread 351993 <https://forums.developer.nvidia.com/t/detailed-compute-performance-metrics-for-dgx-spark/351993>`_]
+nennen für den GB10 rund **212 TFLOPS** Tensor-Core-Durchsatz bei FP16
+und offiziell **31 TFLOPS**
+[`DGX Spark Hardware Overview <https://docs.nvidia.com/dgx/dgx-spark/hardware.html>`_]
+bei FP32 über die CUDA-Cores. Das Peak-Verhältnis liegt damit bei ~7×.
+Unsere Messung zeigt ~62× – mehr, als das Peak erwarten ließe. Der Grund:
+Mit nur einem CTA wird die FP32-Variante zusätzlich durch Kernel-Latenz
+und sequenzielle CUDA-Core-Ausführung gebremst, während der
+Tensor-Core-Pfad auch auf einem einzelnen SM noch viel Durchsatz
+liefert. Die Zahl ist damit **keine Peak-Messung**, sondern ein
+Single-SM-Effizienzvergleich. Realistische GPU-weite Peak-Verhältnisse
+liefert erst der Sweep in Task 3.
+
+**Und was ist mit FP8 und FP64?**
+
+Zwei Beobachtungen sind interessant:
+
+* **FP8 ist nur ~1,16× schneller als FP16**, obwohl FP8-Werte halb so
+  viel Speicher brauchen. Das passt zu den Forum-Peak-Werten, die für
+  den GB10 fast identische Tensor-Core-Durchsätze bei FP16 und FP8
+  nennen (≈ 212 vs. 213 TFLOPS). Anders als auf Datacenter-Blackwell
+  (B100/B200) skaliert FP8 auf dem GB10 also **nicht** mit dem
+  Speicher-Ersparnis – der Rechenpfad ist derselbe, nur die
+  Speicherbandbreite halbiert sich. Bei unserem rechendominierten
+  Single-SM-Mikro-Benchmark bleibt davon wenig übrig.
+* **FP64 ist ~5,6× langsamer als FP32** – also fast 350× langsamer
+  als FP16. Consumer- und Workstation-Blackwell-Chips (einschließlich
+  GB10) haben einen stark reduzierten FP64-Pfad; FP64 ist hier vor
+  allem für numerische Verifikation gedacht, nicht für produktive
+  Rechnungen. Auf Datacenter-Blackwell sieht das ganz anders aus
+  (dedizierte FP64-Tensor-Cores).
 
 **Praktische Konsequenz**
 
-Für Tensor-Core-freundliche Workloads lohnt sich der Wechsel auf FP16
-(bzw. BF16/FP8) fast immer, solange die numerische Präzision mit
-FP32-Akkumulation ausreichend bleibt – was bei Matmul mit ``K = 4096``
-typischerweise der Fall ist (siehe Verifikation).
+Für Matmul-Workloads auf dem GB10 lohnt sich der Wechsel auf FP16 fast
+immer, solange die FP32-Akkumulation die Präzision trägt (bei
+``K = 4096`` unproblematisch, siehe Verifikation). FP8 bringt auf dieser
+GPU keinen nennenswerten Zusatzgewinn, FP64 ist für produktive
+Rechnungen ungeeignet.
 
 Task 2: Simple Matrix Multiplication Kernel
 ============================================
@@ -378,9 +452,9 @@ Verifikation – Gesamtübersicht
      - Referenz
      - Ergebnis
    * - 1
-     - ``kernel_fp16`` und ``kernel_fp32``
+     - ``kernel_fp8`` / ``fp16`` / ``fp32`` / ``fp64``
      - ``torch.matmul``
-     - ✓ allclose, Speedup 51,5×
+     - ✓ allclose, FP16 62,5× schneller als FP32
    * - 2
      - Matmul für verschiedene Shapes
      - ``torch.matmul``
