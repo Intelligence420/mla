@@ -271,5 +271,18 @@ if __name__ == "__main__":
     plot(times)
 
 """Ergebnisse
-(wird nach dem nächsten Testlauf ausgefüllt)
+(.venv) mla08@flambe:~/MLA/mla$ python3 assignments/03_assignment/src/task_01.py 
+Task 1a: FP16 vs FP32 — Verifikation
+  kernel_fp16 → allclose=True
+  kernel_fp32 → allclose=True
+Task 1a-extra: FP8 und FP64 — Verifikation
+  kernel_fp8  → allclose=True
+  kernel_fp64 → allclose=True
+Task 1b: FP8 / FP16 / FP32 / FP64 — Benchmark
+  kernel_fp8 : 0.0235 ms  (  1.425 TFLOPS,  72.75x vs FP32)
+  kernel_fp16: 0.0274 ms  (  1.225 TFLOPS,  62.54x vs FP32)
+  kernel_fp32: 1.7128 ms  (  0.020 TFLOPS,   1.00x vs FP32)
+  kernel_fp64: 9.5736 ms  (  0.004 TFLOPS,   0.18x vs FP32)
+Task 1b: Plot
+  Plot gespeichert: /home/mla08/MLA/mla/assignments/03_assignment/src/tflops_vs_dtype.png
 """
