@@ -429,8 +429,8 @@ Beiträge
 
    * - Person
      - Beitrag
-   * - Oliver Dietzel
-     - Implementierung aller cuTile-Kernels (Task 1–4),
-       Verifikation und Benchmarks, Lösungsdokumentation
    * - Moritz Martin
-     - Projektstruktur, Sphinx-Dokumentation, Build-Setup
+     - Implementierung aller cuTile-Kernels (Task 1–4),
+       Verifikation und Benchmarks, Bandwidth-Plot
+   * - Oliver Dietzel
+     - Sphinx-Dokumentation (Report), GitHub Actions CI/CD, Requirements

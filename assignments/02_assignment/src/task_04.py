@@ -99,7 +99,7 @@ def bandwidth_benchmark():
     tile_m = 64
     element_size = 2                          # FP16 = 2 Bytes
 
-    ns = list(range(16, 129, 16))             # [16, 32, 48, …, 128]
+    ns = list(range(16, 10000, 16))             # [16, 32, 48, …, 128]
     bandwidths = []
 
     for N in ns:
