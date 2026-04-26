@@ -269,11 +269,10 @@ Tile-Größe sind, liegen die Rand-Tiles teilweise außerhalb der
 Matrix. Zwei cuTile-Mechanismen lösen das ohne explizites Masking:
 
 * ``ct.load(..., padding_mode=ct.PaddingMode.ZERO)`` füllt fehlende
-  Elemente am Rand mit ``0``. Im MAC-Schritt (:math:`0 \cdot x + \text{acc}`)
-  sind diese Nullen neutral und verfälschen das Ergebnis nicht.
+  Elemente am Rand mit ``0``. 
 * ``ct.store`` ignoriert out-of-bounds Elemente von Rand-Tiles automatisch
-  (laut cuTile-Doku). Dadurch schreiben wir nie über die Grenzen von
-  ``C`` hinaus.
+  (laut cuTile-Doku). 
+  -> wir schreiben wir nie über die Grenzen von ``C`` hinaus.
 
 Verifikation
 -------------
@@ -326,22 +325,31 @@ bestätigt:
 **Warum kommen wir ohne explizite Masken aus?**
 
 Im Gegensatz zu Triton, wo ``tl.store(..., mask=...)`` nötig ist,
-übernimmt cuTile das Boundary-Handling auf Framework-Ebene. Das spart
-Boilerplate und hält den Kernel auf dem eigentlichen Rechenkern fokussiert.
+übernimmt cuTile das Boundary-Handling auf Framework-Ebene. 
 Wichtig bleibt, den *Load* explizit mit ``PaddingMode.ZERO`` zu
 annotieren – ohne Padding-Mode wäre der Wert außerhalb der Matrix
-undefiniert und würde den Akkumulator beim MAC vergiften.
+undefiniert.
 
 **Welche Freiheitsgrade bleiben?**
 
 Der Kernel ist bewusst schlicht gehalten:
 
-* keine Shared-Memory-Reuse zwischen Tiles,
-* keine Block-ID-Optimierung für L2-Reuse (kommt in Task 4),
-* keine spezialisierten Tile-Größen pro Shape (kommt im Sweep in Task 3).
+* keine Shared-Memory-Reuse zwischen Tiles
 
-Das macht ihn zur geeigneten Referenzimplementierung, gegen die die
-beiden folgenden Tasks benchmarkt werden.
+  * jeder Block lädt seine A- und B-Tiles in jeder K-Iteration frisch aus
+    dem globalen Speicher (``ct.load`` in der K-Schleife)
+  * benachbarte Blöcke teilen Zeilen von A bzw. Spalten von B nicht aktiv
+    untereinander – kein Double-Buffering, kein kooperatives Laden. 
+
+* keine Block-ID-Optimierung für L2-Reuse
+
+  * stures Row-Major-Mapping ``pid_m = bid // num_tiles_n``,
+    ``pid_n = bid % num_tiles_n`` – 
+  * kein L2-freundliches Swizzling. Nicht so wie in Task 4
+
+* keine spezialisierten Tile-Größen pro Shape
+
+  * ``tile_m``, ``tile_n``, ``tile_k`` sind reine Aufruf-Parameter, wird nicht abgleitet aus ``(M, N, K)``
 
 Task 3: Benchmarking the Matrix Multiplication Kernel
 ======================================================
