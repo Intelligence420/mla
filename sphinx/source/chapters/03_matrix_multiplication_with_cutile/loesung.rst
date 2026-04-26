@@ -61,10 +61,6 @@ K-Iterationen:
            acc = ct.mma(a_tile, b_tile, acc)
        ct.store(C, index=(0, 0), tile=acc)
 
-Der FP32-Kernel ist bis auf den Input-dtype identisch. Der Unterschied
-liegt ausschließlich in den Datentypen der Tensoren, die der Host
-übergibt – die Kernel-Logik ist dieselbe.
-
 **Host-Funktionen**
 
 .. code-block:: python
@@ -75,9 +71,7 @@ liegt ausschließlich in den Datentypen der Tensoren, die der Host
                  (1, 1, 1), kernel_fp16, (A, B, C))
        return C
 
-Die FP32-Variante ist strukturell identisch. ``C`` wird in beiden Fällen
-als FP32-Tensor alloziert, weil ``ct.mma`` den Akkumulator stets in FP32
-hält.
+Die FP32-Variante ist strukturell identisch. Akkumulator in beiden Fällen FP32.
 
 Ergänzung aus Interesse: FP8 und FP64
 --------------------------------------
@@ -91,8 +85,6 @@ aufgebaut, nur mit anderem Input-/Akkumulator-dtype:
 * ``kernel_fp8``  – Inputs in ``torch.float8_e4m3fn``, Akkumulator FP32
 * ``kernel_fp64`` – Inputs und Akkumulator in FP64
 
-Das erlaubt einen Vergleich über die gesamte Präzisionsskala, mit der
-Blackwell-Tensor-Cores umgehen können.
 
 Verifikation
 -------------
@@ -164,20 +156,9 @@ Umgerechnet in TFLOPS (:math:`2 \cdot M \cdot N \cdot K \approx 33{,}55\,\text{M
    in TFLOPS (log-Skala). Beide Achsen logarithmisch, weil die Spanne
    über fast vier Größenordnungen geht.
 
-.. admonition:: Kurz erklärt: SM und CTA
-   :class: note
-
-   Eine GPU besteht aus vielen **Streaming Multiprocessors (SMs)** – das
-   sind die eigentlichen Recheneinheiten. Der GB10 in der DGX Spark hat
-   davon 48 Stück. Ein Kernel-Launch verteilt Arbeit auf das Grid, und
-   jeder Grid-Block (ein **CTA**, *Cooperative Thread Array*) wird einem
-   SM zugewiesen und dort ausgeführt. Mit ``grid = (1, 1, 1)`` starten
-   wir also nur **ein CTA auf einem von 48 SMs** – der Rest der GPU
-   steht still.
-
 **Warum ist FP16 so viel schneller als FP32?**
 
-Jeder Blackwell-SM enthält zwei Arten von Recheneinheiten:
+Das liegt an den 2 Arten von Recheneinheiten, die ein Blackwell-SM enthält:
 
 * **Tensor Cores** – spezialisierte Hardware, die eine komplette
   Matrix-Multiply-Accumulate-Operation auf einem kleinen Tile *in einem
@@ -192,44 +173,17 @@ ganzen ``64×64×64``-Tile-Block in wenigen Takten. Bei FP32 gibt es
 keinen FP32-Tensor-Core-Pfad, daher läuft dieselbe Rechnung über die
 CUDA Cores – Schritt für Schritt.
 
-Zum Einordnen: Community-Peak-Messungen für dieselbe GPU
-[`NVIDIA Dev Forum, Thread 351993 <https://forums.developer.nvidia.com/t/detailed-compute-performance-metrics-for-dgx-spark/351993>`_]
-nennen für den GB10 rund **212 TFLOPS** Tensor-Core-Durchsatz bei FP16
-und offiziell **31 TFLOPS**
-[`DGX Spark Hardware Overview <https://docs.nvidia.com/dgx/dgx-spark/hardware.html>`_]
-bei FP32 über die CUDA-Cores. Das Peak-Verhältnis liegt damit bei ~7×.
-Unsere Messung zeigt ~62× – mehr, als das Peak erwarten ließe. Der Grund:
-Mit nur einem CTA wird die FP32-Variante zusätzlich durch Kernel-Latenz
-und sequenzielle CUDA-Core-Ausführung gebremst, während der
-Tensor-Core-Pfad auch auf einem einzelnen SM noch viel Durchsatz
-liefert. Die Zahl ist damit **keine Peak-Messung**, sondern ein
-Single-SM-Effizienzvergleich. Realistische GPU-weite Peak-Verhältnisse
-liefert erst der Sweep in Task 3.
-
-**Und was ist mit FP8 und FP64?**
-
-Zwei Beobachtungen sind interessant:
+**Zwei Beobachtungen sind interessant:**
 
 * **FP8 ist nur ~1,16× schneller als FP16**, obwohl FP8-Werte halb so
-  viel Speicher brauchen. Das passt zu den Forum-Peak-Werten, die für
-  den GB10 fast identische Tensor-Core-Durchsätze bei FP16 und FP8
-  nennen (≈ 212 vs. 213 TFLOPS). Anders als auf Datacenter-Blackwell
-  (B100/B200) skaliert FP8 auf dem GB10 also **nicht** mit dem
-  Speicher-Ersparnis – der Rechenpfad ist derselbe, nur die
-  Speicherbandbreite halbiert sich. Bei unserem rechendominierten
-  Single-SM-Mikro-Benchmark bleibt davon wenig übrig.
+  viel Speicher brauchen. 
 * **FP64 ist ~5,6× langsamer als FP32** – also fast 350× langsamer
-  als FP16. Consumer- und Workstation-Blackwell-Chips (einschließlich
-  GB10) haben einen stark reduzierten FP64-Pfad; FP64 ist hier vor
-  allem für numerische Verifikation gedacht, nicht für produktive
-  Rechnungen. Auf Datacenter-Blackwell sieht das ganz anders aus
-  (dedizierte FP64-Tensor-Cores).
+  als FP16. 
 
 **Praktische Konsequenz**
 
 Für Matmul-Workloads auf dem GB10 lohnt sich der Wechsel auf FP16 fast
-immer, solange die FP32-Akkumulation die Präzision trägt (bei
-``K = 4096`` unproblematisch, siehe Verifikation). FP8 bringt auf dieser
+immer, solange die FP32-Akkumulation die Präzision trägt. FP8 bringt auf dieser
 GPU keinen nennenswerten Zusatzgewinn, FP64 ist für produktive
 Rechnungen ungeeignet.
 
