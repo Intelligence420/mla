@@ -1,13 +1,13 @@
 .. _ch03:
 
-#######################################
+########################################
 Matrix Multiplication with cuTile
-#######################################
+########################################
 
-In diesem Assignment werden tile-basierte Matrix-Multiplikations-Kernels mit
-cuTile implementiert und optimiert. Untersucht wird der Einfluss von numerischer
-Präzision (FP16 vs. FP32), Tile-Strategien sowie Speicherzugriffsmustern
-(Block-Swizzling für L2-Cache-Reuse) auf die erreichte Performance.
+In diesem Assignment werden cuTile-Kernels für Matrizenmultiplikation
+implementiert und optimiert – von numerischer Präzision (FP16 vs. FP32)
+über flexible Tiling-Strategien bis hin zu L2-Cache-Optimierung durch
+Block-Swizzling.
 
 .. toctree::
    :maxdepth: 1
