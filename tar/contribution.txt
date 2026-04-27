@@ -1,11 +1,11 @@
-Assignment 01 – Contributions
-
-Oliver Dietzel:
-  - Implementierung aller Tensor-Operationen:
-      dot_product, matmul_loops, matmul_dot, einsum_loops, einsum_gemm
-  - Lösungsdokumentation (Report) für Assignment 01
+Assignment 03 – Contributions
 
 Moritz Martin:
-  - Projektstruktur und Verzeichnislayout
-  - Sphinx-Dokumentation (Setup, Theme, Kapitelstruktur)
-  - Build- und Abgabe-Workflow (Makefile, create_submission.sh)
+  - Implementierung Task 1
+  - Implementierung Task 2
+  - Report-Abschnitte zu Task 1 & 2
+
+Oliver Dietzel:
+  - Implementierung Task 3
+  - Implementierung Task 4
+  - Sphinx-Dokumentation (Report) für Task 3 & 4
