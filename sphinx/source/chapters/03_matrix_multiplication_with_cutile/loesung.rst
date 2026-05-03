@@ -502,7 +502,7 @@ Tile ``(64, 64, 64)``, FP16-Inputs, FP32-Akkumulator:
 
 * Bis :math:`N = 2048` skaliert die Performance erwartungsgemäß: kleinere
   Größen (256, 512) sind launch- bzw. latenzgebunden, mit wachsendem
-  :math:`N` werden die ~108 SMs der DGX Spark immer besser ausgelastet.
+  :math:`N` werden die 48 SMs der DGX Spark immer besser ausgelastet.
 * Maximum bei :math:`N = 2048` mit ≈ 47 TFLOPS – hier passen die
   wiederverwendeten A/B-Tiles noch gut in den 24 MB L2-Cache.
 * Ab :math:`N = 4096` bricht die Performance auf ≈ 15 TFLOPS ein: der
