@@ -31,15 +31,29 @@ Kontraktion
    C_{eabcxz} = \sum_{k,l,y} A_{eabklxy} \cdot B_{ecklyz}
 
 mit FP16-Inputs/Outputs und FP32-Akkumulator. Variiert wird, welche
-Dimensionen als GEMM-Dimensionen ans ``ct.mma`` gehen und welche
+Dimensionen als GEMM-Dimensionen (GEneral Matrix-Matrix multiplication) ans ``ct.mma`` gehen und welche
 sequentialisiert bzw. parallelisiert werden. Verifikation gegen
 ``torch.einsum``; Benchmark mit ``triton.testing.do_bench``.
+
+Die Aufgabe ist genau die *Tiled Contraction* aus den Vorlesungsfolien
+04 (Folien 13–23): statt das Tensor-Produkt per
+*Transpose-Transpose-GEMM-Transpose* (TTGT, Folien 9–12) erst in eine
+2D-Matmul zu reshapen, identifizieren wir Tiles direkt im
+mehr-dimensionalen Tensor und lassen einen einzigen Kernel über die
+restlichen Dimensionen schleifen oder das Grid aufspannen. Das spart
+die TTGT-Permutationen im globalen Speicher (Folie 12, Cons:
+*„Permutation in memory is expensive"*); im Gegenzug muss der Kernel
+selbst die richtige Tile-Geometrie wählen – genau das ist der
+Spielraum von b)/c)/d)/e).
 
 Task 1a: Klassifikation der Dimensionen
 ----------------------------------------
 
 Die einsum-Signatur ``eabklxy, ecklyz -> eabcxz`` lässt sich
-nach den klassischen GEMM-/Tensor-Kontraktions-Rollen einordnen:
+nach den klassischen GEMM-/Tensor-Kontraktions-Rollen einordnen
+(Folie 8, *„Index Types in Einsum Expressions"*: M = frei in A,
+N = frei in B, K = kontrahiert, C/B = Batch in beiden Inputs und
+im Output):
 
 .. list-table::
    :header-rows: 1
@@ -71,8 +85,21 @@ Damit gibt es **eine** Batch-Dim, **drei** M-Dims, **zwei** N-Dims und
 welche dieser K- und M-Dims auf das ``ct.mma`` abgebildet werden und
 welche im Kernel als Schleife laufen.
 
+Folie 23 (*„cuTile Tensor Contraction"*) zeigt für genau dieses
+Beispiel (ohne ``e``, also ``abklxy, cklyz -> abcxz``) vier
+Pseudocode-Skizzen mit aufsteigender mma-K-Dim:
+``(x, z, y)`` → ``(x, z, y)`` mit a sequentialisiert →
+``(x, z, y·l)`` → ``(x, z, y·l·k)``. Die Aufgabe greift die ersten
+drei davon auf (b/c/d), ergänzt um eine Batch-Dim ``e`` und eine
+zusätzliche 4. Variante (e), die ``e`` direkt als mma-Batch-Achse
+nutzt.
+
 Task 1b: GEMM = (x, y, z), parallel (e, a, b, c)
 -------------------------------------------------
+
+Entspricht Folie 23, *erste* Skizze: ``Decompose pid -> (abc)``,
+äußere Schleifen ``for k, for l``, mma-Shape ``(x, z, y)`` – plus die
+zusätzliche Batch-Dim ``e``, die wir mit in das Grid falten.
 
 **Mapping**
 
@@ -130,6 +157,11 @@ sind durch ``PaddingMode.ZERO`` neutral für die Akkumulation.
 Task 1c: zusätzlich b sequentialisiert
 ---------------------------------------
 
+Entspricht Folie 23, *zweite* Skizze: ``Decompose pid -> (bc)``,
+zusätzlich eine ``for a_it``-Schleife im Kernel. In unserer Notation
+heißt die sequentialisierte Achse ``b`` statt ``a``, das Prinzip ist
+dasselbe – eine M-Dim wandert vom Grid in eine innere Schleife.
+
 **Mapping**
 
 * GEMM-Dimensionen: ``x``, ``y``, ``z`` (wie b)
@@ -182,6 +214,12 @@ Getestete Konfigurationen (siehe Benchmark-Ergebnisse):
 
 Task 1d: GEMM = (x, y·l, z), l und y gemerged
 ----------------------------------------------
+
+Entspricht Folie 23, *dritte* Skizze: ``# Matmul shape = (x, z, y * l)``
+mit nur noch einer äußeren ``for k``-Schleife. Folie 23 zeigt als vierte
+Variante sogar das volle Merging ``(x, z, y·l·k)`` – wir greifen es
+hier nicht auf, weil die Aufgabe explizit nur ``y`` und ``l`` zusammen
+verlangt.
 
 **Mapping**
 
@@ -248,6 +286,13 @@ Getestete Konfigurationen:
 
 Task 1e: GEMM = (e, x, y, z) als 3D-mma
 ----------------------------------------
+
+Diese Variante geht über Folie 23 hinaus: statt ``e`` (die einzige
+Batch-/C-Index-Dim aus Folie 8) als Grid-Achse zu nutzen, wandert
+sie in den ``ct.mma`` selbst. Konzeptuell entspricht das einer
+*Batched Matrix Multiplication* (Folie 3–5): mehrere kleine GEMMs
+laufen entlang ``e`` parallel, jetzt aber innerhalb eines einzelnen
+mma-Aufrufs statt über das Grid verteilt.
 
 **Mapping**
 
@@ -420,7 +465,12 @@ Mögliche Vermutungen, die wir aber **nicht** verifiziert haben:
 
 **b) vs d) — wie erwartet.**
 Bei ``|l|=8, |y|=32`` liegt d) mit ~30 % Vorsprung vorne; bei ``|l|=1``
-verschwindet der Vorteil und beide sind im Rauschen gleichauf.
+verschwindet der Vorteil und beide sind im Rauschen gleichauf. Das
+passt zur Stoßrichtung von Folie 23: je mehr K-Dims man in den
+einzelnen mma-Aufruf hineinfaltet, desto größer wird die innere
+GEMM-K und desto besser sollte die Tensor-Core-Auslastung pro mma
+sein – aber nur, wenn die zu mergende Dim auch tatsächlich Größe > 1
+hat.
 
 **Quervergleich b/d/e — e) ist deutlich langsamer.**
 Mit ``|e|=4`` und ``te=2`` produziert e) etwa halb so viele Grid-Blöcke
