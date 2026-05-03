@@ -165,22 +165,20 @@ wiederverwendet.
        out = ct.reshape(ct.astype(acc, C.dtype), (1, 1, 1, 1, tx, tz))
        ct.store(C, index=(pid_e, pid_a, bb, pid_c, pid_x, pid_z), tile=out)
 
-**Wann ist b) besser, wann c)?**
+**Vermutung: Wann ist b) besser, wann c)?**
 
-* ``b)`` gewinnt, wenn ``|b|`` klein ist (kaum Reuse-Potenzial) und
-  ``|e|·|a|·|c|`` allein nicht reicht, um die SMs zu sättigen –
-  hier hilft die zusätzliche b-Parallelität in ``b)`` direkt.
-* ``c)`` gewinnt, wenn ``|b|`` groß ist (viel Reuse) und ``|e|·|a|·|c|``
-  bereits genug Grid-Blöcke liefert – die b-Schleife im Kernel
-  amortisiert dann das ein-mal-laden des B-Tiles über mehrere
-  Output-Tiles und reduziert den globalen Speicherverkehr.
+* ``b)`` könnte vorne liegen, wenn ``|b|`` klein ist (kaum Reuse-Potenzial)
+  oder wenn das Grid in c) durch den fehlenden b-Faktor zu klein wird,
+  um die SMs zu sättigen.
+* ``c)`` könnte vorne liegen, wenn ``|b|`` groß ist (viel B-Tile-Reuse
+  über die b-Schleife) **und** ``|e|·|a|·|c|·⌈X/tx⌉·⌈Z/tz⌉`` weiterhin
+  groß genug bleibt, um genug Blöcke für die SMs bereitzustellen.
 
-Konkret im Benchmark:
+Getestete Konfigurationen (siehe Benchmark-Ergebnisse):
 
-* **``b)`` vorne**: ``|b|=2``, ``|a|·|c|=64``, GEMM-Dims groß.
-* **``c)`` vorne**: ``|b|=16``, ``|a|·|c|=4`` – c) hat hier mehr
-  Reuse pro Block und das Grid in b) ist ohnehin groß genug, sodass
-  die kleinere Grid-Größe von c) keine Occupancy-Probleme erzeugt.
+* ``|b|=2``, ``|a|·|c|=64``, GEMM-Dims groß – Erwartung: b) vorne.
+* ``|b|=16``, ``|a|·|c|=4`` – Erwartung: c) vorne (mehr Reuse pro
+  Block, Grid in b) ist ohnehin sehr groß).
 
 Task 1d: GEMM = (x, y·l, z), l und y gemerged
 ----------------------------------------------
@@ -230,23 +228,23 @@ flachklopfen – wir wollen aber ``(X, L·Y)``. Daher zuerst eine Permutation
 Auf B-Seite ist kein Permute nötig, weil die Reihenfolge ``L, Y, Z``
 bereits zur gewünschten Mergung ``L·Y`` passt.
 
-**Wann ist b) besser, wann d)?**
+**Vermutung: Wann ist b) besser, wann d)?**
 
-* ``d)`` gewinnt, wenn ``|l|`` groß ist – jeder mma macht dann
-  ``L``-mal so viel Arbeit, ohne dass ``L`` zusätzliche Loop-Iterationen
-  und ``ct.load``-Aufrufe nötig wären. Insbesondere bei kleinem ``|y|``
-  (sonst dominiert die y-Schleife schon) zahlt sich der Merge aus.
+* ``d)`` könnte vorne liegen, wenn ``|l|`` groß ist – jeder mma macht
+  dann ``L``-mal so viel Arbeit, ohne dass ``L`` zusätzliche
+  Loop-Iterationen und ``ct.load``-Aufrufe nötig wären. Insbesondere
+  bei kleinem ``|y|`` (sonst dominiert die y-Schleife schon) könnte
+  der Merge etwas bringen.
 * ``b)`` gewinnt, wenn ``|l| = 1`` (oder sehr klein): der Permute kostet
   Register-Bewegung, der gemergte mma ist nicht größer als der
   ungemergte, und b) spart sich den Reshape/Permute komplett.
 
-Konkret im Benchmark:
+Getestete Konfigurationen:
 
-* **``d)`` vorne**: ``|l|=8``, ``|y|=32`` – d) bündelt 8 Slices in
-  einen mma; bei kleiner y-Tile-Größe hat b) sehr viele kurze
-  K-Iterationen.
-* **``b)`` vorne**: ``|l|=1``, ``|y|=64`` – kein Mergung möglich, der
-  Permute in d) ist reiner Overhead.
+* ``|l|=8``, ``|y|=32`` – Erwartung: d) vorne (8 Slices pro mma
+  gebündelt, b) hat sehr viele kurze K-Iterationen).
+* ``|l|=1``, ``|y|=64`` – Erwartung: b) vorne (kein Mergung möglich,
+  Permute in d) ist reiner Overhead).
 
 Task 1e: GEMM = (e, x, y, z) als 3D-mma
 ----------------------------------------
@@ -289,24 +287,102 @@ und Rückgabe in FP16 verglichen (``atol=2e-1, rtol=2e-2``):
 
 .. code-block:: text
 
-   Task 1a: Dimension-Klassifikation
-     e            -> Batch (B-Typ)
-     a, b, x      -> M-Typ
-     c, z         -> N-Typ
-     k, l, y      -> K-Typ (kontrahiert)
-
    Task 1 b)/c)/d)/e): Verifikation gegen torch.einsum
-     Shapes: A=(2,2,2,2,2,64,64), B=(2,2,2,2,64,64), ref=(2,2,2,2,64,64)
-     kernel_b   allclose=True   max_abs_err=...
-     kernel_c   allclose=True   max_abs_err=...
-     kernel_d   allclose=True   max_abs_err=...
-     kernel_e   allclose=True   max_abs_err=...
+     Shapes: A=(2, 2, 2, 2, 2, 64, 64), B=(2, 2, 2, 2, 64, 64), ref=(2, 2, 2, 2, 64, 64)
+     kernel_b    allclose=True   max_abs_err=0.0312
+     kernel_c    allclose=True   max_abs_err=0.0312
+     kernel_d    allclose=True   max_abs_err=0.0312
+     kernel_e    allclose=True   max_abs_err=0.0312
+
+Alle vier Kernels liefern denselben ``max_abs_err`` (FP16-Quantisierungs-
+rauschen), also numerisch äquivalente Ergebnisse.
 
 Benchmark-Ergebnisse
 --------------------
 
-Die folgenden zwei Plots vergleichen die Varianten in den jeweils
-gewählten Konfigurationen:
+Gemessen mit ``triton.testing.do_bench`` auf der DGX Spark (GB10), FP16-Inputs,
+FP32-Akkumulator, GEMM-Tile ``(32, 32, 32)``:
+
+.. list-table:: b) vs c)
+   :header-rows: 1
+   :widths: 40 15 15 15 15
+
+   * - Konfiguration
+     - Variante
+     - ms
+     - TFLOPS
+     - Schneller
+   * - ``|b|=2, |a|·|c|=64, X=Y=Z=128`` (FLOPs ≈ 2.15·10⁹)
+     - b)
+     - 0.524
+     - **4.10**
+     - **b) (2.0×)**
+   * -
+     - c)
+     - 1.046
+     - 2.05
+     -
+   * - ``|b|=16, |a|·|c|=4, X=Y=Z=128`` (FLOPs ≈ 5.37·10⁸)
+     - b)
+     - 0.161
+     - **3.35**
+     - **b) (2.3×)**
+   * -
+     - c)
+     - 0.362
+     - 1.48
+     -
+
+.. list-table:: b) vs d)
+   :header-rows: 1
+   :widths: 40 15 15 15 15
+
+   * - Konfiguration
+     - Variante
+     - ms
+     - TFLOPS
+     - Schneller
+   * - ``|l|=8, |y|=32, X=Z=128`` (FLOPs ≈ 1.07·10⁹)
+     - b)
+     - 0.500
+     - 2.15
+     - **d) (1.30×)**
+   * -
+     - d)
+     - 0.386
+     - **2.78**
+     -
+   * - ``|l|=1, |y|=64, X=Z=128`` (FLOPs ≈ 1.07·10⁹)
+     - b)
+     - 0.528
+     - **2.03**
+     - b) (≈)
+   * -
+     - d)
+     - 0.538
+     - 2.00
+     -
+
+.. list-table:: Quervergleich b) / d) / e), ``|e|=4``
+   :header-rows: 1
+   :widths: 25 15 15 15
+
+   * - Variante
+     - ms
+     - TFLOPS
+     - vs b)
+   * - b)
+     - 0.096
+     - 2.79
+     - 1.00×
+   * - d)
+     - 0.082
+     - **3.27**
+     - 1.17×
+   * - e)
+     - 0.203
+     - 1.32
+     - 0.47×
 
 .. figure:: ../../../../assignments/04_assignment/src/task01_bc_vs_bd.png
    :align: center
@@ -325,30 +401,48 @@ gewählten Konfigurationen:
    Quervergleich der drei Varianten b), d) und e) auf einer mittleren
    Konfiguration mit ``|e| = 4``.
 
-Erkenntnisse
-------------
+Beobachtungen und Vermutungen
+------------------------------
 
-* **GEMM-Wahl folgt Datenfluss, nicht Buchstaben**: ``x`` ist nominell
-  eine "frei wählbare" M-Dim, sitzt aber innen in A's Layout
-  ``[..., L, X, Y]`` und ist daher ideal als M-Dim des mma. Eine
-  alternative Wahl wie GEMM=(a, …, c) würde stride-feindlich laden
-  und die Tile-Loads zerschneiden.
-* **Sequentialisierte K-Dims kosten Loop-Overhead, nicht Bandwidth**:
-  jede zusätzliche sequentielle K-Schleife (Variante b: drei verschachtelte
-  Schleifen über ``k, l, y_tiles``) bedeutet pro Iteration einen ``ct.load``
-  von A und B und ein ``ct.mma``. Bei kleinem GEMM-Tile dominiert dieser
-  Loop-Overhead schnell – der Trick aus d) (``l`` in den mma falten) ist
-  genau die Antwort darauf.
-* **Sequentialisierung von M-Dims (Variante c) zahlt sich nur aus, wenn
-  reused Tiles nicht schon über das Grid und L2 abgedeckt sind**: c)
-  drückt das Grid kleiner und macht jeden Block länger, was nur dann
-  hilft, wenn ``|b|`` groß genug ist, um die ein B-Tile-Lade-Investition
-  über mehrere Output-Tiles zu amortisieren.
-* **3D-mma in e) ist kein Gratis-Speedup**: der zusätzliche Output-Slot
-  ``te`` braucht Akkumulator-Register, was die Occupancy senken kann.
-  Sinnvoll, wenn ``|e|`` so klein ist, dass es als Grid-Achse wenig
-  Auslastung bringt – dann lohnt sich, ``e`` als mma-Batch
-  einzubauen statt in ``ct.bid``.
+**b) vs c) — die "c-vorne"-Konfiguration trifft nicht zu.**
+In der Konfiguration mit ``|b|=16, |a|·|c|=4`` gewinnt b) mit 3.35 vs
+1.48 TFLOPS, also genau das Gegenteil dessen, was wir erwartet hatten.
+Mögliche Vermutungen, die wir aber **nicht** verifiziert haben:
+
+* Das Grid in c) wird sehr klein
+  (``|e|·|a|·|c|·⌈X/tx⌉·⌈Z/tz⌉`` = 1·2·2·4·4 = 64 Blöcke), was die
+  ~108 SMs des GB10 möglicherweise nicht mehr saturiert.
+* Der erhoffte L2-Reuse-Gewinn aus der b-Schleife könnte vom
+  Occupancy-Verlust überkompensiert werden.
+* Möglich, dass die Konfiguration nicht extrem genug war – mit
+  ``|b|`` deutlich größer und ``|e|·|a|·|c|`` größer (sodass das
+  c)-Grid weiterhin saturiert) könnte sich das Bild drehen.
+
+**b) vs d) — wie erwartet.**
+Bei ``|l|=8, |y|=32`` liegt d) mit ~30 % Vorsprung vorne; bei ``|l|=1``
+verschwindet der Vorteil und beide sind im Rauschen gleichauf.
+
+**Quervergleich b/d/e — e) ist deutlich langsamer.**
+Mit ``|e|=4`` und ``te=2`` produziert e) etwa halb so viele Grid-Blöcke
+wie b) und braucht einen 3D-Akkumulator. Vermutungen für die
+Performance-Lücke (~2× langsamer als d)):
+
+* Niedrigere Occupancy durch größeren Akkumulator
+  (``(te, tx, tz)`` statt ``(tx, tz)``).
+* 3D-mma mit ``te=2`` ist eventuell nicht in einer optimalen
+  Hardware-Lane (Tensor-Cores bevorzugen typischerweise größere
+  Batch-Mantles).
+* Bei ``|e|=4`` kostet die Verlagerung von ``e`` aus dem Grid in den
+  mma-Batch mehr, als sie bringt – die Variante würde wahrscheinlich
+  erst sinnvoll, wenn ``|e|`` so klein ist, dass es als Grid-Achse
+  selber Auslastung kostet.
+
+**Absolutes TFLOPS-Niveau (2–4 TFLOPS).**
+Niedrig im Vergleich zu Assignment 03 (dort 50+ TFLOPS für
+2048³-Matmuls). Vermutung: die getesteten Kontraktionen sind klein
+(FLOPs ~10⁹, vergleichbar mit ~700³-Matmul) und werden vermutlich
+durch Launch-Overhead und kleines Grid limitiert – konsistent zum
+TFLOPS-Plateau-Verhalten aus Assignment 03 für kleine Größen.
 
 Task 2: Kernel Fusion
 ======================
