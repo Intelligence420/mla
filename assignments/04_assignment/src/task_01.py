@@ -26,7 +26,10 @@ Verifikation gegen torch.einsum().
 Benchmark mit triton.testing.do_bench.
 """
 
+import os
+
 import cuda.tile as ct
+import matplotlib.pyplot as plt
 import torch
 import triton
 
@@ -44,6 +47,9 @@ TILE_X, TILE_Y, TILE_Z = 32, 32, 32
 
 # Tile entlang e fuer Variante e) (3D-mma)
 TILE_E = 2
+
+# Plot-Verzeichnis = dieses Skript-Verzeichnis
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 # ===========================================================================
@@ -343,7 +349,7 @@ def run_e(A, B, dims, tile=(TILE_X, TILE_Y, TILE_Z), te=TILE_E):
 # Verifikation
 # ===========================================================================
 
-def _make_inputs(dims, dtype=torch.float16, device="cuda"):
+def make_inputs(dims, dtype=torch.float16, device="cuda"):
     torch.manual_seed(0)
     E, Ad, Bd, Cd = dims["E"], dims["A"], dims["B"], dims["C"]
     K, L = dims["K"], dims["L"]
@@ -361,7 +367,7 @@ def reference(A, B):
     return Cf.to(A.dtype)
 
 
-def _check(name, runner, A, B, ref, dims, tol=(2e-1, 2e-2)):
+def check(name, runner, A, B, ref, dims, tol=(2e-1, 2e-2)):
     out = runner(A, B, dims)
     atol, rtol = tol
     ok = torch.allclose(out, ref, atol=atol, rtol=rtol)
@@ -372,14 +378,14 @@ def _check(name, runner, A, B, ref, dims, tol=(2e-1, 2e-2)):
 
 def verify():
     dims = DIMS_VERIFY
-    A, B = _make_inputs(dims)
+    A, B = make_inputs(dims)
     ref = reference(A, B)
     print(f"  Shapes: A={tuple(A.shape)}, B={tuple(B.shape)}, "
           f"ref={tuple(ref.shape)}")
-    _check("kernel_b", run_b, A, B, ref, dims)
-    _check("kernel_c", run_c, A, B, ref, dims)
-    _check("kernel_d", run_d, A, B, ref, dims)
-    _check("kernel_e", run_e, A, B, ref, dims)
+    check("kernel_b", run_b, A, B, ref, dims)
+    check("kernel_c", run_c, A, B, ref, dims)
+    check("kernel_d", run_d, A, B, ref, dims)
+    check("kernel_e", run_e, A, B, ref, dims)
 
 
 # ===========================================================================
@@ -398,7 +404,7 @@ def tflops(dims, time_ms):
     return flops_count(dims) / (time_ms * 1e-3) / 1e12
 
 
-def _bench(runner, A, B, dims, n_warmup=10, n_runs=50):
+def bench(runner, A, B, dims, n_warmup=10, n_runs=50):
     return triton.testing.do_bench(
         lambda: runner(A, B, dims),
         warmup=n_warmup, rep=n_runs,
@@ -411,14 +417,14 @@ def _bench(runner, A, B, dims, n_warmup=10, n_runs=50):
 
 def bench_compare(label, dims, runners):
     """Run alle uebergebenen runner-Tupel (name, fn) auf dims und drucke
-    Laufzeiten/TFLOPS."""
-    A, B = _make_inputs(dims)
+    Laufzeiten/TFLOPS. Liefert dict {name: (ms, tflops)}."""
+    A, B = make_inputs(dims)
     print(f"\n  {label}")
     print(f"    dims = {dims}")
     print(f"    FLOPs = {flops_count(dims):.3e}")
     results = {}
     for name, fn in runners:
-        t = _bench(fn, A, B, dims)
+        t = bench(fn, A, B, dims)
         f = tflops(dims, t)
         results[name] = (t, f)
         print(f"    {name:<10} {t:8.4f} ms   {f:7.3f} TFLOPS")
@@ -428,6 +434,7 @@ def bench_compare(label, dims, runners):
 def benchmark():
     """b) vs c): Ein Setting wo b gewinnt, eines wo c gewinnt.
        b) vs d): Ein Setting wo b gewinnt, eines wo d gewinnt.
+       Quervergleich b/d/e auf mittlerer Konfiguration.
     """
     # b vs c: c gewinnt, wenn |b| gross ist und |a|*|c| klein, sodass
     # B-Tile-Reuse durch Sequentialisierung der b-Schleife die L2-Hits
@@ -435,31 +442,99 @@ def benchmark():
     # b vs c: b gewinnt, wenn |b| klein ist (kaum Reuse) und |a|*|c|
     # gross genug, sodass die zusaetzliche Parallelitaet hilft.
     print("\n=== Vergleich b) vs c) ===")
-    cfg_b_wins = dict(E=2, A=8, B=2, C=8, K=2, L=2, X=128, Y=64, Z=128)
-    cfg_c_wins = dict(E=1, A=2, B=16, C=2, K=2, L=2, X=128, Y=64, Z=128)
-    bench_compare("Setting wo b) vorne ist (b klein, a*c gross)",
-                  cfg_b_wins, [("b)", run_b), ("c)", run_c)])
-    bench_compare("Setting wo c) vorne ist (b gross, a*c klein)",
-                  cfg_c_wins, [("b)", run_b), ("c)", run_c)])
+    cfg_bc_b = dict(E=2, A=8, B=2, C=8, K=2, L=2, X=128, Y=64, Z=128)
+    cfg_bc_c = dict(E=1, A=2, B=16, C=2, K=2, L=2, X=128, Y=64, Z=128)
+    res_bc_b = bench_compare("Setting wo b) vorne ist (b klein, a*c gross)",
+                             cfg_bc_b, [("b)", run_b), ("c)", run_c)])
+    res_bc_c = bench_compare("Setting wo c) vorne ist (b gross, a*c klein)",
+                             cfg_bc_c, [("b)", run_b), ("c)", run_c)])
 
     # b vs d: d gewinnt, wenn L gross ist (mehr Arbeit pro mma; groessere
     # K-Dim erhoeht arithmetic intensity).
     # b vs d: b gewinnt, wenn L = 1 (kein Vorteil durch Merge, aber Permute
     # kostet) bzw. L sehr klein.
     print("\n=== Vergleich b) vs d) ===")
-    cfg_d_wins = dict(E=2, A=4, B=2, C=4, K=2, L=8, X=128, Y=32, Z=128)
-    cfg_b_wins_vs_d = dict(E=2, A=4, B=2, C=4, K=8, L=1, X=128, Y=64, Z=128)
-    bench_compare("Setting wo d) vorne ist (L gross, Y klein)",
-                  cfg_d_wins, [("b)", run_b), ("d)", run_d)])
-    bench_compare("Setting wo b) vorne ist (L=1, Y gross)",
-                  cfg_b_wins_vs_d, [("b)", run_b), ("d)", run_d)])
+    cfg_bd_d = dict(E=2, A=4, B=2, C=4, K=2, L=8, X=128, Y=32, Z=128)
+    cfg_bd_b = dict(E=2, A=4, B=2, C=4, K=8, L=1, X=128, Y=64, Z=128)
+    res_bd_d = bench_compare("Setting wo d) vorne ist (L gross, Y klein)",
+                             cfg_bd_d, [("b)", run_b), ("d)", run_d)])
+    res_bd_b = bench_compare("Setting wo b) vorne ist (L=1, Y gross)",
+                             cfg_bd_b, [("b)", run_b), ("d)", run_d)])
 
     # e) - Quervergleich auf einer mittleren Konfiguration
     print("\n=== Variante e) ===")
     cfg_e = dict(E=4, A=2, B=2, C=2, K=2, L=2, X=128, Y=64, Z=128)
-    bench_compare("Quervergleich b) / d) / e)",
-                  cfg_e,
-                  [("b)", run_b), ("d)", run_d), ("e)", run_e)])
+    res_e = bench_compare("Quervergleich b) / d) / e)",
+                          cfg_e,
+                          [("b)", run_b), ("d)", run_d), ("e)", run_e)])
+
+    return {
+        "bc": [
+            ("b > c (|b|=2, |a|*|c|=64)", cfg_bc_b, res_bc_b),
+            ("c > b (|b|=16, |a|*|c|=4)", cfg_bc_c, res_bc_c),
+        ],
+        "bd": [
+            ("d > b (|l|=8, |y|=32)",     cfg_bd_d, res_bd_d),
+            ("b > d (|l|=1, |y|=64)",     cfg_bd_b, res_bd_b),
+        ],
+        "e":  [("Quervergleich b/d/e",    cfg_e,    res_e)],
+    }
+
+
+# ===========================================================================
+# Plot
+# ===========================================================================
+
+def plot_panel(ax, title, results_dict, ylabel="TFLOPS", metric="tflops"):
+    """Bar-Plot fuer ein Result-Dict {kernel_name: (ms, tflops)}."""
+    names = list(results_dict.keys())
+    if metric == "tflops":
+        values = [results_dict[n][1] for n in names]
+    else:
+        values = [results_dict[n][0] for n in names]
+    colors = {"b)": "#4C72B0", "c)": "#DD8452",
+              "d)": "#55A868", "e)": "#8172B2"}
+    bars = ax.bar(names, values, color=[colors.get(n, "#888") for n in names])
+    ax.set_title(title, fontsize=10)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, axis="y", alpha=0.3)
+    for b, v in zip(bars, values):
+        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.2f}",
+                ha="center", va="bottom", fontsize=9)
+
+
+def plot_results(all_results, path=None):
+    """Erzeuge zwei Figures:
+       1) task01_bc_vs_bd.png — vier Panels: b vs c (zwei Settings),
+          b vs d (zwei Settings), TFLOPS.
+       2) task01_e_compare.png — Quervergleich b/d/e.
+    """
+    if path is None:
+        path = SCRIPT_DIR
+
+    # Figure 1: vier Panels (b/c und b/d)
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    panels = all_results["bc"] + all_results["bd"]
+    for ax, (title, cfg, res) in zip(axes, panels):
+        plot_panel(ax, title, res, ylabel="TFLOPS")
+    fig.suptitle("Task 1: b) vs c) und b) vs d) — TFLOPS", fontsize=12)
+    fig.tight_layout()
+    p1 = os.path.join(path, "task01_bc_vs_bd.png")
+    fig.savefig(p1, dpi=150)
+    plt.close(fig)
+    print(f"  Plot: {p1}")
+
+    # Figure 2: Quervergleich b/d/e (Laufzeit + TFLOPS Doppel-Panel)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    title, cfg, res = all_results["e"][0]
+    plot_panel(ax1, f"{title} — Laufzeit", res, ylabel="ms", metric="ms")
+    plot_panel(ax2, f"{title} — Durchsatz", res, ylabel="TFLOPS")
+    fig.suptitle(f"Task 1e: dims={cfg}", fontsize=10)
+    fig.tight_layout()
+    p2 = os.path.join(path, "task01_e_compare.png")
+    fig.savefig(p2, dpi=150)
+    plt.close(fig)
+    print(f"  Plot: {p2}")
 
 
 # ===========================================================================
@@ -477,4 +552,7 @@ if __name__ == "__main__":
     verify()
 
     print("\nTask 1: Benchmark")
-    benchmark()
+    all_results = benchmark()
+
+    print("\nTask 1: Plot")
+    plot_results(all_results)

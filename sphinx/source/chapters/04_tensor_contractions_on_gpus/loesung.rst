@@ -302,6 +302,29 @@ und Rückgabe in FP16 verglichen (``atol=2e-1, rtol=2e-2``):
      kernel_d   allclose=True   max_abs_err=...
      kernel_e   allclose=True   max_abs_err=...
 
+Benchmark-Ergebnisse
+--------------------
+
+Die folgenden zwei Plots vergleichen die Varianten in den jeweils
+gewählten Konfigurationen:
+
+.. figure:: ../../../../assignments/04_assignment/src/task01_bc_vs_bd.png
+   :align: center
+   :alt: Vergleich b) vs c) und b) vs d), TFLOPS pro Konfiguration
+   :width: 100%
+
+   Vier Panels: links die zwei b)-vs-c)-Settings, rechts die zwei
+   b)-vs-d)-Settings. Pro Konfiguration zeigt der höhere Balken die
+   schnellere Variante.
+
+.. figure:: ../../../../assignments/04_assignment/src/task01_e_compare.png
+   :align: center
+   :alt: Quervergleich b)/d)/e) — Laufzeit und Durchsatz
+   :width: 90%
+
+   Quervergleich der drei Varianten b), d) und e) auf einer mittleren
+   Konfiguration mit ``|e| = 4``.
+
 Erkenntnisse
 ------------
 
