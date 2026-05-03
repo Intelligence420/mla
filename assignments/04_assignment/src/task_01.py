@@ -38,7 +38,6 @@ import triton
 # Konstanten — kleine Default-Shapes fuer Verifikation
 # ===========================================================================
 
-# Achtung: alle Tensoren < 32 GiB halten.
 # Verifikations-Konfiguration: bewusst klein und schief.
 DIMS_VERIFY = dict(E=2, A=2, B=2, C=2, K=2, L=2, X=64, Y=64, Z=64)
 
@@ -436,11 +435,7 @@ def benchmark():
        b) vs d): Ein Setting wo b gewinnt, eines wo d gewinnt.
        Quervergleich b/d/e auf mittlerer Konfiguration.
     """
-    # b vs c: c gewinnt, wenn |b| gross ist und |a|*|c| klein, sodass
-    # B-Tile-Reuse durch Sequentialisierung der b-Schleife die L2-Hits
-    # erhoeht UND das Grid in b) zu fragmentiert waere.
-    # b vs c: b gewinnt, wenn |b| klein ist (kaum Reuse) und |a|*|c|
-    # gross genug, sodass die zusaetzliche Parallelitaet hilft.
+    # b vs c: 
     print("\n=== Vergleich b) vs c) ===")
     cfg_bc_b = dict(E=2, A=8, B=2, C=8, K=2, L=2, X=128, Y=64, Z=128)
     cfg_bc_c = dict(E=1, A=2, B=16, C=2, K=2, L=2, X=128, Y=64, Z=128)
@@ -449,10 +444,7 @@ def benchmark():
     res_bc_c = bench_compare("Setting wo c) vorne ist (b gross, a*c klein)",
                              cfg_bc_c, [("b)", run_b), ("c)", run_c)])
 
-    # b vs d: d gewinnt, wenn L gross ist (mehr Arbeit pro mma; groessere
-    # K-Dim erhoeht arithmetic intensity).
-    # b vs d: b gewinnt, wenn L = 1 (kein Vorteil durch Merge, aber Permute
-    # kostet) bzw. L sehr klein.
+    # b vs d:
     print("\n=== Vergleich b) vs d) ===")
     cfg_bd_d = dict(E=2, A=4, B=2, C=4, K=2, L=8, X=128, Y=32, Z=128)
     cfg_bd_b = dict(E=2, A=4, B=2, C=4, K=8, L=1, X=128, Y=64, Z=128)

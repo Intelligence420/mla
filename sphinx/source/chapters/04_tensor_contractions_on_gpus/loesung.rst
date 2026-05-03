@@ -35,9 +35,8 @@ Dimensionen als GEMM-Dimensionen (GEneral Matrix-Matrix multiplication) ans ``ct
 sequentialisiert bzw. parallelisiert werden. Verifikation gegen
 ``torch.einsum``; Benchmark mit ``triton.testing.do_bench``.
 
-Die Aufgabe ist genau die *Tiled Contraction* aus den Vorlesungsfolien
-04 (Folien 13–23): statt das Tensor-Produkt per
-*Transpose-Transpose-GEMM-Transpose* (TTGT, Folien 9–12) erst in eine
+Die Aufgabe ist genau die *Tiled Contraction* aus den Vorlesungsfolien: statt das Tensor-Produkt per
+*Transpose-Transpose-GEMM-Transpose* erst in eine
 2D-Matmul zu reshapen, identifizieren wir Tiles direkt im
 mehr-dimensionalen Tensor und lassen einen einzigen Kernel über die
 restlichen Dimensionen schleifen oder das Grid aufspannen. Das spart
@@ -85,19 +84,10 @@ Damit gibt es **eine** Batch-Dim, **drei** M-Dims, **zwei** N-Dims und
 welche dieser K- und M-Dims auf das ``ct.mma`` abgebildet werden und
 welche im Kernel als Schleife laufen.
 
-Folie 23 (*„cuTile Tensor Contraction"*) zeigt für genau dieses
-Beispiel (ohne ``e``, also ``abklxy, cklyz -> abcxz``) vier
-Pseudocode-Skizzen mit aufsteigender mma-K-Dim:
-``(x, z, y)`` → ``(x, z, y)`` mit a sequentialisiert →
-``(x, z, y·l)`` → ``(x, z, y·l·k)``. Die Aufgabe greift die ersten
-drei davon auf (b/c/d), ergänzt um eine Batch-Dim ``e`` und eine
-zusätzliche 4. Variante (e), die ``e`` direkt als mma-Batch-Achse
-nutzt.
-
 Task 1b: GEMM = (x, y, z), parallel (e, a, b, c)
 -------------------------------------------------
 
-Entspricht Folie 23, *erste* Skizze: ``Decompose pid -> (abc)``,
+*erste* Skizze: ``Decompose pid -> (abc)``,
 äußere Schleifen ``for k, for l``, mma-Shape ``(x, z, y)`` – plus die
 zusätzliche Batch-Dim ``e``, die wir mit in das Grid falten.
 
@@ -157,7 +147,7 @@ sind durch ``PaddingMode.ZERO`` neutral für die Akkumulation.
 Task 1c: zusätzlich b sequentialisiert
 ---------------------------------------
 
-Entspricht Folie 23, *zweite* Skizze: ``Decompose pid -> (bc)``,
+*zweite* Skizze: ``Decompose pid -> (bc)``,
 zusätzlich eine ``for a_it``-Schleife im Kernel. In unserer Notation
 heißt die sequentialisierte Achse ``b`` statt ``a``, das Prinzip ist
 dasselbe – eine M-Dim wandert vom Grid in eine innere Schleife.
@@ -197,29 +187,21 @@ wiederverwendet.
        out = ct.reshape(ct.astype(acc, C.dtype), (1, 1, 1, 1, tx, tz))
        ct.store(C, index=(pid_e, pid_a, bb, pid_c, pid_x, pid_z), tile=out)
 
-**Vermutung: Wann ist b) besser, wann c)?**
+**Vermutung & Tests**
 
-* ``b)`` könnte vorne liegen, wenn ``|b|`` klein ist (kaum Reuse-Potenzial)
-  oder wenn das Grid in c) durch den fehlenden b-Faktor zu klein wird,
-  um die SMs zu sättigen.
-* ``c)`` könnte vorne liegen, wenn ``|b|`` groß ist (viel B-Tile-Reuse
-  über die b-Schleife) **und** ``|e|·|a|·|c|·⌈X/tx⌉·⌈Z/tz⌉`` weiterhin
-  groß genug bleibt, um genug Blöcke für die SMs bereitzustellen.
+Trade-off: c) gewinnt B-Tile-Reuse über die b-Schleife, verliert
+aber den b-Faktor im Grid – c) vorne erwartet bei großem ``|b|``,
+b) vorne bei kleinem ``|b|``. Getestet:
 
-Getestete Konfigurationen (siehe Benchmark-Ergebnisse):
-
-* ``|b|=2``, ``|a|·|c|=64``, GEMM-Dims groß – Erwartung: b) vorne.
-* ``|b|=16``, ``|a|·|c|=4`` – Erwartung: c) vorne (mehr Reuse pro
-  Block, Grid in b) ist ohnehin sehr groß).
+* ``|b|=2``, ``|a|·|c|=64`` → Erwartung b) vorne.
+* ``|b|=16``, ``|a|·|c|=4`` → Erwartung c) vorne.
 
 Task 1d: GEMM = (x, y·l, z), l und y gemerged
 ----------------------------------------------
 
-Entspricht Folie 23, *dritte* Skizze: ``# Matmul shape = (x, z, y * l)``
-mit nur noch einer äußeren ``for k``-Schleife. Folie 23 zeigt als vierte
-Variante sogar das volle Merging ``(x, z, y·l·k)`` – wir greifen es
-hier nicht auf, weil die Aufgabe explizit nur ``y`` und ``l`` zusammen
-verlangt.
+*dritte* Skizze: ``# Matmul shape = (x, z, y * l)``
+mit nur noch einer äußeren ``for k``-Schleife. Wir greifen das volle Merging
+(Variante 4) hier nicht auf ``(x, z, y·l·k)``.
 
 **Mapping**
 
@@ -266,29 +248,21 @@ flachklopfen – wir wollen aber ``(X, L·Y)``. Daher zuerst eine Permutation
 Auf B-Seite ist kein Permute nötig, weil die Reihenfolge ``L, Y, Z``
 bereits zur gewünschten Mergung ``L·Y`` passt.
 
-**Vermutung: Wann ist b) besser, wann d)?**
+**Vermutung & Tests**
 
-* ``d)`` könnte vorne liegen, wenn ``|l|`` groß ist – jeder mma macht
-  dann ``L``-mal so viel Arbeit, ohne dass ``L`` zusätzliche
-  Loop-Iterationen und ``ct.load``-Aufrufe nötig wären. Insbesondere
-  bei kleinem ``|y|`` (sonst dominiert die y-Schleife schon) könnte
-  der Merge etwas bringen.
-* ``b)`` gewinnt, wenn ``|l| = 1`` (oder sehr klein): der Permute kostet
-  Register-Bewegung, der gemergte mma ist nicht größer als der
-  ungemergte, und b) spart sich den Reshape/Permute komplett.
+Trade-off: d) bündelt ``L`` Slices pro mma (mehr Arbeit pro Issue,
+weniger Loop-Overhead), zahlt aber den Permute. d) vorne erwartet bei
+großem ``|l|`` (vor allem mit kleinem ``|y|``), b) vorne bei
+``|l|=1`` (Permute wird reiner Overhead). Getestet:
 
-Getestete Konfigurationen:
-
-* ``|l|=8``, ``|y|=32`` – Erwartung: d) vorne (8 Slices pro mma
-  gebündelt, b) hat sehr viele kurze K-Iterationen).
-* ``|l|=1``, ``|y|=64`` – Erwartung: b) vorne (kein Mergung möglich,
-  Permute in d) ist reiner Overhead).
+* ``|l|=8``, ``|y|=32`` → Erwartung d) vorne.
+* ``|l|=1``, ``|y|=64`` → Erwartung b) vorne.
 
 Task 1e: GEMM = (e, x, y, z) als 3D-mma
 ----------------------------------------
 
-Diese Variante geht über Folie 23 hinaus: statt ``e`` (die einzige
-Batch-/C-Index-Dim aus Folie 8) als Grid-Achse zu nutzen, wandert
+Statt ``e`` (die einzige
+Batch-/C-Index-Dim) als Grid-Achse zu nutzen, wandert
 sie in den ``ct.mma`` selbst. Konzeptuell entspricht das einer
 *Batched Matrix Multiplication* (Folie 3–5): mehrere kleine GEMMs
 laufen entlang ``e`` parallel, jetzt aber innerhalb eines einzelnen
@@ -300,8 +274,7 @@ mma-Aufrufs statt über das Grid verteilt.
 * Sequentialisiert: ``k``, ``l``, Tiles entlang ``y``
 * Parallelisiert: ``a``, ``b``, ``c`` sowie Tiles entlang ``e``, ``x``, ``z``
 
-cuTile-``mma`` unterstützt 3D-Operanden, sodass die Batch-Dim direkt
-über mehrere SM-Lanes / Mma-Instructions abgedeckt wird, statt ``e``
+Batch-Dim direkt über mehrere SM-Lanes / Mma-Instructions abgedeckt, statt ``e``
 in den Grid-Index zu falten. Akkumulator ist 3D:
 
 .. code-block:: python
@@ -449,50 +422,17 @@ FP32-Akkumulator, GEMM-Tile ``(32, 32, 32)``:
 Beobachtungen und Vermutungen
 ------------------------------
 
-**b) vs c) — die "c-vorne"-Konfiguration trifft nicht zu.**
-In der Konfiguration mit ``|b|=16, |a|·|c|=4`` gewinnt b) mit 3.35 vs
-1.48 TFLOPS, also genau das Gegenteil dessen, was wir erwartet hatten.
-Mögliche Vermutungen, die wir aber **nicht** verifiziert haben:
-
-* Das Grid in c) wird sehr klein
-  (``|e|·|a|·|c|·⌈X/tx⌉·⌈Z/tz⌉`` = 1·2·2·4·4 = 64 Blöcke), was die
-  ~108 SMs des GB10 möglicherweise nicht mehr saturiert.
-* Der erhoffte L2-Reuse-Gewinn aus der b-Schleife könnte vom
-  Occupancy-Verlust überkompensiert werden.
-* Möglich, dass die Konfiguration nicht extrem genug war – mit
-  ``|b|`` deutlich größer und ``|e|·|a|·|c|`` größer (sodass das
-  c)-Grid weiterhin saturiert) könnte sich das Bild drehen.
-
-**b) vs d) — wie erwartet.**
-Bei ``|l|=8, |y|=32`` liegt d) mit ~30 % Vorsprung vorne; bei ``|l|=1``
-verschwindet der Vorteil und beide sind im Rauschen gleichauf. Das
-passt zur Stoßrichtung von Folie 23: je mehr K-Dims man in den
-einzelnen mma-Aufruf hineinfaltet, desto größer wird die innere
-GEMM-K und desto besser sollte die Tensor-Core-Auslastung pro mma
-sein – aber nur, wenn die zu mergende Dim auch tatsächlich Größe > 1
-hat.
-
-**Quervergleich b/d/e — e) ist deutlich langsamer.**
-Mit ``|e|=4`` und ``te=2`` produziert e) etwa halb so viele Grid-Blöcke
-wie b) und braucht einen 3D-Akkumulator. Vermutungen für die
-Performance-Lücke (~2× langsamer als d)):
-
-* Niedrigere Occupancy durch größeren Akkumulator
-  (``(te, tx, tz)`` statt ``(tx, tz)``).
-* 3D-mma mit ``te=2`` ist eventuell nicht in einer optimalen
-  Hardware-Lane (Tensor-Cores bevorzugen typischerweise größere
-  Batch-Mantles).
-* Bei ``|e|=4`` kostet die Verlagerung von ``e`` aus dem Grid in den
-  mma-Batch mehr, als sie bringt – die Variante würde wahrscheinlich
-  erst sinnvoll, wenn ``|e|`` so klein ist, dass es als Grid-Achse
-  selber Auslastung kostet.
-
-**Absolutes TFLOPS-Niveau (2–4 TFLOPS).**
-Niedrig im Vergleich zu Assignment 03 (dort 50+ TFLOPS für
-2048³-Matmuls). Vermutung: die getesteten Kontraktionen sind klein
-(FLOPs ~10⁹, vergleichbar mit ~700³-Matmul) und werden vermutlich
-durch Launch-Overhead und kleines Grid limitiert – konsistent zum
-TFLOPS-Plateau-Verhalten aus Assignment 03 für kleine Größen.
+* **b) vs c)**: b) gewinnt in *beiden* Konfigurationen – bei
+  ``|b|=16`` läuft das Gegenteil der Erwartung (3.35 vs 1.48 TFLOPS).
+  Vermutung: der L2-Reuse-Gewinn wird vom Occupancy-Verlust
+  überkompensiert. 
+* **b) vs d)**: wie erwartet. d) mit ~30 % vorne bei ``|l|=8``,
+  Vorteil verschwindet bei ``|l|=1``. So wie wir es in VL angesprochen hatten: mehr
+  K-Merging → größere innere GEMM-K → bessere Tensor-Core-Auslastung,
+  aber nur wenn die gemergte Dim ``>1`` ist.
+* **b/d/e**: e) ist ~2× langsamer als d). Vermutung: ``te=2`` mit
+  ``|e|=4`` halbiert das Grid und bläht den Akkumulator auf
+  ``(te, tx, tz)`` – Occupancy sinkt
 
 Task 2: Kernel Fusion
 ======================
