@@ -1,11 +1,14 @@
-Assignment 03 – Contributions
+Assignment 04 – Contributions
 
 Moritz Martin:
-  - Implementierung Task 1
-  - Implementierung Task 2
-  - Report-Abschnitte zu Task 1 & 2
+  - Implementierung Task 1 (Dimensions-Klassifikation und vier
+    Kernel-Varianten b/c/d/e samt Verifikation gegen torch.einsum
+    und Vergleichs-Benchmarks b/c, b/d sowie b/d/e)
+  - Sphinx-Report-Abschnitt zu Task 1
 
 Oliver Dietzel:
-  - Implementierung Task 3
-  - Implementierung Task 4
-  - Sphinx-Dokumentation (Report) für Task 3 & 4
+  - Implementierung Task 2 (Fused-Kontraktions-/Elementwise-Kernel,
+    Vergleich gegen den sequentiellen Pfad bei 2048^3-FLOP-Workload)
+  - Implementierung Task 3 (Kontraktion ackm,bcnk->abnm mit
+    |a|=16, |b|=16, |c|=32, Sweeps über |n| und |k|)
+  - Sphinx-Report-Abschnitte zu Task 2 und Task 3
