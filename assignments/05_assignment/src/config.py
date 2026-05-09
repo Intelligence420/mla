@@ -191,3 +191,33 @@ if __name__ == "__main__":
     cfg = generate_config("bij,bjk->bik", [(8, 32, 64), (8, 64, 16)])
     print("bij,bjk->bik  shapes (8,32,64), (8,64,16):")
     print(pretty(cfg, list("bijk")))
+
+
+"""Ergebnisse
+(.venv) mla08@flambe:~/MLA/mla/assignments/05_assignment/src$ python3 config.py
+cmk,ckn->cmn  shapes (4,4096,4096), (4,4096,4096):
+pos name    type  exec      size   strides
+------------------------------------------
+0   c       C     SEQ          4     16777216   16777216   16777216
+1   m       M     SEQ       4096         4096          0       4096
+2   k       K     SEQ       4096            1       4096          0
+3   n       N     SEQ       4096            0          1          1
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+mk,kn->mn  shapes (128,64), (64,256):
+pos name    type  exec      size   strides
+------------------------------------------
+0   m       M     SEQ        128           64          0        256
+1   k       K     SEQ         64            1        256          0
+2   n       N     SEQ        256            0          1          1
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+bij,bjk->bik  shapes (8,32,64), (8,64,16):
+pos name    type  exec      size   strides
+------------------------------------------
+0   b       C     SEQ          8         2048       1024        512
+1   i       M     SEQ         32           64          0         16
+2   j       K     SEQ         64            1         16          0
+3   k       N     SEQ         16            0          1          1
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+"""
