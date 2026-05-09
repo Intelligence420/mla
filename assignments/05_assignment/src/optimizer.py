@@ -262,3 +262,101 @@ if __name__ == "__main__":
         opt3.verify()
     except ValueError as e:
         print(f"  SEQ left of PRIM violated: {e}")
+
+
+
+"""Ergebnisse
+(.venv) mla08@flambe:~/MLA/mla/assignments/05_assignment/src$ python3 optimizer.py 
+======================================================================
+Demo: Optimizer-Pipeline auf cmk,ckn->cmn
+======================================================================
+
+[0] Basis-Config:
+pos name    type  exec      size   strides
+------------------------------------------
+0   c       C     SEQ          4     16777216   16777216   16777216
+1   m       M     SEQ       4096         4096          0       4096
+2   k       K     SEQ       4096            1       4096          0
+3   n       N     SEQ       4096            0          1          1
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+[1] split_dim(m -> m_l2=64, m_prim=64):
+pos name    type  exec      size   strides
+------------------------------------------
+0   c       C     SEQ          4     16777216   16777216   16777216
+1   m_l2    M     SEQ         64       262144          0     262144
+2   m_prim  M     SEQ         64         4096          0       4096
+3   k       K     SEQ       4096            1       4096          0
+4   n       N     SEQ       4096            0          1          1
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+[2] split_dim(n -> n_l2=64, n_prim=64):
+pos name    type  exec      size   strides
+------------------------------------------
+0   c       C     SEQ          4     16777216   16777216   16777216
+1   m_l2    M     SEQ         64       262144          0     262144
+2   m_prim  M     SEQ         64         4096          0       4096
+3   k       K     SEQ       4096            1       4096          0
+4   n_l2    N     SEQ         64            0         64         64
+5   n_prim  N     SEQ         64            0          1          1
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+[3] permute_dims to [c, m_l2, n_l2, m_prim, n_prim, k]:
+pos name    type  exec      size   strides
+------------------------------------------
+0   c       C     SEQ          4     16777216   16777216   16777216
+1   m_l2    M     SEQ         64       262144          0     262144
+2   n_l2    N     SEQ         64            0         64         64
+3   m_prim  M     SEQ         64         4096          0       4096
+4   n_prim  N     SEQ         64            0          1          1
+5   k       K     SEQ       4096            1       4096          0
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+[4] make_executable():
+pos name    type  exec      size   strides
+------------------------------------------
+0   c       C     PAR          4     16777216   16777216   16777216
+1   m_l2    M     PAR         64       262144          0     262144
+2   n_l2    N     PAR         64            0         64         64
+3   m_prim  M     PRIM        64         4096          0       4096
+4   n_prim  N     PRIM        64            0          1          1
+5   k       K     PRIM      4096            1       4096          0
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+[5] verify(): OK
+
+======================================================================
+Sanity-Check: split_dim + fuse_dims = Identitaet
+======================================================================
+
+Vorher:
+pos name    type  exec      size   strides
+------------------------------------------
+0   m       M     SEQ        128           64          0        256
+1   k       K     SEQ         64            1        256          0
+2   n       N     SEQ        256            0          1          1
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+Nach split:
+pos name    type  exec      size   strides
+------------------------------------------
+0   m_outer M     SEQ         16          512          0       2048
+1   m_inner M     SEQ          8           64          0        256
+2   k       K     SEQ         64            1        256          0
+3   n       N     SEQ        256            0          1          1
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+Nach fuse:
+pos name    type  exec      size   strides
+------------------------------------------
+0   m       M     SEQ        128           64          0        256
+1   k       K     SEQ         64            1        256          0
+2   n       N     SEQ        256            0          1          1
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+======================================================================
+verify(): erwartete ValueErrors
+======================================================================
+  K=PAR rejected: dim 1 is K but exec_type=PAR (not allowed)
+  SEQ left of PRIM violated: SEQ dims must appear left of all PRIM dims
+"""
