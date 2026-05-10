@@ -272,62 +272,6 @@ Task 4d — Benchmark
 
 
 
-"""Ergebnisse 
-
-mit GROUP_M = 16
-und GROUP_N = 16
-
-(.venv) mla08@flambe:~/MLA/mla/assignments/05_assignment/src$ python3 benchmark.py
-======================================================================
-Task 4a — Basis-Config
-======================================================================
-pos name    type  exec      size   strides
-------------------------------------------
-0   c       C     SEQ          4     16777216   16777216   16777216
-1   m       M     SEQ       4096         4096          0       4096
-2   k       K     SEQ       4096            1       4096          0
-3   n       N     SEQ       4096            0          1          1
-  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
-
-======================================================================
-Task 4b — L2-optimierte Config
-======================================================================
-pos name    type  exec      size   strides
-------------------------------------------
-0   c       C     PAR          4     16777216   16777216   16777216
-1   m_l2    M     PAR         64       262144          0     262144
-2   n_l2    N     PAR         64            0         64         64
-3   m_prim  M     PRIM        64         4096          0       4096
-4   n_prim  N     PRIM        64            0          1          1
-5   k       K     PRIM      4096            1       4096          0
-  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
-
-  m_prim=64, n_prim=64, k_prim=32, GROUP_M=4, GROUP_N=4
-
-======================================================================
-Task 4c — Verifikation gegen torch.einsum
-======================================================================
-  baseline   allclose=True  max_abs_err=0.0078
-  l2         allclose=True  max_abs_err=0.0078
-
-======================================================================
-Task 4d — Benchmark
-======================================================================
-
-  dims  = {'C': 4, 'M': 4096, 'N': 4096, 'K': 4096}
-  FLOPs = 5.498e+11
-
-  kernel                 ms     TFLOPS    vs baseline
-  --------------------------------------------------
-  baseline          42.0025     13.089          1.00x
-  l2_swizzle        13.4308     40.933          3.13x
-
-  Plot saved to /home/mla08/MLA/mla/assignments/05_assignment/src/task04_l2_vs_baseline.png
-"""
-
-
-
-
 
 """Ergebnisse 
 
