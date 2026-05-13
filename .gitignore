@@ -21,7 +21,4 @@ scripts/
 tar/README.md
 
 # Assignment 6 Data
-assignments/06_assignment/lf_tr_64_leaf.npz
-assignments/06_assignment/lf_tr_64_intermediate.npz
-assignments/06_assignment/lf_treasure_tr_64_intermediate.npz
-assignments/06_assignment/lf_gum_nuts_tr_64_intermediate.npz
+assignments/06_assignment/data/
