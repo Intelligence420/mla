@@ -111,3 +111,34 @@ if __name__ == "__main__":
     print(pretty(cfg, opt_labels))
 
     print( "Finished." )
+
+"""Ergebnisse
+(.venv) mla08@flambe:~/MLA/mla/assignments/06_assignment$ cd ~/MLA/mla/assignments/06_assignment && python3 src/main.py
+Loading intermediate tensors from disk...
+Task 2 — basic Config (acspx,bspy->abcyx):
+pos name    type  exec      size   strides
+------------------------------------------
+0   a       M     SEQ          4     18874368          0   21233664
+1   c       M     SEQ          3      6291456          0    1769472
+2   s       K     SEQ         64        98304      73728          0
+3   p       K     SEQ         64         1536       1152          0
+4   x       M     SEQ       1536            1          0          1
+5   b       N     SEQ          4            0    4718592    5308416
+6   y       N     SEQ       1152            0          1       1536
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+Task 3 — optimized Config:
+pos name    type  exec      size   strides
+------------------------------------------
+0   a       M     PAR          4     18874368          0   21233664
+1   c       M     PAR          3      6291456          0    1769472
+2   x_seq   M     PAR         24           64          0         64
+3   b       N     PAR          4            0    4718592    5308416
+4   y_seq   N     PAR         18            0         64      98304
+5   sp_seq  K     SEQ        128        49152      36864          0
+6   x_prim  M     PRIM        64            1          0          1
+7   y_prim  N     PRIM        64            0          1       1536
+8   sp_prim K     PRIM        32         1536       1152          0
+  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+Finished.
+"""
