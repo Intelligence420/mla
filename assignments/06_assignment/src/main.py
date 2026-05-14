@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import torch
 import opt_einsum # unused but required for torch.einsum memory optimization
@@ -34,18 +36,36 @@ def plot_tensor(
     plt.close()
 
 if __name__ == "__main__":
+    os.makedirs('results', exist_ok=True)
+
     # Load last two intermediate tensors from disk
     print("Loading intermediate tensors from disk...")
     data = np.load('./data/lf_tr_64_intermediate.npz')
-    tensor_acspx = torch.tensor(data['tensor_acspx'])
-    tensor_bspy = torch.tensor(data['tensor_bspy'])
+    tensor_acspx = torch.tensor(data['tensor_acspx']).cuda()
+    tensor_bspy = torch.tensor(data['tensor_bspy']).cuda()
 
-    # TODO: Compute root tensor by calling torch.einsum
+    # Compute root tensor by calling torch.einsum (FP32)
+    tensor_abcyx_fp32 = torch.einsum(
+        'acspx,bspy->abcyx',
+        tensor_acspx.to(torch.float32),
+        tensor_bspy.to(torch.float32),
+    )
+    plot_tensor(
+        tensor_abcyx_fp32.cpu(),
+        path='results/torch_32.png',
+        title='Lightfield Tensorring Decomposition - All Ranks: 64 - PyTorch FP32'
+    )
 
-    # plot_tensor(
-    #     tensor_abcyx,
-    #     path='lf_tr_64_torch.png',
-    #     title='Lightfield Tensorring Decomposition - All Ranks: 64 - PyTorch'
-    # )
+    # Compute root tensor by calling torch.einsum (FP16)
+    tensor_abcyx_fp16 = torch.einsum(
+        'acspx,bspy->abcyx',
+        tensor_acspx.to(torch.float16),
+        tensor_bspy.to(torch.float16),
+    )
+    plot_tensor(
+        tensor_abcyx_fp16.to(torch.float32).cpu(),
+        path='results/torch_16.png',
+        title='Lightfield Tensorring Decomposition - All Ranks: 64 - PyTorch FP16'
+    )
 
     print( "Finished." )
