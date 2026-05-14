@@ -9,3 +9,7 @@ sympy
 cuda.tile
 cupy
 
+numpy
+matplotlib
+opt_einsum
+
