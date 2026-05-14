@@ -81,16 +81,25 @@ if __name__ == "__main__":
     print(pretty(cfg, dim_labels))
 
     # Task 3: Optimized Config
+    # PRIM tile sizes follow Assignment 05 (best ct.mma footprint on GB10 / FP16).
+    PRIM_M, PRIM_N, PRIM_K = 64, 64, 32
+    _, _, s_sz, p_sz, x_sz = tensor_acspx.shape
+    _, _, _, y_sz = tensor_bspy.shape
+    k_total = s_sz * p_sz
+    assert x_sz % PRIM_M == 0, f"x={x_sz} not divisible by PRIM_M={PRIM_M}"
+    assert y_sz % PRIM_N == 0, f"y={y_sz} not divisible by PRIM_N={PRIM_N}"
+    assert k_total % PRIM_K == 0, f"k={k_total} not divisible by PRIM_K={PRIM_K}"
+
     # Pipeline:
-    #   1. fuse(s, p) -> sp (single K-dim, |sp| = 4096)
-    #   2. split sp / x / y -> (seq, prim) pairs with prim sizes 32, 64, 64
+    #   1. fuse(s, p) -> sp (single K-dim, |sp| = s*p)
+    #   2. split sp / x / y -> (seq, prim) pairs
     #   3. permute into Slide-5 L2 pattern: [PAR..., k_seq, prim_m, prim_n, prim_k]
     #   4. make_executable() sets exec_types + verifies
     opt = Optimizer(cfg)
-    opt.fuse_dims(2, 3)        # s,p -> sp           [a, c, sp, x, b, y]
-    opt.split_dim(2, 128, 32)  # sp  -> sp_seq, sp_prim
-    opt.split_dim(4, 20, 64)   # x   -> x_seq,  x_prim
-    opt.split_dim(7, 24, 64)   # y   -> y_seq,  y_prim
+    opt.fuse_dims(2, 3)                           # s,p -> sp     [a, c, sp, x, b, y]
+    opt.split_dim(2, k_total // PRIM_K, PRIM_K)   # sp  -> sp_seq, sp_prim
+    opt.split_dim(4, x_sz // PRIM_M, PRIM_M)      # x   -> x_seq,  x_prim
+    opt.split_dim(7, y_sz // PRIM_N, PRIM_N)      # y   -> y_seq,  y_prim
     # current order: [a, c, sp_seq, sp_prim, x_seq, x_prim, b, y_seq, y_prim]
     #                 0  1    2        3       4       5    6    7       8
     # target:        [a, c, x_seq, b, y_seq, sp_seq, x_prim, y_prim, sp_prim]
