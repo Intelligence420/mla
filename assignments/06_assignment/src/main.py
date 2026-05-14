@@ -5,6 +5,9 @@ import torch
 import opt_einsum # unused but required for torch.einsum memory optimization
 import matplotlib.pyplot as plt
 
+from config import generate_config, pretty, Config, DimType, ExecType, DataType
+from optimizer import Optimizer
+
 def plot_tensor(
     tensor,
     path='tensor_plot.png',
@@ -67,5 +70,35 @@ if __name__ == "__main__":
         path='results/torch_16.png',
         title='Lightfield Tensorring Decomposition - All Ranks: 64 - PyTorch FP16'
     )
+
+    # Task 2: basic Config via generate_config from Assignment 05
+    cfg = generate_config(
+        'acspx,bspy->abcyx',
+        [tuple(tensor_acspx.shape), tuple(tensor_bspy.shape)],
+    )
+    dim_labels = list('acspxby')  # erstes Auftreten in acspx, bspy
+    print("Task 2 — basic Config (acspx,bspy->abcyx):")
+    print(pretty(cfg, dim_labels))
+
+    # Task 3: Optimized Config
+    # Pipeline:
+    #   1. fuse(s, p) -> sp (single K-dim, |sp| = 4096)
+    #   2. split sp / x / y -> (seq, prim) pairs with prim sizes 32, 64, 64
+    #   3. permute into Slide-5 L2 pattern: [PAR..., k_seq, prim_m, prim_n, prim_k]
+    #   4. make_executable() sets exec_types + verifies
+    opt = Optimizer(cfg)
+    opt.fuse_dims(2, 3)        # s,p -> sp           [a, c, sp, x, b, y]
+    opt.split_dim(2, 128, 32)  # sp  -> sp_seq, sp_prim
+    opt.split_dim(4, 20, 64)   # x   -> x_seq,  x_prim
+    opt.split_dim(7, 24, 64)   # y   -> y_seq,  y_prim
+    # current order: [a, c, sp_seq, sp_prim, x_seq, x_prim, b, y_seq, y_prim]
+    #                 0  1    2        3       4       5    6    7       8
+    # target:        [a, c, x_seq, b, y_seq, sp_seq, x_prim, y_prim, sp_prim]
+    opt.permute_dims([0, 1, 4, 6, 7, 2, 5, 8, 3])
+    opt.make_executable()
+
+    opt_labels = ['a','c','x_seq','b','y_seq','sp_seq','x_prim','y_prim','sp_prim']
+    print("\nTask 3 — optimized Config:")
+    print(pretty(cfg, opt_labels))
 
     print( "Finished." )
