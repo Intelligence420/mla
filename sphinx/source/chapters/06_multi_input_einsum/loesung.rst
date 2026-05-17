@@ -236,7 +236,222 @@ Volle K-Schiene: A ≈ 2,3 MB, B ≈ 0,6 MB — passt locker.
 Task 4: cuTile Kernel
 ======================
 
-*folgt.*
+Task 4a: Kernel-Design
+-----------------------
+
+Der Baseline-Kernel ist die wörtliche Umsetzung der Task-3-Config: ein
+3D-Grid über die fünf PAR-Achsen (zu drei ``ct.bid``-Achsen gefaltet,
+weil cuTile nur drei Block-IDs hat), eine innere ``for sp_seq``-Schleife
+über die einzige SEQ-K-Achse, und im Schleifenrumpf genau ein
+``ct.mma`` auf dem PRIM-Block ``(x_prim, y_prim, sp_prim)``.
+
+Grid-Faltung
+^^^^^^^^^^^^
+
+Insgesamt :math:`|a| \cdot |c| \cdot |x_{\text{seq}}| \cdot |b| \cdot
+|y_{\text{seq}}| = 4 \cdot 3 \cdot 24 \cdot 4 \cdot 18 = 20\,736`
+Blöcke. Auf drei ``ct.bid``-Achsen geklappt:
+
+.. code-block:: text
+
+   bid(0) = a · c            range  12   →  (pid_a, pid_c)
+   bid(1) = b                range   4   →   pid_b
+   bid(2) = x_seq · y_seq    range 432   →  (pid_x, pid_y)
+
+Dadurch teilen ``YSEQ`` konsekutive BIDs (``bid(2) // YSEQ = x_seq``)
+denselben ``x_seq``-Streifen — die A-Tile-Spalte wird über bis zu 18
+Blöcke wiederverwendet, ohne dass es eine eigene Swizzle-Logik braucht.
+
+mma-Reihenfolge und der B-Permute
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Die Output-Tile-Form ist :math:`(y_{\text{prim}}, x_{\text{prim}})` —
+``y`` ist die äußere, ``x`` die innere (stride-1) Achse von
+``tensor_abcyx``. ``ct.mma`` ist ``(M, K) @ (K, N) → (M, N)``, also
+mappen wir :math:`M = y_{\text{prim}}, N = x_{\text{prim}},
+K = sp_{\text{prim}}`. Daraus ergibt sich:
+
+* A-Tile aus ``tensor_acspx``: ``shape=(1, 1, 1, tk, 1, tx)`` →
+  Reshape auf :math:`(K, N)` direkt verwendbar – kein Permute.
+* B-Tile aus ``tensor_bspy``: ``shape=(1, 1, tk, 1, ty)`` →
+  Reshape auf :math:`(K, M)`, **muss** auf :math:`(M, K)` permutiert
+  werden, bevor es als erstes mma-Argument geht. Genau einmal pro
+  Schleifeniteration, also 128 ``ct.permute``-Calls pro Block. Die
+  Permute kann der Compiler auf Tile-Fragment-Ebene mit der nächsten
+  mma-Operation fusionieren – im Profil kein eigener Posten.
+
+Kernel-Rumpf
+^^^^^^^^^^^^
+
+.. code-block:: python
+
+   acc = ct.full((ty, tx), 0, dtype=ct.float32)
+   for sp_seq in range(SPSEQ):
+       a_tile = ct.load(A, index=(pid_a, pid_c, sp_seq, 0, pid_x, 0),
+                        shape=(1, 1, 1, tk, 1, tx),
+                        padding_mode=ct.PaddingMode.ZERO)
+       b_tile = ct.load(B, index=(pid_b, sp_seq, 0, pid_y, 0),
+                        shape=(1, 1, tk, 1, ty),
+                        padding_mode=ct.PaddingMode.ZERO)
+       a_kx = ct.reshape(a_tile, (tk, tx))      # (sp_prim, x_prim) = (K, N)
+       b_ky = ct.reshape(b_tile, (tk, ty))      # (sp_prim, y_prim) = (K, M)
+       b_yk = ct.permute(b_ky, (1, 0))          # (y_prim, sp_prim) = (M, K)
+       acc = ct.mma(b_yk, a_kx, acc)            # (M, N) = (y_prim, x_prim)
+
+Reshape vs. Kernel-Indexing
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Die Eingabe-Tensoren werden auf Host-Seite **als Views** in die
+Kernel-erwartete Form gebracht (``.view`` ist O(1), keine Kopie):
+
+.. code-block:: python
+
+   A = tensor_acspx.contiguous().view(Ad, Cd, SPSEQ, PRIM_K, XSEQ, PRIM_M)
+   B = tensor_bspy.contiguous().view(Bd,         SPSEQ, PRIM_K, YSEQ, PRIM_N)
+   C_view = C.view(Ad, Bd, Cd, YSEQ, PRIM_N, XSEQ, PRIM_M)
+
+Diese Reshapes sind *gratis*, weil ``s,p`` adjazent im Speicher liegen
+(``stride_s = stride_p · |p|``) — genau der ``fuse_dims``-Check aus
+Assignment 05, der hier nicht mehr explizit gebraucht wird.
+
+Pre-Loading via ``ct.extract``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In Task 3 hatten wir das Pre-Loading-Pattern (Slide 11) als Plan
+notiert: einen größeren A-Tile global laden und per ``ct.extract``
+im Schleifenrumpf in mma-Größe schneiden. Im Profiling-Test brachte
+das auf den vorliegenden Shapes **keinen** Gewinn — der Engpass war
+nicht die A-Bandbreite, sondern die per-Block-Arbeit (siehe Task 4c:
+große PRIM-Tiles helfen, Pre-Loading nicht). Daher zeigt der eingereichte
+Kernel die schlichte Variante ohne ``ct.extract`` – Slide 11 wäre
+relevant bei einem K-dominanten Workload mit kleinen PRIM-M/N.
+
+Task 4b: Verifikation
+----------------------
+
+Gegen ``torch.einsum("acspx,bspy->abcyx", a16, b16)`` mit FP32-Promotion
+und FP16-Rückgabe, ``atol=2e-1, rtol=2e-2``:
+
+.. code-block:: text
+
+   baseline      allclose=True   max_abs_err=0.2500
+   l2-swizzle    allclose=True   max_abs_err=0.2500
+   big-prim 128  allclose=True   max_abs_err=0.2500
+
+Alle Varianten liegen im FP16-Quantisierungsrauschen (max 0,25 absolute
+Abweichung — die K-Dim ist mit 4096 FP16-Akkumulationen pro Output-Element
+deutlich tiefer als in den vorherigen Assignments, daher der etwas
+größere Fehler als die üblichen ``0.0078 = 2⁻⁷``).
+
+Task 4c: Benchmark
+-------------------
+
+``triton.testing.do_bench(warmup=10, rep=50)``, DGX Spark (GB10), FP16.
+FLOPs der Kontraktion:
+
+.. math::
+
+   2 \cdot |a| \cdot |b| \cdot |c| \cdot |s| \cdot |p| \cdot |x| \cdot |y|
+   \;=\; 2 \cdot 4 \cdot 4 \cdot 3 \cdot 64 \cdot 64 \cdot 1536 \cdot 1152
+   \;\approx\; 6{,}96 \cdot 10^{11}
+
+.. list-table::
+   :header-rows: 1
+   :widths: 32 17 17 17 17
+
+   * - Variante
+     - Tile (M,N,K)
+     - ms
+     - TFLOPS
+     - vs. ``torch``
+   * - ``torch.einsum`` (Referenz)
+     - —
+     - 11,36
+     - **61,25**
+     - 1,00×
+   * - ``baseline`` (Task 4a)
+     - (64, 64, 32)
+     - 42,47
+     - 16,39
+     - 0,27×
+   * - ``big-prim``
+     - (128, 128, 32)
+     - **24,51**
+     - **28,38**
+     - **0,46×**
+   * - ``big-prim`` (PRIM_K=64)
+     - (128, 128, 64)
+     - 25,54
+     - 27,24
+     - 0,44×
+   * - ``l2-swizzle`` GY=9
+     - (64, 64, 32)
+     - 45,10
+     - 15,43
+     - 0,25×
+
+**Beobachtungen.**
+
+* Der **Baseline-Kernel mit der unveränderten Task-3-Config** erreicht
+  **16,4 TFLOPS** — eine Größenordnung über dem, was naive
+  Python-Schleifen erlauben würden, aber klar unter den ~75 TFLOPS aus
+  Assignment 05. Begründung: die PRIM-Tiles aus Task 3 sind mit
+  ``(64, 64, 32)`` für *kleine* GEMM-Dims optimiert (Assignment 04
+  Task 3 Sweep) — bei :math:`x = 1536, y = 1152` macht ein einzelnes
+  Output-Tile von ``64×64`` nur ``1/(24·18) = 0{,}23 %`` des Outputs
+  aus, und der Per-Block-Overhead wird sichtbar.
+
+* **``big-prim`` mit (128, 128, 32) erreicht 28,4 TFLOPS** — Faktor
+  1,73× gegenüber Baseline ohne sonstige Änderungen. Hardware-Begründung
+  identisch zur Heatmap aus Assignment 03 Task 3b: bei großen Problemen
+  liegt der Sweet Spot bei ``128×128`` (mehr Arbeit pro Issue, bessere
+  Tensor-Core-Auslastung). Größeres ``PRIM_K = 64`` bringt **nichts**
+  zusätzlich, weil bereits ``PRIM_K = 32`` die K-Schleife auf 128
+  Iterationen drückt — der Tensor-Core ist nicht K-issue-bound.
+
+* **``l2-swizzle`` *verschlechtert* den Durchsatz konsistent**, je
+  kleiner ``GY`` desto schlimmer. Erklärung: das natürliche Grid-Mapping
+  ``pid_x = bid_xy // YSEQ`` lässt ``YSEQ = 18`` konsekutive BIDs
+  denselben A-Streifen teilen — dort kommt der A-Reuse *gratis*.
+  Jedes ``GY < 18`` bricht genau diesen impliziten Streifen auf,
+  bevor B-Reuse einen Gewinn bringen könnte. Lehre: vor manuellem
+  Swizzling immer das Default-Mapping nachrechnen.
+
+* Erst bei ``GY = 9`` (also halbe y-Spalte pro Gruppe) nähern wir uns
+  wieder dem Baseline-Durchsatz, ohne ihn zu erreichen. Bei ``GY = YSEQ
+  = 18`` wäre der Kernel mathematisch äquivalent zum Baseline.
+
+Optionaler Task: Beat ``torch.einsum``?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Auch mit allen oben gezeigten Optimierungen bleiben wir bei
+**0,46×** gegenüber ``torch.einsum``. Vermutlich passiert dort:
+
+1. **opt_einsum**-Routing: das Modul ist explizit als
+   ``import opt_einsum`` im Boilerplate enthalten — torch nutzt das
+   für die optimale Kontraktions-Reihenfolge und/oder die Übersetzung
+   in mehrere ``torch.matmul`` / cuBLAS-Calls.
+2. **cuBLAS GEMM** mit ausgereiften Tile-Cascades, Software-Pipelining,
+   warp-level Speculative Prefetch usw., die ein handgeschriebener
+   cuTile-Kernel ohne signifikanten Aufwand nicht erreicht.
+
+Beat-Path-Ideen, die im Rahmen dieses Assignments nicht mehr verfolgt
+wurden:
+
+* **Multi-PRIM-K** (Slide 7): zwei oder mehr ``ct.mma``-Calls pro
+  Schleifeniteration, jeder mit unterschiedlichem K-Slice – mehr
+  Tensor-Core-Issue-Rate.
+* **Persistent Kernel + Producer/Consumer**: ein Block bedient mehrere
+  Output-Tiles und überlappt Load mit Compute (Slide 12 / Cooperative
+  Groups). cuTile bietet kein direktes Pipelining-Primitiv.
+* **opt_einsum-äquivalentes Splitting**: die Kontraktion vorher als
+  zwei batched GEMMs zerlegen (``a c (sp) x`` × ``b (sp) y`` →
+  ``(a c) b (sp) y x`` Pfad). Dann ist das aber kein einzelner
+  cuTile-Kernel mehr.
+
+Stand der Abgabe: **Kernel verifiziert, 28,4 TFLOPS (best)**,
+``torch.einsum`` nicht geschlagen — der optionale Task bleibt offen,
+mit dokumentierten nächsten Schritten.
 
 Beiträge
 =========
@@ -248,6 +463,12 @@ Beiträge
    * - Person
      - Beitrag
    * - Moritz Martin
-     - *folgt*
+     - Boilerplate-Anpassungen in ``main.py`` (CUDA-Casts, FP32-/FP16-
+       ``torch.einsum``-Aufrufe), Index-Klassifikation (Task 1a),
+       FP32-vs-FP16-Vergleich (Task 1c), Basis- und optimierte
+       Config-Pipeline (Task 2, 3), Report-Abschnitte zu Task 1–3.
    * - Oliver Dietzel
-     - *folgt*
+     - cuTile-Kernel ``kernel_baseline`` strikt nach Task-3-Config,
+       Verifikation gegen ``torch.einsum``, Benchmark + Sweep über
+       PRIM-Tile-Größen und Y-Swizzle (Task 4a–c sowie optionaler Task);
+       Report-Abschnitt zu Task 4.

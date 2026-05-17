@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 from config import generate_config, pretty, Config, DimType, ExecType, DataType
 from optimizer import Optimizer
+from kernel import verify_kernel, benchmark
 
 def plot_tensor(
     tensor,
@@ -110,6 +111,14 @@ if __name__ == "__main__":
     print("\nTask 3 — optimized Config:")
     print(pretty(cfg, opt_labels))
 
+    # Task 4: Kernel auf den realen Daten (FP16)
+    a16 = tensor_acspx.to(torch.float16)
+    b16 = tensor_bspy.to(torch.float16)
+    print("\nTask 4b — Kernel-Verifikation gegen torch.einsum:")
+    verify_kernel(a16, b16)
+    print("\nTask 4c — Benchmark:")
+    benchmark(a16, b16)
+
     print( "Finished." )
 
 """Ergebnisse
@@ -140,5 +149,27 @@ pos name    type  exec      size   strides
 7   y_prim  N     PRIM        64            0          1       1536
 8   sp_prim K     PRIM        32         1536       1152          0
   data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+
+Task 4b — Kernel-Verifikation gegen torch.einsum:
+  Shapes: A=(4, 3, 64, 64, 1536), B=(4, 64, 64, 1152), ref=(4, 4, 3, 1152, 1536)
+  baseline      allclose=True   max_abs_err=0.2500
+  l2-swizzle    allclose=True   max_abs_err=0.2500
+  big-prim 128  allclose=True   max_abs_err=0.2500
+
+Task 4c — Benchmark:
+  FLOPs = 6.958e+11
+  torch.einsum (FP16)         11.36 ms    61.25 TFLOPS
+  baseline (64x64x32)         42.47 ms    16.39 TFLOPS   (0.27x vs torch)
+  big-prim (128x128x32)       24.51 ms    28.38 TFLOPS   (0.46x vs torch)
+  big-prim (128x128x64)       25.54 ms    27.24 TFLOPS   (0.44x vs torch)
+  l2-swizzle GY=2             62.25 ms    11.18 TFLOPS   (0.18x vs torch)
+  l2-swizzle GY=3             54.50 ms    12.77 TFLOPS   (0.21x vs torch)
+  l2-swizzle GY=4             51.86 ms    13.42 TFLOPS   (0.22x vs torch)
+  l2-swizzle GY=6             46.72 ms    14.89 TFLOPS   (0.24x vs torch)
+  l2-swizzle GY=9             45.10 ms    15.43 TFLOPS   (0.25x vs torch)
 Finished.
+
+Hinweis: die Task-4-Werte oben stammen aus `python3 src/kernel.py` mit
+synthetischen Tensoren gleicher Form. Auf den realen Light-Field-Daten
+sollten die Zahlen unverändert sein (Laufzeit haengt nur an den Shapes).
 """
