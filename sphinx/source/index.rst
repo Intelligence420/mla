@@ -16,5 +16,6 @@
    chapters/03_matrix_multiplication_with_cutile/index
    chapters/04_tensor_contractions_on_gpus/index
    chapters/05_contraction_interface_l2/index
+   chapters/06_multi_input_einsum/index
 
 .. include:: chapters/overview.rst
