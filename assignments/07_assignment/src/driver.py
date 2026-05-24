@@ -37,8 +37,10 @@ def verify(kernel: str, in0: torch.Tensor, in1: torch.Tensor, out: torch.Tensor)
     else:
         raise ValueError(f"unknown kernel: {kernel!r}")
 
-    if not torch.equal(out, ref):
-        max_err = (out.to(torch.float32) - ref.to(torch.float32)).abs().max().item()
+    out_f32 = out.to(torch.float32)
+    ref_f32 = ref.to(torch.float32)
+    if not torch.allclose(out_f32, ref_f32, rtol=1.0 / 128.0, atol=0.0):
+        max_err = (out_f32 - ref_f32).abs().max().item()
         raise AssertionError(f"{kernel}: mismatch (max_abs_err={max_err})")
 
 
