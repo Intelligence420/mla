@@ -10,6 +10,9 @@ sphinx/build/
 __pycache__/
 *.pyc
 
+# WSL/Windows-Download-Metadata
+*:Zone.Identifier
+
 # Abgabe-Archive (vom scripts/create_submission.sh erzeugt)
 /submission_*.tar.xz
 
