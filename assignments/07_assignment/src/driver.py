@@ -28,9 +28,18 @@ def verify(kernel: str, in0: torch.Tensor, in1: torch.Tensor, out: torch.Tensor)
     out : bfloat16 torch tensor
     """
 
-    # TODO: implement verify() for both kernels.
+    a = in0.to(torch.float32)
+    b = in1.to(torch.float32)
+    if kernel == "vadd":
+        ref = (a + b).to(torch.bfloat16)
+    elif kernel == "custom_vadd":
+        ref = (a + b + b).to(torch.bfloat16)
+    else:
+        raise ValueError(f"unknown kernel: {kernel!r}")
 
-    raise NotImplementedError("verify() not yet implemented")
+    if not torch.equal(out, ref):
+        max_err = (out.to(torch.float32) - ref.to(torch.float32)).abs().max().item()
+        raise AssertionError(f"{kernel}: mismatch (max_abs_err={max_err})")
 
 
 def run(kernel_name: str) -> None:
