@@ -24,9 +24,10 @@ def verify(in0: torch.Tensor, in1: torch.Tensor, out: torch.Tensor) -> None:
     out : bfloat16 torch tensor
     """
 
-    # TODO: implement verify() for tensor kernel.
+    ref = in0.to(torch.float32) @ in1.to(torch.float32)
+    actual = out.to(torch.float32)
 
-    raise NotImplementedError("verify() not yet implemented")
+    torch.testing.assert_close(actual, ref, atol=0.5, rtol=0.2)
 
 
 def run() -> None:
@@ -47,6 +48,7 @@ def run() -> None:
     bo_instr.write(insts.tobytes(), 0)
     bo_instr.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE, insts.nbytes, 0)
 
+    torch.manual_seed(42) # for reproducibility
     data_in0 = torch.randn(16, 64, dtype=torch.bfloat16)
     data_in1 = torch.randn(64, 16, dtype=torch.bfloat16)
     data_out = torch.zeros(16, 16, dtype=torch.bfloat16)
