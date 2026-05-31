@@ -18,5 +18,6 @@
    chapters/05_contraction_interface_l2/index
    chapters/06_multi_input_einsum/index
    chapters/07_xdna_isa/index
+   chapters/08_xdna_gemm/index
 
 .. include:: chapters/overview.rst
