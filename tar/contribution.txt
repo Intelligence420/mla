@@ -1,4 +1,4 @@
-Assignment 06 - Contributions
+Assignment 08 - Contributions
 
 Moritz Martin:
   - Implementierung und Doku
