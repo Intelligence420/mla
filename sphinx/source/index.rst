@@ -19,5 +19,6 @@
    chapters/06_multi_input_einsum/index
    chapters/07_xdna_isa/index
    chapters/08_xdna_gemm/index
+   chapters/09_xdna_datamovement/index
 
 .. include:: chapters/overview.rst
