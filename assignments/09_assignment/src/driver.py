@@ -24,9 +24,10 @@ def verify(in0: torch.Tensor, in1: torch.Tensor, out: torch.Tensor) -> None:
     out : bfloat16 torch tensor
     """
 
-    # TODO: implement verify() for tensor kernel.
+    ref = in0.to(torch.float32) @ in1.to(torch.float32)
+    actual = out.to(torch.float32)
 
-    raise NotImplementedError("verify() not yet implemented")
+    torch.testing.assert_close(actual, ref, atol=2, rtol=0.5)
 
 
 def run() -> None:
@@ -48,10 +49,10 @@ def run() -> None:
     bo_instr.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE, insts.nbytes, 0)
 
     torch.manual_seed(42)
-    # TODO: adapt to M=256, N=128, K=1024
-    data_in0 = torch.randn(16, 64, dtype=torch.bfloat16)
-    data_in1 = torch.randn(64, 16, dtype=torch.bfloat16)
-    data_out = torch.zeros(16, 16, dtype=torch.bfloat16)
+    # M=256, N=128, K=1024
+    data_in0 = torch.randn(256, 1024, dtype=torch.bfloat16)
+    data_in1 = torch.randn(1024, 128, dtype=torch.bfloat16)
+    data_out = torch.zeros(256, 128, dtype=torch.bfloat16)
 
     # Create buffer objects with corresponding size
     bo_in0 = pyxrt.bo(device, data_in0.nbytes, pyxrt.bo.host_only, 0)
