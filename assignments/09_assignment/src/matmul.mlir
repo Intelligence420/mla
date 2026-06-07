@@ -18,12 +18,17 @@ module {
       %c0 = arith.constant 0 : index
       %c4294967295 = arith.constant 4294967295 : index
       %c1 = arith.constant 1 : index
+      %c16 = arith.constant 16 : index
+      %c128 = arith.constant 128 : index
       scf.for %arg0 = %c0 to %c4294967295 step %c1 {
-        // TODO: for a*b {
+        // a*b: one (a,b) output tile per iteration (16*8 = 128). Indices are
+        // unused here -- the objectfifos deliver the right tile in FIFO order.
+        scf.for %ab = %c0 to %c128 step %c1 {
           %buffer_out = aie.objectfifo.acquire @out_L1L2_0_0(Produce, 1) : !aie.objectfifosubview<memref<2x2x8x8xbf16>>
           %out = aie.objectfifo.subview.access %buffer_out[0] : !aie.objectfifosubview<memref<2x2x8x8xbf16>> -> memref<2x2x8x8xbf16>
           func.call @zero(%out) : (memref<2x2x8x8xbf16>) -> ()
-          // TODO: for c {
+          // c: accumulate over the 16 K-blocks into the same out tile.
+          scf.for %c = %c0 to %c16 step %c1 {
             %buffer_in0 = aie.objectfifo.acquire @in0_L2L1_0(Consume, 1) : !aie.objectfifosubview<memref<2x8x8x8xbf16>>
             %in0 = aie.objectfifo.subview.access %buffer_in0[0] : !aie.objectfifosubview<memref<2x8x8x8xbf16>> -> memref<2x8x8x8xbf16>
             %buffer_in1 = aie.objectfifo.acquire @in1_L2L1_0(Consume, 1) : !aie.objectfifosubview<memref<8x2x8x8xbf16>>
@@ -31,21 +36,37 @@ module {
             func.call @matmul(%in0, %in1, %out) : (memref<2x8x8x8xbf16>, memref<8x2x8x8xbf16>, memref<2x2x8x8xbf16>) -> ()
             aie.objectfifo.release @in0_L2L1_0(Consume, 1)
             aie.objectfifo.release @in1_L2L1_0(Consume, 1)
-          // }
+          }
           aie.objectfifo.release @out_L1L2_0_0(Produce, 1)
-        //  }
+        }
       }
       aie.end
     } {stack_size = 1024 : i32}
-    // TODO: Adapt memref sizes
-    aie.runtime_sequence(%arg0: memref<16x64xbf16>, %arg1: memref<64x16xbf16>, %arg2: memref<16x16xbf16>) {
-      // TODO: Add needed data movement operations; adapt offsets, sizes, and strides accordingly.
-      // Note: There are only 16 buffer descriptors (ids) on the shim tile; synchronize before reuse.
-      //       dma_wait will synchronize with the first issued corresponding data movement.
-      aiex.npu.dma_memcpy_nd(%arg2[0, 0, 0, 0][1, 1, 16, 16][0, 0, 16, 1]) {id = 0 : i64, metadata = @out_L2L3_0} : memref<16x16xbf16>
-      aiex.npu.dma_memcpy_nd(%arg0[0, 0, 0, 0][1, 1, 16, 64][0, 0, 64, 1]) {id = 1 : i64, metadata = @in0_L3L2_0} : memref<16x64xbf16>
-      aiex.npu.dma_memcpy_nd(%arg1[0, 0, 0, 0][1, 1, 64, 16][0, 0, 16, 1]) {id = 2 : i64, metadata = @in1_L3L2_0} : memref<64x16xbf16>
-      aiex.npu.dma_wait {symbol = @out_L2L3_0}
+    aie.runtime_sequence(%arg0: memref<256x1024xbf16>, %arg1: memref<1024x128xbf16>, %arg2: memref<256x128xbf16>) {
+      // Stream all a/b/c tiles to the compute tile. The a-loop (16 M-blocks) is on
+      // the host; b and c are folded into each BD's 4D access pattern (offsets,
+      // sizes, strides in ELEMENTS, outermost dim left). in0 is independent of b and
+      // is repeated across the 8 N-blocks via stride 0 on the outermost dim.
+      // Only 16 shim BD ids exist; this (correctness-first) version reuses ids 0/1/2
+      // every iteration and waits on @out_L2L3_0 before reuse -- dma_wait pairs with
+      // the first/oldest still-outstanding transfer of that symbol. Task 4 makes this
+      // non-blocking.
+      %c0 = arith.constant 0 : index
+      %c1 = arith.constant 1 : index
+      %c16 = arith.constant 16 : index
+      %c2048 = arith.constant 2048 : index
+      %c16384 = arith.constant 16384 : index
+      scf.for %a = %c0 to %c16 step %c1 {
+        %off_out = arith.muli %a, %c2048 : index    // a*16 rows * N(128)
+        %off_in0 = arith.muli %a, %c16384 : index   // a*16 rows * K(1024)
+        // out tile-row a: [b=8, row=16, col=16], row pitch N=128 (S2MM drain)
+        aiex.npu.dma_memcpy_nd(%arg2[0, 0, 0, %off_out][1, 8, 16, 16][0, 16, 128, 1]) {id = 0 : i64, metadata = @out_L2L3_0} : memref<256x128xbf16>
+        // in0 tile-row a: [b-REPEAT=8 (stride 0), c=16, row=16, col=64], row pitch K=1024
+        aiex.npu.dma_memcpy_nd(%arg0[0, 0, 0, %off_in0][8, 16, 16, 64][0, 64, 1024, 1]) {id = 1 : i64, metadata = @in0_L3L2_0} : memref<256x1024xbf16>
+        // in1: [b=8, c=16, row=64, col=16], row pitch N=128; independent of a (offset 0)
+        aiex.npu.dma_memcpy_nd(%arg1[0, 0, 0, 0][8, 16, 64, 16][16, 8192, 128, 1]) {id = 2 : i64, metadata = @in1_L3L2_0} : memref<1024x128xbf16>
+        aiex.npu.dma_wait {symbol = @out_L2L3_0}
+      }
     }
   }
 }
