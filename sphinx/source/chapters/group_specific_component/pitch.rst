@@ -82,10 +82,10 @@ Pipeline: Ausdruck parsen → Kontraktionsreihenfolge via ``opt_einsum`` →
 parametrierter cuTile-Codegen (Tile-Größe, Swizzle, ``dtype``) → Messung auf
 der GPU → Visualisierung in einem Web-Frontend.
 
-* **MVP:** Ausdruck eingeben → Kernel generieren → Format und Tile-Größe
+* Mindestens: Ausdruck eingeben → Kernel generieren → Format und Tile-Größe
   umstellbar → zwei Graphen: Durchsatz (vs. cuBLAS) und Genauigkeit
   (Fehler gegen fp32-Referenz).
-* **Stretch:** Roofline-Plot, Heatmap der Tile-Autotuning-Landschaft,
+* Optional/Zusätlich (wenn die Zeit reicht): Roofline-Plot, Heatmap der Tile-Autotuning-Landschaft,
   „Auto-Tune"-Button, Anzeige des generierten Kernel-Codes und optionales
 
 Erwartete Ergebnisse / Erkenntnisse
