@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mockup — Interaktiver einsum/GEMM-Performance-Explorer (cuTile)</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --panel:#ffffff; --ink:#1f2530; --muted:#6b7280;
+    --line:#e4e7ec; --accent:#7b3fe4; --accent2:#2563eb; --ok:#16a34a;
+    --warn:#d97706; --bar1:#7b3fe4; --bar2:#9aa3af; --grid:#eef0f3;
+    --mvp:#16a34a; --stretch:#d97706;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:var(--bg);color:var(--ink);font-size:14px;line-height:1.45}
+  .topbar{background:linear-gradient(90deg,#5b21b6,#7b3fe4);color:#fff;padding:14px 22px;
+          display:flex;align-items:center;gap:12px}
+  .topbar h1{font-size:17px;margin:0;font-weight:650}
+  .topbar .sub{opacity:.85;font-size:12.5px;margin-left:auto}
+  .layout{display:flex;min-height:calc(100vh - 50px)}
+  /* sidebar */
+  .sidebar{width:300px;background:var(--panel);border-right:1px solid var(--line);padding:18px 16px;flex-shrink:0}
+  .sidebar h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px}
+  .sidebar h2:first-child{margin-top:0}
+  label.fld{display:block;font-size:12.5px;color:var(--muted);margin:10px 0 4px}
+  input[type=text],select,input[type=number]{width:100%;padding:8px 10px;border:1px solid var(--line);
+       border-radius:7px;font-size:13px;background:#fff;color:var(--ink);font-family:inherit}
+  input[type=text].mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  input:disabled{background:#f2f3f5;color:var(--muted)}
+  .row2{display:flex;gap:8px}
+  .row2>div{flex:1}
+  .slider{width:100%}
+  .sliderval{float:right;font-variant-numeric:tabular-nums;color:var(--ink);font-weight:600}
+  .chk{display:flex;align-items:center;gap:8px;margin-top:10px;color:var(--ink);font-size:13px}
+  /* operand list */
+  .operand{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .operand .opname{width:18px;font-weight:700;color:var(--accent);text-align:center;flex-shrink:0}
+  .operand .opsub{flex:1}
+  .operand .oprm{background:#fbe9e9;color:#c0392b;border:0;border-radius:6px;padding:5px 9px;
+       font-size:12px;line-height:1;cursor:pointer}
+  .btn-add{background:#f1eefe;color:var(--accent);width:100%;margin-top:4px;border:0;border-radius:8px;
+       padding:8px;font-size:13px;font-weight:600;cursor:pointer}
+  .exprpreview{background:#f6f4fe;border:1px dashed #c9b8f2;border-radius:7px;padding:8px 10px;
+       color:var(--ink);font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+       word-break:break-all}
+  .hint{font-size:11px;color:var(--muted);margin-top:3px}
+  .btns{margin-top:20px;display:flex;flex-direction:column;gap:8px}
+  button{font-family:inherit}
+  .btn-primary,.btn-ghost{border:0;border-radius:8px;padding:10px 12px;font-size:13.5px;font-weight:600;cursor:pointer}
+  .btn-primary{background:var(--accent);color:#fff}
+  .btn-ghost{background:#f1eefe;color:var(--accent)}
+  .badge{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;
+         vertical-align:middle;margin-left:6px}
+  .badge.mvp{background:#dcfce7;color:var(--mvp)}
+  .badge.stretch{background:#fef3c7;color:var(--stretch)}
+  /* main */
+  .main{flex:1;padding:20px 24px;overflow:auto}
+  .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:14px 16px}
+  .kpi .k{font-size:12px;color:var(--muted)}
+  .kpi .v{font-size:26px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums}
+  .kpi .d{font-size:12px;margin-top:2px}
+  .up{color:var(--ok)} .down{color:var(--warn)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:14px 16px;margin-bottom:16px}
+  .card h3{margin:0 0 2px;font-size:14px}
+  .card .cap{font-size:12px;color:var(--muted);margin-bottom:10px}
+  .codepanel{background:#1e1e2e;color:#e6e6f0;border-radius:10px;padding:14px 16px;
+       font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;
+       white-space:pre;overflow:auto;line-height:1.5}
+  .c-kw{color:#c792ea}.c-fn{color:#82aaff}.c-num{color:#f78c6c}.c-str{color:#c3e88d}.c-cm{color:#7a86a8}
+  .foot{color:var(--muted);font-size:12px;margin-top:8px;text-align:center}
+  text{font-family:inherit}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span style="font-size:18px">⚡</span>
+  <h1>einsum / GEMM Performance-Explorer · cuTile</h1>
+  <span class="sub">Mockup — statische Demodaten</span>
+</div>
+
+<div class="layout">
+
+  <!-- ================= SIDEBAR (Controls) ================= -->
+  <aside class="sidebar">
+    <h2>Operation</h2>
+    <label class="fld">Eingabe-Operanden</label>
+    <div id="operands"><!-- per JS befüllt --></div>
+    <button class="btn-add" id="addOp">+ Operand hinzufügen</button>
+
+    <label class="chk"><input type="checkbox" id="autoOut" checked /> Ausgabe automatisch ableiten</label>
+    <label class="fld">Ausgabe-Indizes</label>
+    <input type="text" class="mono" id="outIdx" />
+    <div class="hint">Implizit: Indizes, die genau einmal vorkommen (alphabetisch).</div>
+
+    <label class="fld">Resultierender Ausdruck</label>
+    <div class="exprpreview" id="exprPreview">…</div>
+
+    <h2>Dimensionen</h2>
+    <label class="fld">Größe je Index (Default)</label>
+    <input type="number" value="4096" />
+
+    <h2>Zahlenformat</h2>
+    <label class="fld">dtype (Compute / Akku)</label>
+    <select>
+      <option>fp16 → fp32</option>
+      <option selected>bf16 → fp32</option>
+      <option>fp8 (e4m3) → fp16</option>
+      <option>tf32 → fp32</option>
+      <option>fp32 → fp32</option>
+    </select>
+
+    <h2>Tiling</h2>
+    <label class="fld">Tile M <span class="sliderval">128</span></label>
+    <input class="slider" type="range" min="16" max="256" value="128" step="16"/>
+    <label class="fld">Tile N <span class="sliderval">128</span></label>
+    <input class="slider" type="range" min="16" max="256" value="128" step="16"/>
+    <label class="fld">Tile K <span class="sliderval">64</span></label>
+    <input class="slider" type="range" min="16" max="128" value="64" step="16"/>
+    <label class="chk"><input type="checkbox" checked /> Swizzling aktiv</label>
+
+    <div class="btns">
+      <button class="btn-primary">▶  Benchmark ausführen</button>
+      <button class="btn-ghost">🔍  Auto-Tune <span class="badge stretch">Stretch</span></button>
+    </div>
+  </aside>
+
+  <!-- ================= MAIN ================= -->
+  <main class="main">
+
+    <!-- KPI cards -->
+    <div class="kpis">
+      <div class="kpi">
+        <div class="k">Durchsatz</div>
+        <div class="v">71.4 <span style="font-size:14px;color:var(--muted)">TFLOP/s</span></div>
+        <div class="d up">▲ 9.8× vs. naives Tiling</div>
+      </div>
+      <div class="kpi">
+        <div class="k">Laufzeit</div>
+        <div class="v">4.7 <span style="font-size:14px;color:var(--muted)">ms</span></div>
+        <div class="d">200 Dispatches, 10 Warmup</div>
+      </div>
+      <div class="kpi">
+        <div class="k">Mittl. Fehler vs. fp32</div>
+        <div class="v">0.27</div>
+        <div class="d">max 1.9 · bf16-Rauschen</div>
+      </div>
+    </div>
+
+    <!-- Charts row -->
+    <div class="grid2">
+
+      <!-- Bar chart: throughput per precision (kein Library-Baseline) -->
+      <div class="card">
+        <h3>Durchsatz je Zahlenformat <span class="badge mvp">MVP</span></h3>
+        <div class="cap">TFLOP/s · aktives Format hervorgehoben</div>
+        <svg viewBox="0 0 360 200" width="100%" height="200">
+          <g stroke="var(--grid)" stroke-width="1">
+            <line x1="40" y1="26"  x2="350" y2="26"/>
+            <line x1="40" y1="55"  x2="350" y2="55"/>
+            <line x1="40" y1="84"  x2="350" y2="84"/>
+            <line x1="40" y1="112" x2="350" y2="112"/>
+            <line x1="40" y1="141" x2="350" y2="141"/>
+            <line x1="40" y1="170" x2="350" y2="170"/>
+          </g>
+          <g fill="var(--muted)" font-size="9" text-anchor="end">
+            <text x="36" y="173">0</text><text x="36" y="144">25</text>
+            <text x="36" y="115">50</text><text x="36" y="87">75</text>
+            <text x="36" y="58">100</text><text x="36" y="29">125</text>
+          </g>
+          <!-- bars (baseline y=170): fp32 19, tf32 38, fp16 64, bf16 71.4(aktiv), fp8 119 -->
+          <g>
+            <rect x="58"  y="148" width="40" height="22"  fill="var(--bar2)"/>
+            <rect x="116" y="126" width="40" height="44"  fill="var(--bar2)"/>
+            <rect x="174" y="96"  width="40" height="74"  fill="var(--bar2)"/>
+            <rect x="232" y="88"  width="40" height="82"  fill="var(--bar1)"/>
+            <rect x="290" y="33"  width="40" height="137" fill="var(--bar2)"/>
+          </g>
+          <g fill="var(--ink)" font-size="9.5" font-weight="600" text-anchor="middle">
+            <text x="78"  y="143">19</text>
+            <text x="136" y="121">38</text>
+            <text x="194" y="91">64</text>
+            <text x="252" y="83">71</text>
+            <text x="310" y="28">119</text>
+          </g>
+          <g fill="var(--muted)" font-size="9.5" text-anchor="middle">
+            <text x="78"  y="184">fp32</text>
+            <text x="136" y="184">tf32</text>
+            <text x="194" y="184">fp16</text>
+            <text x="252" y="184" font-weight="700" fill="var(--accent)">bf16</text>
+            <text x="310" y="184">fp8</text>
+          </g>
+        </svg>
+      </div>
+
+      <!-- Scatter: accuracy vs throughput across precisions -->
+      <div class="card">
+        <h3>Genauigkeit ↔ Durchsatz <span class="badge mvp">MVP</span></h3>
+        <div class="cap">je Zahlenformat · Fehler vs. fp32-Referenz</div>
+        <svg viewBox="0 0 360 200" width="100%" height="200">
+          <g stroke="var(--grid)" stroke-width="1">
+            <line x1="44" y1="20" x2="350" y2="20"/>
+            <line x1="44" y1="60" x2="350" y2="60"/>
+            <line x1="44" y1="100" x2="350" y2="100"/>
+            <line x1="44" y1="140" x2="350" y2="140"/>
+          </g>
+          <text x="195" y="195" font-size="9.5" fill="var(--muted)" text-anchor="middle">Durchsatz (TFLOP/s) →</text>
+          <text x="14" y="100" font-size="9.5" fill="var(--muted)" text-anchor="middle" transform="rotate(-90,14,100)">↑ Fehler vs. fp32</text>
+          <g>
+            <circle cx="90"  cy="150" r="6" fill="#2563eb"/><text x="90"  y="138" font-size="9" text-anchor="middle" fill="var(--ink)">fp32</text>
+            <circle cx="150" cy="138" r="6" fill="#0891b2"/><text x="150" y="126" font-size="9" text-anchor="middle" fill="var(--ink)">tf32</text>
+            <circle cx="225" cy="96"  r="6" fill="#7b3fe4"/><text x="225" y="84"  font-size="9" text-anchor="middle" fill="var(--ink)">fp16</text>
+            <circle cx="250" cy="82"  r="7" fill="#7b3fe4" stroke="#1f2530" stroke-width="2"/><text x="262" y="72" font-size="9" fill="var(--ink)">bf16 ◄ aktiv</text>
+            <circle cx="320" cy="40"  r="6" fill="#db2777"/><text x="320" y="56"  font-size="9" text-anchor="middle" fill="var(--ink)">fp8</text>
+          </g>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Heatmap (stretch) -->
+    <div class="card">
+      <h3>Autotuning-Landschaft · Tile&nbsp;M × Tile&nbsp;N <span class="badge stretch">Stretch</span></h3>
+      <div class="cap">Durchsatz je Tile-Konfiguration — dunkler = schneller; ★ = beste gefundene Config</div>
+      <svg viewBox="0 0 520 150" width="100%" height="150">
+        <g fill="var(--muted)" font-size="9.5" text-anchor="middle">
+          <text x="98"  y="14">32</text><text x="158" y="14">64</text>
+          <text x="218" y="14">128</text><text x="278" y="14">256</text>
+          <text x="40" y="14">TM\TN</text>
+        </g>
+        <g fill="var(--muted)" font-size="9.5" text-anchor="end">
+          <text x="60" y="42">32</text><text x="60" y="72">64</text>
+          <text x="60" y="102">128</text><text x="60" y="132">256</text>
+        </g>
+        <g stroke="#fff" stroke-width="2">
+          <rect x="70"  y="24" width="56" height="28" fill="#efe7fb"/>
+          <rect x="130" y="24" width="56" height="28" fill="#d9c6f3"/>
+          <rect x="190" y="24" width="56" height="28" fill="#c4a6ee"/>
+          <rect x="250" y="24" width="56" height="28" fill="#b48fe8"/>
+          <rect x="70"  y="54" width="56" height="28" fill="#d9c6f3"/>
+          <rect x="130" y="54" width="56" height="28" fill="#b48fe8"/>
+          <rect x="190" y="54" width="56" height="28" fill="#9061d9"/>
+          <rect x="250" y="54" width="56" height="28" fill="#7b3fe4"/>
+          <rect x="70"  y="84" width="56" height="28" fill="#c4a6ee"/>
+          <rect x="130" y="84" width="56" height="28" fill="#9061d9"/>
+          <rect x="190" y="84" width="56" height="28" fill="#5b21b6"/>
+          <rect x="250" y="84" width="56" height="28" fill="#7b3fe4"/>
+          <rect x="70"  y="114" width="56" height="28" fill="#b48fe8"/>
+          <rect x="130" y="114" width="56" height="28" fill="#7b3fe4"/>
+          <rect x="190" y="114" width="56" height="28" fill="#9061d9"/>
+          <rect x="250" y="114" width="56" height="28" fill="#c4a6ee"/>
+        </g>
+        <text x="218" y="103" font-size="15" text-anchor="middle" fill="#ffd84d">★</text>
+        <defs>
+          <linearGradient id="cb" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#efe7fb"/><stop offset="1" stop-color="#5b21b6"/>
+          </linearGradient>
+        </defs>
+        <rect x="360" y="40" width="18" height="90" fill="url(#cb)" stroke="var(--line)"/>
+        <g fill="var(--muted)" font-size="9.5">
+          <text x="384" y="46">langsam</text><text x="384" y="128">schnell</text>
+          <text x="395" y="86" font-weight="600" fill="var(--ink)">71 TFLOP/s @ ★</text>
+        </g>
+      </svg>
+    </div>
+
+    <!-- Generated code -->
+    <div class="card">
+      <h3>Generiertes cuTile-Kernel <span class="badge stretch">Stretch</span></h3>
+      <div class="cap" id="codeCap">aus dem Ausdruck · bf16 · TM=128, TN=128, TK=64</div>
+      <div class="codepanel"><span class="c-cm"># auto-generiert · Kontraktionsreihenfolge via opt_einsum</span>
+<span class="c-kw">@cuda.tile.jit</span>
+<span class="c-kw">def</span> <span class="c-fn">contract</span>(operands, out, TM=<span class="c-num">128</span>, TN=<span class="c-num">128</span>, TK=<span class="c-num">64</span>):
+    i, j = tile.program_id()
+    acc = tile.zeros((TM, TN), dtype=<span class="c-str">"fp32"</span>)
+    <span class="c-kw">for</span> k <span class="c-kw">in</span> tile.range(<span class="c-num">0</span>, K, TK):
+        a = tile.load(lhs[i, k], (TM, TK), swizzle=<span class="c-kw">True</span>)
+        b = tile.load(rhs[k, j], (TK, TN), swizzle=<span class="c-kw">True</span>)
+        acc += tile.dot(a, b)            <span class="c-cm"># bf16 → fp32 MMA</span>
+    tile.store(out[i, j], acc.to(<span class="c-str">"bf16"</span>))</div>
+    </div>
+
+    <p class="foot">Mockup mit statischen Beispiel­daten — keine echte Ausführung. Layout-Vorschau für den Pitch.</p>
+
+  </main>
+</div>
+
+<script>
+  const NAMES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const opsEl    = document.getElementById('operands');
+  const autoChk  = document.getElementById('autoOut');
+  const outInput = document.getElementById('outIdx');
+  const preview  = document.getElementById('exprPreview');
+  const codeCap  = document.getElementById('codeCap');
+
+  function subsList(){
+    return [...opsEl.querySelectorAll('.opsub')].map(i => i.value.trim()).filter(s => s.length);
+  }
+  // implizite numpy-Regel: jeder Index, der genau einmal vorkommt → Output (sortiert)
+  function deriveOutput(subs){
+    const count = {};
+    subs.join('').split('').forEach(c => { if(/[a-z]/.test(c)) count[c] = (count[c]||0)+1; });
+    return Object.keys(count).filter(c => count[c] === 1).sort().join('');
+  }
+  function renameAll(){
+    [...opsEl.children].forEach((r,idx) => { r.querySelector('.opname').textContent = NAMES[idx % 26]; });
+  }
+  function refresh(){
+    const subs = subsList();
+    if(autoChk.checked){
+      outInput.value = deriveOutput(subs);
+      outInput.disabled = true;
+    } else {
+      outInput.disabled = false;
+    }
+    const expr = subs.join(',') + ' -> ' + (outInput.value || '?');
+    preview.textContent = expr;
+    codeCap.textContent = 'aus "' + expr + '" · bf16 · TM=128, TN=128, TK=64';
+  }
+  function addOperand(val){
+    const row = document.createElement('div');
+    row.className = 'operand';
+    row.innerHTML =
+      '<span class="opname"></span>' +
+      '<input type="text" class="mono opsub" placeholder="z.B. ij" />' +
+      '<button class="oprm" title="entfernen">✕</button>';
+    row.querySelector('.opsub').value = val || '';
+    row.querySelector('.opsub').addEventListener('input', refresh);
+    row.querySelector('.oprm').addEventListener('click', () => { row.remove(); renameAll(); refresh(); });
+    opsEl.appendChild(row);
+    renameAll();
+  }
+  document.getElementById('addOp').addEventListener('click', () => { addOperand(''); refresh(); });
+  autoChk.addEventListener('change', refresh);
+  outInput.addEventListener('input', refresh);
+
+  // Seed: 3-Operanden-Kette ij,jk,kl  →  Output abgeleitet: il
+  addOperand('ij'); addOperand('jk'); addOperand('kl');
+  refresh();
+</script>
+</body>
+</html>

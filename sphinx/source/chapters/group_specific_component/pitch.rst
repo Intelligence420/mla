@@ -55,6 +55,12 @@ Idee 2 — GPU/cuTile: Interaktiver einsum/GEMM-Performance-Explorer
    Die GUI ist nur die Visualisierungs-Schicht — die eigentliche
    Substanz sind Kernel-Erzeugung, Autotuning und ehrliche Messung. 
 
+.. figure:: /_static/mla_gpu_mockup_1.png
+   :width: 100%
+   :alt: Mockup des interaktiven einsum/GEMM-Performance-Explorers
+
+   KI generiert
+
 Einführung
 ----------
 
