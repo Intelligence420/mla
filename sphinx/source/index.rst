@@ -22,4 +22,11 @@
    chapters/09_xdna_datamovement/index
    chapters/10_xdna_whole_npu/index
 
+.. toctree::
+   :hidden:
+   :maxdepth: 2
+   :caption: Group-Specific Component
+
+   chapters/group_specific_component/index
+
 .. include:: chapters/overview.rst
