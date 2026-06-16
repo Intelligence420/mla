@@ -13,30 +13,62 @@ zwei Slides vorgesehen, die jeweils die folgenden vier Punkte abdecken:
 
 .. _gsc_pitch_idee1:
 
-Idee 1 — XDNA-NPU
-=================
+Idee 1 — XDNA-NPU: Fusionierter Transformer-FFN-Block
+=====================================================
 
-.. note:: TODO — Titel und Inhalt werden gemeinsam formuliert.
+.. tip::
+
+   Die zwei großen Matrix-Multiplikationen einer Transformer-Schicht plus die
+   Aktivierungsfunktion dazwischen zu *einem* Ablauf auf der NPU verschmelzen,
+   statt das große Zwischenergebnis mehrfach durch den langsamen Hauptspeicher
+   zu schicken.
 
 Einführung
 ----------
 
-.. note:: TODO
+Der Feed-Forward-Block (``FFN``, auch „MLP-Block") ist neben der Attention der
+zweite Kernbaustein jeder Transformer-Schicht und wird auf jeden Token gleich
+angewendet: ``y = W₂ · aktivierung(W₁ · x + b₁) + b₂``. Er besteht aus zwei
+Linear-Schichten (= zwei GEMMs) mit einer elementweisen Aktivierung dazwischen
+— und damit aus genau den Bausteinen, die bereits existieren: die
+Whole-NPU-GEMM (A10), die elementweise Addition für den Bias (A07) und der
+Tensor-Microkernel (A08). Das Projekt verkettet und *verschmilzt* diese
+Bausteine zu einer kompletten FFN-Teilschicht.
 
 Problemformulierung
 -------------------
 
-.. note:: TODO
+Die erste Linear-Schicht bläht die Daten auf (typisch ein rund 4× breiteres
+Zwischenergebnis ``H``), die zweite staucht sie wieder zusammen. Führt man die
+drei Schritte getrennt aus, wird dieses große Zwischenergebnis nach L3
+geschrieben, für die Aktivierung wieder gelesen, erneut geschrieben und für das
+zweite GEMM nochmals gelesen. Genau dieser Datenbewegungs- und
+Dispatch-Overhead dominierte bereits in A10 bei kleinen Problemgrößen.
 
 Lösungsansatz
 -------------
 
-.. note:: TODO
+Beide GEMMs und die Aktivierung werden zu einer Pipeline verschmolzen: Die
+Ergebnis-Kachel des ersten GEMM wird **direkt auf dem Compute-Tile** mit Bias
+versehen und aktiviert und sofort in das zweite GEMM weitergereicht — das
+Zwischenergebnis bleibt L1/L2-resident und wird nie nach L3 zurückgeschrieben.
+Wiederverwendet werden der Matmul-Microkernel (zweimal) und die elementweise
+Addition; der eigentliche Aufwand liegt im MLIR-AIE-Datenfluss, der die beiden
+GEMMs mit der Zwischenstufe verkettet.
+
+* Mindestens: ein fusionierter FFN-Block mit **ReLU** (``max(0, x)``, trivial
+  auf der Vektoreinheit), gegen eine PyTorch-Referenz verifiziert.
+* Optional (wenn die Zeit reicht): **GELU** über eine Polynom-/LUT-Approximation
+  auf der AIE2-Vektoreinheit.
 
 Erwartete Ergebnisse / Erkenntnisse
 -----------------------------------
 
-.. note:: TODO
+* Speedup des fusionierten Blocks gegenüber drei separaten
+  GEMM-/Aktivierungs-Dispatches.
+* Ab welcher Problemgröße sich die Fusion lohnt (speicher- vs.
+  rechengebunden).
+* bf16-Genauigkeit; bei GELU zusätzlich die Güte der Approximation.
 
 .. _gsc_pitch_idee2:
 
@@ -92,7 +124,7 @@ der GPU → Visualisierung in einem Web-Frontend.
   umstellbar → zwei Graphen: Durchsatz (vs. cuBLAS) und Genauigkeit
   (Fehler gegen fp32-Referenz).
 * Optional/Zusätlich (wenn die Zeit reicht): Roofline-Plot, Heatmap der Tile-Autotuning-Landschaft,
-  „Auto-Tune"-Button, Anzeige des generierten Kernel-Codes und optionales
+  „Auto-Tune"-Button, Anzeige des generierten Kernel-Codes
 
 Erwartete Ergebnisse / Erkenntnisse
 -----------------------------------

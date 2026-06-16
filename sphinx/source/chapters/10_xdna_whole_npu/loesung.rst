@@ -339,31 +339,6 @@ und das L1-Tile in ``M``- und ``N``-Richtung gleich groß
 (``p·m = q·n``, hier je 16), so wären beide Konfigurationen vollständig
 symmetrisch und es wäre **kein** Performance-Unterschied zu erwarten.
 
-Group Specific Component
-========================
-
-Kurzbeschreibung der beiden Projektideen (Pitch am 17.06.2026):
-
-**Idee 1 — XDNA-NPU: Fused Multi-Head-Attention auf der ganzen NPU.**
-Aufbauend auf dem Whole-NPU-GEMM dieser Aufgabe soll ein vollständiger
-Attention-Block (``softmax(Q·Kᵀ/√d)·V``) als *fused kernel* auf alle 32
-Compute-Tiles abgebildet werden, mit räumlicher Verteilung der Köpfe/
-Sequenzblöcke und L1/L2-residenten Zwischenergebnissen, um die
-DMA-Bandbreite zu sparen. Untersucht wird, wie weit sich Softmax und die
-beiden Matmuls ohne Rückschreiben nach L3 verschmelzen lassen; erwartet
-wird ein deutlicher Durchsatzgewinn gegenüber drei separaten GEMM-/
-Softmax-Dispatches und eine Einordnung der erreichten TFLOP/s.
-
-**Idee 2 — GPU/cuTile: Fused Mixture-of-Experts-Layer.**
-Mit ``cuTile`` soll das Gating plus die Experten-GEMMs eines
-MoE-Feed-Forward-Layers als getiltes, fusioniertes Kernel umgesetzt
-werden, bei dem Tokens datenabhängig den Experten zugeordnet und in
-Tiles gebündelt verarbeitet werden. Problem ist die unregelmäßige,
-sparse Token-Verteilung; die vorgeschlagene Lösung nutzt
-tile-granulares Routing und ``opt_einsum``-artige Kontraktion. Erwartet
-werden Erkenntnisse über Auslastung und Overhead gegenüber einer dichten
-Referenz-Implementierung.
-
 Beiträge
 =========
 
