@@ -38,8 +38,7 @@ Bausteine zu einer kompletten FFN-Teilschicht.
 Problemformulierung
 -------------------
 
-Die erste Linear-Schicht bläht die Daten auf (typisch ein rund 4× breiteres
-Zwischenergebnis ``H``), die zweite staucht sie wieder zusammen. Führt man die
+Die erste Linear-Schicht bläht die Daten auf, die zweite staucht sie wieder zusammen. Führt man die
 drei Schritte getrennt aus, wird dieses große Zwischenergebnis nach L3
 geschrieben, für die Aktivierung wieder gelesen, erneut geschrieben und für das
 zweite GEMM nochmals gelesen. Genau dieser Datenbewegungs- und
@@ -56,7 +55,7 @@ Wiederverwendet werden der Matmul-Microkernel (zweimal) und die elementweise
 Addition; der eigentliche Aufwand liegt im MLIR-AIE-Datenfluss, der die beiden
 GEMMs mit der Zwischenstufe verkettet.
 
-* Mindestens: ein fusionierter FFN-Block mit **ReLU** (``max(0, x)``, trivial
+* ein fusionierter FFN-Block mit **ReLU** (``max(0, x)``, trivial
   auf der Vektoreinheit), gegen eine PyTorch-Referenz verifiziert.
 * Optional (wenn die Zeit reicht): **GELU** über eine Polynom-/LUT-Approximation
   auf der AIE2-Vektoreinheit.
