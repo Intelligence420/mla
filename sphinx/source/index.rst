@@ -20,5 +20,6 @@
    chapters/07_xdna_isa/index
    chapters/08_xdna_gemm/index
    chapters/09_xdna_datamovement/index
+   chapters/10_xdna_whole_npu/index
 
 .. include:: chapters/overview.rst
