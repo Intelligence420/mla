@@ -29,7 +29,7 @@ Ein Tool: Nutzer gibt einen einsum-/GEMM-Ausdruck ein → daraus wird **live** e
 | **dtype-Matrix** | empirisch geklärt — s. §5 | Analyse-Testing auf GB10 |
 | **Persistenz / Results-Store** | alle Mess-/Analyse-Ergebnisse **strukturiert & reproduzierbar** speichern (nicht temporär) | Wiederverwendung, Report-Datenquelle, Cache, Vergleich über Läufe |
 | **Repo-Layout** | top-level `project/`: `tool_pipeline/` (Tool), `project-development/` (Bau-Artefakte: PLAN.md, analysis), `results/` | Group-Specific Component als eigenständiges Deliverable, klar getrennt von `assignments/` |
-| **Results-Store-Format** | **JSON Lines** (`project/results/results.jsonl`, ein Objekt je Lauf) + generierte Kernel als `results/kernels/<hash>.py` | simpel, transparent, git-diff-bar, pandas-ladbar |
+| **Results-Store-Format** | **JSON Lines** (`project/results/results.jsonl`, ein Objekt je Lauf) + generierte Kernel als `results/kernels/<slug>.py` | simpel, transparent, git-diff-bar, pandas-ladbar; Kernel-Dateiname = **lesbarer, normalisierter Config-Slug** (`expr`/`dtype`/`acc_dtype`/`tile`/`swizzle`, z. B. `ik_kj_to_ij__fp16-fp32__TM128_TN128_TK64.py`) statt Hash → selbsterklärend + deterministischer Cache-Treffer (Config steht ohnehin im JSONL) |
 
 ## 3. Codegen-Architektur (C1 + B1)
 
@@ -79,7 +79,7 @@ Ein Tool: Nutzer gibt einen einsum-/GEMM-Ausdruck ein → daraus wird **live** e
 
 ## 7. Offene Schritte
 
-- ✅ **Schritt 6 erledigt:** Layout = top-level `project/` (s. §9); Results-Store = JSON Lines + `kernels/<hash>.py`. Sphinx-Integration: Plots/Tabellen aus dem Store in den Report.
+- ✅ **Schritt 6 erledigt:** Layout = top-level `project/` (s. §9); Results-Store = JSON Lines + `kernels/<slug>.py` (lesbarer Config-Slug, s. §2). Sphinx-Integration: Plots/Tabellen aus dem Store in den Report.
 - **Schritt 7 = die Teil-Ziele (s. §10):** inkrementelle Umsetzungsreihenfolge; jedes Teil-Ziel komplett & korrekt, spätere bauen darauf auf. Aufgabenteilung flexibel (gemeinsam, mit Assistenz) — die Reihenfolge treibt uns, nicht der Kalender.
 
 ## 8. Framework-Recherche (Kurz-Fazit)
@@ -106,7 +106,7 @@ project/
 ├── project-development/      # Bau-Artefakte (nicht das ausgelieferte Tool)
 │   ├── PLAN.md                # dieser Plan
 │   └── analysis/             # RESULTS_gb10.md + dtype_analyse.py
-├── results/                  # results.jsonl + kernels/<hash>.py   (Results-Store)
+├── results/                  # results.jsonl + kernels/<slug>.py   (Results-Store)
 └── tests/                    # test_reshape · test_codegen · test_measure
 ```
 
