@@ -1,0 +1,6 @@
+# GUI + plotting (install into the existing project venv)
+dash
+dash-bootstrap-components
+plotly
+pandas
+# torch (CUDA), cuda.tile, triton, cupy are provided by /home/mla08/MLA/mla/.venv
