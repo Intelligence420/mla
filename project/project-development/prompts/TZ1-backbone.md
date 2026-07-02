@@ -17,7 +17,7 @@ Du arbeitest im Repo `/home/mla08/MLA/mla`. Wir bauen die Group-Specific Compone
 - **TZ-1-Scope (eng halten!):** NUR `ik,kj->ij` (ein GEMM), dtype **fp16 → fp32-Akku**, **feste** Tile (z. B. TM=128, TN=128, TK=64), **kein** Swizzle, **keine** GUI. Headless über `cli.py`. dtypes / Tile-Slider / Swizzle / GUI / allgemeine Kontraktion sind **spätere** Teil-Ziele — **nicht** vorbauen; ABER die Schnittstellen (`RunConfig`/`RunResult`, `run()`) sauber & erweiterbar anlegen.
 - **Größtes Risiko:** `ct.mma`-Operanden-Orientierung erzeugt bei Fehler ein **stilles Falschergebnis** (kompiliert, läuft, liefert falsche Zahl — kein Crash). `dtype_analyse.py` hat die korrekte plain-GEMM-Orientierung — spiegele sie. **Verify-before-trust:** jeder generierte Kernel wird gegen eine `torch`-fp32-Referenz geprüft (`torch.allclose` + `max_abs_err`), *bevor* seine Zahlen verwendet/angezeigt werden.
 - **Pipeline von TZ 1** (alle Stufen laufen real, minimal): `schema` → `ir/parse` (GEMM) → `ir/reshape` (Passthrough, Batch=1) → `codegen` (emittiert `@ct.kernel`-Quelltext per f-String) → `compile` (`exec` + `ct.launch`, einfacher Hash-Cache) → `measure/verify` (fp32-Ref, max_err) → `measure/bench` + `metrics` (CUDA-Events → ms, TFLOP/s) → `store` (JSONL + Kernel-Datei). `run.py` orchestriert, `cli.py` stößt an.
-- **Persistenz:** generierter Quelltext nach `project/results/kernels/<hash>.py`; ein Ergebnis-Objekt je Lauf nach `project/results/results.jsonl`.
+- **Persistenz:** generierter Quelltext nach `project/results/kernels/<slug>.py` (lesbarer Slug, kein Hash); ein Ergebnis-Objekt je Lauf nach `project/results/results.jsonl`.
 - **Harte Regel:** **niemals** `git commit` / `git push` in diesem Repo.
 
 ## Notfalls recherchieren
@@ -55,7 +55,7 @@ ct.store(C, index=(i, j), tile=ct.astype(acc, C.dtype))
 ```
 (Exakte Tupel/Reshapes/Orientierung aus `dtype_analyse.py` übernehmen — nicht raten.)
 
-Kernel-Cache & Dateiname: stabiler Hash (z. B. `hashlib.sha1`) über normalisierte `(expr, dtype, acc_dtype, tile, swizzle)` → `project/results/kernels/<hash>.py`. Existieren Datei + kompiliertes Objekt schon → wiederverwenden (nicht neu compilen).
+Kernel-Cache & Dateiname: **lesbarer Slug** aus der normalisierten Config `(expr, dtype, acc_dtype, tile, swizzle)`, z. B. `ik_kj_to_ij__fp16-fp32__TM128_TN128_TK64.py` → `project/results/kernels/<slug>.py`. Existieren Datei + kompiliertes Objekt schon → wiederverwenden (nicht neu compilen).
 
 Verifikation: `ref = torch.einsum("ik,kj->ij", a.float(), b.float())`; `max_abs_err = (out.float() - ref).abs().max().item()`; fp16-Toleranz ~ `atol=2e-1, rtol=2e-2` (vgl. A03/A05).
 
