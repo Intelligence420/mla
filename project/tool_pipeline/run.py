@@ -1,9 +1,157 @@
-"""tool_pipeline.run — the orchestrator AND the core<->GUI contract.
+"""tool_pipeline.run — der Orchestrator UND der Vertrag Core↔GUI.
 
-run(config: RunConfig) -> RunResult:
-    parse -> canonical reshape (B1) -> emit cuTile source (C1) ->
-    compile (+cache) -> verify vs fp32 -> measure -> persist to store.
+`run(config) -> RunResult` ist die **einzige Naht**: die Dash-App (TZ 2) ruft
+ausschließlich diese Funktion in ihrem Hintergrund-Job. Ablauf (Plan §3):
 
-This single entry point is what the Dash app calls inside its background job.
-TODO: tickets A/B/C.
+    parse → reshape(B1) → emit(C1) → compile(+Cache) → Kalt-Lauf(=compile_ms)
+          → verify(fp32) → bench(=run_ms) → metrics → Store
+
+`run()` gibt **immer** ein `RunResult` zurück (nie eine Exception nach außen) —
+Fehler werden nach `status`/`error` kategorisiert, damit die GUI sie anzeigen
+kann statt abzustürzen:
+
+* `compile_error`  — Ausdruck/Config nicht baubar oder cuTile-JIT scheitert.
+* `verify_failed`  — Kernel läuft, weicht aber von der fp32-Referenz ab.
+* `run_error`      — Kernel crasht zur Laufzeit (Launch/Bench).
+* `ok`             — compiliert, verifiziert, gemessen.
+
+TZ 1: nur `ik,kj->ij`, fp16→fp32, feste Tile. Spätere Teil-Ziele erweitern
+einzelne Stufen — der Ablauf hier bleibt.
 """
+
+from __future__ import annotations
+
+from datetime import datetime
+
+import cuda.tile as ct
+import torch
+
+from .codegen.compile import load_kernel
+from .codegen.emit import emit
+from .intermediate_representation.parse import parse
+from .intermediate_representation.reshape import to_canonical
+from .measure.bench import benchmark, time_first_launch
+from .measure.metrics import compute_metrics
+from .measure.verify import verify
+from .schema import (
+    STATUS_COMPILE_ERROR,
+    STATUS_OK,
+    STATUS_RUN_ERROR,
+    STATUS_VERIFY_FAILED,
+    RunConfig,
+    RunResult,
+)
+from .store import store
+
+# dtype-Label → torch-dtype (native, per torch.randn baubar). fp8 (host-Cast)
+# und die dtype-Achse insgesamt kommen in TZ 3.
+_TORCH_DTYPE = {
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+    "fp32": torch.float32,
+}
+
+
+def _build_inputs(config: RunConfig, M: int, N: int, K: int):
+    """Deterministische Eingaben A=(M,K), B=(K,N) + Output C=(M,N).
+
+    Output-dtype = `acc_dtype` (ehrliches Ergebnis, bewahrt Akku-Präzision).
+    """
+    if config.dtype not in _TORCH_DTYPE:
+        raise NotImplementedError(f"TZ 1: input-dtype {config.dtype!r} nicht unterstützt.")
+    if config.acc_dtype not in _TORCH_DTYPE:
+        raise NotImplementedError(f"TZ 1: acc-dtype {config.acc_dtype!r} nicht unterstützt.")
+    torch.manual_seed(0)
+    in_dt = _TORCH_DTYPE[config.dtype]
+    out_dt = _TORCH_DTYPE[config.acc_dtype]
+    A = torch.randn(M, K, dtype=in_dt, device="cuda")
+    B = torch.randn(K, N, dtype=in_dt, device="cuda")
+    C = torch.empty(M, N, dtype=out_dt, device="cuda")
+    return A, B, C
+
+
+def _provenance(config: RunConfig) -> dict:
+    """Leichte Provenienz (TZ 1). GPU-Takt/Temp/Power via nvidia-smi = TZ 4."""
+    return {
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+        "dtype": config.dtype,
+        "acc_dtype": config.acc_dtype,
+        "sizes": {},  # nach dem Parsen mit M/N/K gefüllt
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def run(config: RunConfig) -> RunResult:
+    """Führe einen vollständigen Lauf aus und liefere ein `RunResult`."""
+    provenance = _provenance(config)
+    accuracy: dict = {}
+    timing: dict = {}
+    metrics: dict = {}
+    kernel_path = None
+
+    def _result(status: str, error: str | None = None) -> RunResult:
+        r = RunResult(
+            status=status, config=config.to_dict(), kernel_path=kernel_path,
+            accuracy=accuracy, timing=timing, metrics=metrics,
+            provenance=provenance, error=error,
+        )
+        store.append_result(r)  # Modul-Attribut-Aufruf → in Tests patchbar
+        return r
+
+    # 1) IR → kanonische Größen
+    try:
+        ir = parse(config)
+        canonical = to_canonical(ir)
+        M, N, K = canonical.M, canonical.N, canonical.K
+        provenance["sizes"] = {"M": M, "N": N, "K": K}
+    except Exception as e:
+        return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")
+
+    # 2) Deterministische Eingaben — validiert dtype/Größen FRÜH, bevor ein
+    #    (evtl. irreführendes) Kernel-Artefakt geschrieben wird.
+    try:
+        A, B, C = _build_inputs(config, M, N, K)
+    except Exception as e:
+        return _result(STATUS_COMPILE_ERROR, error=f"input build: {type(e).__name__}: {e}")
+
+    # 3) Quelltext → ladbarer Kernel (persistiert + gecacht)
+    try:
+        source = emit(config)
+        comp = load_kernel(config, source)
+        kernel_path = store.store_relpath(comp.kernel_path)
+    except Exception as e:
+        return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")
+
+    # 4) Kalt-Lauf = compile_ms (host-seitiger cuTile-JIT); füllt C für verify.
+    try:
+        timing["compile_ms"] = round(time_first_launch(comp.launch, A, B, C), 3)
+    except ct.TileError as e:
+        return _result(STATUS_COMPILE_ERROR, error=f"cuTile-JIT: {type(e).__name__}: {str(e)[:400]}")
+    except Exception as e:
+        return _result(STATUS_RUN_ERROR, error=f"kalt-launch: {type(e).__name__}: {str(e)[:400]}")
+
+    # 5) verify-before-trust: gegen fp32-Referenz, bevor Zahlen getraut werden.
+    try:
+        accuracy = verify(C, A, B, config)
+    except NotImplementedError as e:
+        return _result(STATUS_COMPILE_ERROR, error=f"verify: {type(e).__name__}: {e}")
+    except Exception as e:
+        return _result(STATUS_RUN_ERROR, error=f"verify: {type(e).__name__}: {str(e)[:400]}")
+    if not accuracy["passed"]:
+        return _result(
+            STATUS_VERIFY_FAILED,
+            error=(f"max_abs_err={accuracy['max_abs_err']:.4g} überschreitet Toleranz "
+                   f"(atol={accuracy['atol']}, rtol={accuracy['rtol']})"),
+        )
+
+    # 6) Warme Messung (=run_ms) + Metriken (TFLOP/s)
+    try:
+        b = benchmark(comp.launch, A, B, C)
+        timing["run_ms"] = round(b["run_ms"], 5)
+        timing["bench_iters"] = b["iters"]
+        m = compute_metrics(M, N, K, b["run_ms"])
+        metrics = {"tflops": round(m["tflops"], 3)}
+    except Exception as e:
+        return _result(STATUS_RUN_ERROR, error=f"bench: {type(e).__name__}: {str(e)[:400]}")
+
+    return _result(STATUS_OK)
