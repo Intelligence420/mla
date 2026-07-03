@@ -25,14 +25,15 @@ Browser ──(Dash, WebSocket)── tool_pipeline/app/          ← GUI
         ▼
 tool_pipeline/run.py
    parse → reshape(B1) → emit(C1) → compile(+Cache) → verify → measure → store
-     └ ir/   └ ir/        └ codegen/  └ codegen/       └ measure/ └ measure/ └ store/
+     └ intermediate_representation/     └ codegen/          └ measure/         └ store/
+       (Paket "ir": parse, reshape)     (emit, compile)     (verify, bench)
 ```
 
 **Prinzip:** `app/` importiert ausschließlich `run.py` und `schema.py` — nie `ir`/`codegen`/`measure` direkt. Dadurch ist der Core headless testbar (`tests/`, `cli.py`) ohne Dash, die GUI austauschbar, und der Hintergrund-Job umschließt exakt *einen* Aufruf (`run()`).
 
 ## Verzeichnisstruktur
 
-- **`tool_pipeline/`** — das Tool (Python-Paket): `ir/` → `codegen/` → `measure/` → `store/` → `app/`; `run.py` verklammert sie (= Vertrag Core↔GUI), `schema.py` definiert `RunConfig`/`RunResult`.
+- **`tool_pipeline/`** — das Tool (Python-Paket): `intermediate_representation/` (kurz „ir") → `codegen/` → `measure/` → `store/` → `app/`; `run.py` verklammert sie (= Vertrag Core↔GUI), `schema.py` definiert `RunConfig`/`RunResult`.
 - **`project-development/`** — Artefakte, die **nur dem Bau** dienen (kein Auslieferungs-Code): `PLAN.md` (vollständiger Projekt- & Fortschrittsplan, alle Entscheidungen), `analysis/` (Hardware-/dtype-Belege: `RESULTS_gb10.md`, `dtype_analyse.py`).
 - **`results/`** — Results-Store: `results.jsonl` (ein Lauf je Zeile) + `kernels/<slug>.py` (persistierter generierter Code = Compile-Cache; `<slug>` = lesbarer Config-Name, z. B. `ik_kj_to_ij__fp16-fp32__TM128_TN128_TK64.py`).
 - **`tests/`** — Korrektheitstests (Codegen ist eine silent-wrong-answer-Quelle → jede Familie/jeden dtype testen).
