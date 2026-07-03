@@ -98,7 +98,7 @@ project/
 │   ├── schema.py             # RunConfig / RunResult (zuerst definieren, T0.2)
 │   ├── hardware.py           # GB10-Roofline-Peaks (273 GB/s, TFLOP/s je dtype)
 │   ├── cli.py                # headless / Batch-Sweeps für den Report
-│   ├── ir/                   # parse.py · config.py · optimizer.py · reshape.py (B1)
+│   ├── intermediate_representation/  # (Paket "ir") parse.py · config.py · optimizer.py · reshape.py (B1)
 │   ├── codegen/              # emit.py · compile.py(+Cache) · templates/{contraction,elementwise,reduction}.py
 │   ├── measure/              # bench.py(CUDA-Events) · metrics.py · verify.py · baselines.py · provenance.py
 │   ├── store/                # store.py (results.jsonl + kernels/)
@@ -118,7 +118,7 @@ Jede Datei hat aktuell einen Zweck-Docstring + TODO-Hinweis; Inhalte füllen die
 
 ### TZ 1 — Backbone: eine Operation, ein Format, headless, korrekt
 *Fertig, wenn:* `ik,kj->ij` in fp16→fp32 (feste Tile, kein Swizzle) **end-to-end** läuft: generierter `@ct.kernel`-Quelltext → compile → gegen torch-fp32 verifiziert → gemessen (ms, TFLOP/s) → als Zeile in `results.jsonl` + Kernel-Datei persistiert. Angestoßen über `cli.py`.
-*TODOs:* `schema.py`, `store/store.py`, `ir/parse.py` (GEMM minimal), `ir/reshape.py` (GEMM-Passthrough), `codegen/templates/contraction.py` (GEMM-Template), `codegen/emit.py`, `codegen/compile.py` (exec+launch, einfacher Cache), `measure/verify.py` (fp32-Ref + max_err), `measure/bench.py` (CUDA-Events, ms), `measure/metrics.py` (TFLOP/s), `run.py`, `cli.py`, `tests/test_codegen.py`.
+*TODOs:* `schema.py`, `store/store.py`, `intermediate_representation/parse.py` (GEMM minimal), `intermediate_representation/reshape.py` (GEMM-Passthrough), `codegen/templates/contraction.py` (GEMM-Template), `codegen/emit.py`, `codegen/compile.py` (exec+launch, einfacher Cache), `measure/verify.py` (fp32-Ref + max_err), `measure/bench.py` (CUDA-Events, ms), `measure/metrics.py` (TFLOP/s), `run.py`, `cli.py`, `tests/test_codegen.py`.
 *Schaltet frei:* die **gesamte Pipeline ist bewiesen** — alles Spätere erweitert nur einzelne Stufen.
 
 ### TZ 2 — GUI um genau diese eine Operation (Live-Skelett)
@@ -143,12 +143,12 @@ Jede Datei hat aktuell einen Zweck-Docstring + TODO-Hinweis; Inhalte füllen die
 
 ### TZ 6 — Operationen-Breite I: allgemeine 2-Operand-Kontraktion (B1 wird tragend)
 *Fertig, wenn:* beliebige 2-Operand-Kontraktion (z. B. `acspx,bspy->abcyx`, Batched GEMM) läuft — über den **echten** B1-Reshape (config/optimizer-getrieben) auf die kanonische Form, mit Operanden-Liste im UI; jeder Ausdruck live verifiziert.
-*TODOs:* `ir/config.py` + `ir/optimizer.py` (Port aus A05/06), `ir/reshape.py` (echtes B1), `ir/parse.py` (allgemein + impliziter Output), `app/components/controls.py` (dynamische Operanden-Liste MATCH/ALL, Auto-Output, Presets), `tests/test_reshape.py`.
+*TODOs:* `intermediate_representation/config.py` + `intermediate_representation/optimizer.py` (Port aus A05/06), `intermediate_representation/reshape.py` (echtes B1), `intermediate_representation/parse.py` (allgemein + impliziter Output), `app/components/controls.py` (dynamische Operanden-Liste MATCH/ALL, Auto-Output, Presets), `tests/test_reshape.py`.
 *Schaltet frei:* die **Kontraktions-Familie** vollständig; IR/Optimizer sind tragend.
 
 ### TZ 7 — Operationen-Breite II: memory-bound (Elementwise + Reduktion)
 *Fertig, wenn:* Elementwise und Reduktion als eigene Familien laufen (Routing auf M/N/K/C); sie erscheinen als memory-bound Punkte auf der Roofline (Kontrast zur compute-bound Kontraktion).
-*TODOs:* `codegen/templates/elementwise.py`, `codegen/templates/reduction.py`, `ir/parse.py` (Familien-Routing), `measure/metrics.py` (GB/s als Primärmetrik für memory-bound), Presets.
+*TODOs:* `codegen/templates/elementwise.py`, `codegen/templates/reduction.py`, `intermediate_representation/parse.py` (Familien-Routing), `measure/metrics.py` (GB/s als Primärmetrik für memory-bound), Presets.
 *Schaltet frei:* das **vollständige Operations-Menü** (Scope-Entscheidung erfüllt); Roofline zeigt beide Seiten.
 
 ### TZ 8 — Politur, Robustheit & Report

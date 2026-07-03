@@ -1,4 +1,4 @@
-"""tool_pipeline.ir.reshape — B1: Kontraktion → kanonisches (Batched-)GEMM.
+"""tool_pipeline.intermediate_representation.reshape — B1: Kontraktion → kanonisches (Batched-)GEMM.
 
 **Ziel (Endausbau, TZ 6):** *jede* 2-Operanden-Kontraktion host-seitig per
 zero-copy-View auf die kanonische Form `(B,M,K)×(B,K,N)→(B,M,N)` reshapen, damit

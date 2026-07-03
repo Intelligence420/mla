@@ -1,4 +1,4 @@
-"""tool_pipeline.ir.parse — einsum-Ausdruck → typisierte Kontraktions-IR.
+"""tool_pipeline.intermediate_representation.parse — einsum-Ausdruck → typisierte Kontraktions-IR.
 
 Klassifiziert einen **2-Operanden**-einsum-Ausdruck nach dem aus A05/06 bekannten
 Schema in **M / N / K / Batch**-Dimensionen:
