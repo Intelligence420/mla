@@ -75,6 +75,25 @@ def test_execute_invalid_sizes_no_run():
     assert "TFLOP/s" not in txt and "ct.mma" not in txt, "es hätte kein Lauf stattfinden dürfen"
 
 
+def test_execute_survives_run_import_failure():
+    """execute_run wirft NIE: schlägt der lazy `run`-Import fehl (torch/cuda.tile im
+    Worker kaputt/abwesend), kommt ein 'Interner Fehler'-Alert statt einer Exception
+    (Naht-Vertrag; Fund A des Error-Audits). Kein GPU nötig (Import gestubbt)."""
+    import types
+    stub = types.ModuleType("tool_pipeline.run")   # Modul OHNE 'run'-Attribut
+    orig = sys.modules.get("tool_pipeline.run")
+    sys.modules["tool_pipeline.run"] = stub
+    try:
+        comps = execute_run(4, 4, 4)               # gültige Größen → Pfad erreicht den Import
+    finally:
+        if orig is not None:
+            sys.modules["tool_pipeline.run"] = orig
+        else:
+            sys.modules.pop("tool_pipeline.run", None)
+    assert isinstance(comps, list) and comps, "execute_run muss eine Liste liefern, nicht werfen"
+    assert "Interner Fehler" in _text(comps), _text(comps)[:200]
+
+
 def _main() -> int:
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

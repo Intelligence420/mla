@@ -135,10 +135,12 @@ def run(config: RunConfig) -> RunResult:
         kernel_path = store.store_relpath(comp.kernel_path)
         # Quelltext für die GUI-Code-Anzeige mitführen (das persistierte Artefakt =
         # exakt was compiliert wurde). Lesefehler darf einen sonst gesunden Lauf
-        # NICHT kippen → still auf None; der Store lässt das Feld ohnehin weg.
+        # NICHT kippen → still auf None. Neben OSError (Datei weg/Rechte) auch
+        # UnicodeDecodeError (korrupte/nicht-UTF-8-Datei; KEIN OSError) abfangen,
+        # sonst würde ein compilierter Kernel fälschlich als compile_error markiert.
         try:
             kernel_source = Path(comp.kernel_path).read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             kernel_source = None
     except Exception as e:
         return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")

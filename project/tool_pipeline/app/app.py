@@ -34,8 +34,17 @@ _CACHE_DIR = _PROJECT_DIR / ".cache" / "dash_bg"
 
 def create_app() -> Dash:
     """Baue die Dash-App: Background-Manager + Bootstrap-Theme + Layout."""
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    manager = DiskcacheManager(diskcache.Cache(str(_CACHE_DIR)))
+    # Cache-Init kann auf read-only/rechtebeschränktem FS scheitern (mkdir → OSError,
+    # diskcache → sqlite OperationalError). Statt eines rohen Tracebacks eine klare,
+    # handlungsleitende Meldung (fail-fast: ohne Background-Cache läuft die GUI nicht).
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        manager = DiskcacheManager(diskcache.Cache(str(_CACHE_DIR)))
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"Background-Cache unter {_CACHE_DIR} nicht nutzbar ({type(e).__name__}: {e}). "
+            f"Ist das Projektverzeichnis beschreibbar? Rechte prüfen oder .cache/ freigeben."
+        ) from e
 
     app = Dash(
         __name__,
@@ -58,12 +67,37 @@ def create_app() -> Dash:
     return app
 
 
+def _host() -> str:
+    """TP_HOST oder sicherer Default. Ein **leer** gesetztes TP_HOST fällt bewusst
+    auf 127.0.0.1 zurück (nicht 0.0.0.0) — sonst öffnete `TP_HOST=` die GUI auf der
+    geteilten Maschine ungewollt im LAN (``os.environ.get(k, default)`` liefert bei
+    gesetztem, leerem Key den Leerstring, nicht den Default)."""
+    return os.environ.get("TP_HOST") or "127.0.0.1"
+
+
+def _port(default: int = 8050) -> int:
+    """TP_PORT als bindbarer Port; leer/nicht-numerisch/außerhalb 1–65535 → Default
+    mit Warnung (statt rohem ValueError beim Start)."""
+    raw = os.environ.get("TP_PORT", "")
+    if not raw:
+        return default
+    try:
+        p = int(raw)
+    except ValueError:
+        print(f"[cuTile Performance Lab] TP_PORT={raw!r} ist keine Zahl — nutze {default}.")
+        return default
+    if not (1 <= p <= 65535):
+        print(f"[cuTile Performance Lab] TP_PORT={p} außerhalb 1–65535 — nutze {default}.")
+        return default
+    return p
+
+
 def main() -> None:
     """Starte den Dash-Server (blockierend). Einstieg von ``python -m tool_pipeline``."""
     app = create_app()
     app.run(
-        host=os.environ.get("TP_HOST", "127.0.0.1"),
-        port=int(os.environ.get("TP_PORT", "8050")),
+        host=_host(),
+        port=_port(),
         debug=False,  # kein Reloader (geteilte GPU-Maschine; Reloader + Fork-Manager beißen sich)
     )
 

@@ -41,7 +41,9 @@ _LOCK_TIMEOUT = 60  # s — danach freundliche „GPU belegt"-Meldung statt endl
 # Progress-Balken sichtbar/verborgen (via running=)
 _PROG_SHOW = {"display": "block", "marginTop": "12px", "height": "8px"}
 _PROG_HIDE = {"display": "none", "marginTop": "12px", "height": "8px"}
-_RUNNING_TEXT = "GPU-Lauf läuft… (Abbrechen möglich)"
+# Ehrlich: der Background-Job kann rechnen ODER (bei belegtem GPU-Lock) darauf warten
+# — beides während running=True aktiv ist. Daher nicht bloß „läuft" (Fund F des Audits).
+_RUNNING_TEXT = "GPU-Lauf aktiv… (rechnet oder wartet · Abbrechen möglich)"
 
 
 def _alert(title: str, body: str, color: str):
@@ -72,24 +74,23 @@ def execute_run(m, n, k) -> list:
     if err:
         return [_alert("Ungültige Eingabe", err, "warning")]
 
-    cfg = controls.config_from_controls(m, n, k)
-
-    # Lazy-Import: hält den Haupt-Prozess CUDA-frei (fork-sicher).
-    from tool_pipeline.run import run
-
-    _GPU_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    lock = FileLock(str(_GPU_LOCK))
+    # ALLES ab hier steht IM try — inkl. Config-Bau, Lazy-Import (kann ImportError
+    # werfen, falls torch/cuda.tile im Worker fehlen/kaputt sind), mkdir/Lock und
+    # das Rendern —, damit execute_run die Zusage „gibt immer eine Liste zurück,
+    # nie eine Exception" wirklich hält (Naht-Vertrag; Fund A des Error-Audits).
     try:
-        with lock.acquire(timeout=_LOCK_TIMEOUT):
+        cfg = controls.config_from_controls(m, n, k)
+        from tool_pipeline.run import run  # lazy → Haupt-Prozess bleibt CUDA-frei
+        _GPU_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(_GPU_LOCK)).acquire(timeout=_LOCK_TIMEOUT):
             result = run(cfg)
+        return render_result(result)
     except Timeout:
         return [_alert("GPU belegt",
                        f"Ein anderer Lauf hält die GPU seit über {_LOCK_TIMEOUT}s. "
                        f"Bitte erneut versuchen.", "warning")]
-    except Exception as e:  # noqa: BLE001 — Lock-/Infra-Fehler dürfen die UI nicht crashen
+    except Exception as e:  # noqa: BLE001 — Import-/Lock-/Infra-Fehler dürfen die UI nicht crashen
         return [_alert("Interner Fehler", f"{type(e).__name__}: {e}", "danger")]
-
-    return render_result(result)
 
 
 def register(app) -> None:
