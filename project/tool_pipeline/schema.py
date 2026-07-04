@@ -94,11 +94,16 @@ class RunResult:
     (`accuracy`/`timing`/`metrics`/`provenance`), damit spätere Teil-Ziele dort
     nur Schlüssel ergänzen (z. B. GB/s, %-Peak, Verteilung) statt das Schema
     umzubauen. Bei Fehlern trägt `status` den Grund und `error` den Text.
+
+    `kernel_source` trägt den generierten Quelltext für die GUI-Code-Anzeige (TZ 2).
+    Er wird vom Store bewusst **nicht** ins `results.jsonl` geschrieben (Bloat) —
+    der Text liegt bereits als `kernels/<slug>.py` vor (`kernel_path`).
     """
 
     status: str                         # eine der STATUS_*-Konstanten
     config: dict[str, Any]              # Echo der RunConfig (als dict)
     kernel_path: Optional[str] = None   # Pfad des persistierten Kernel-Quelltexts
+    kernel_source: Optional[str] = None  # generierter Quelltext (GUI-Code-Panel; NICHT im JSONL)
     accuracy: dict[str, Any] = field(default_factory=dict)   # max_abs_err, passed, ...
     timing: dict[str, Any] = field(default_factory=dict)     # compile_ms, run_ms, ...
     metrics: dict[str, Any] = field(default_factory=dict)    # tflops, ... (TZ 4: GB/s, %-Peak)
