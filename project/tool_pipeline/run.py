@@ -27,7 +27,6 @@ import cuda.tile as ct
 import torch
 
 from .codegen.compile import load_kernel
-from .codegen.emit import emit
 from .intermediate_representation.parse import parse
 from .intermediate_representation.reshape import to_canonical
 from .measure.bench import benchmark, time_first_launch
@@ -43,11 +42,11 @@ from .schema import (
 )
 from .store import store
 
-# dtype-Label → torch-dtype (native, per torch.randn baubar). fp8 (host-Cast)
-# und die dtype-Achse insgesamt kommen in TZ 3.
+# dtype-Label → torch-dtype: nur die in TZ 1 nötigen (fp16-Input, fp32-Akku/
+# Output). Reine Auflösungs-Tabelle, KEIN Zulässigkeits-Gate — der Input-dtype
+# wird in _build_inputs separat auf fp16 beschränkt. bf16/tf32/fp8 = TZ 3.
 _TORCH_DTYPE = {
     "fp16": torch.float16,
-    "bf16": torch.bfloat16,
     "fp32": torch.float32,
 }
 
@@ -57,10 +56,15 @@ def _build_inputs(config: RunConfig, M: int, N: int, K: int):
 
     Output-dtype = `acc_dtype` (ehrliches Ergebnis, bewahrt Akku-Präzision).
     """
-    if config.dtype not in _TORCH_DTYPE:
-        raise NotImplementedError(f"TZ 1: input-dtype {config.dtype!r} nicht unterstützt.")
+    # TZ 1: nur fp16-Input (bf16/tf32/fp8 = TZ 3). Zulässigkeit bewusst getrennt
+    # von der torch-dtype-Auflösung, damit fp32 (für den Output) im Map bleiben
+    # kann, ohne fp32/bf16 als Eingabe-dtype durchzulassen.
+    if config.dtype != "fp16":
+        raise NotImplementedError(
+            f"TZ 1: nur input-dtype 'fp16' (bekommen: {config.dtype!r}; bf16/tf32/fp8 = TZ 3)."
+        )
     if config.acc_dtype not in _TORCH_DTYPE:
-        raise NotImplementedError(f"TZ 1: acc-dtype {config.acc_dtype!r} nicht unterstützt.")
+        raise NotImplementedError(f"TZ 1: acc-dtype {config.acc_dtype!r} nicht unterstützt (nur fp32).")
     torch.manual_seed(0)
     in_dt = _TORCH_DTYPE[config.dtype]
     out_dt = _TORCH_DTYPE[config.acc_dtype]
@@ -95,7 +99,14 @@ def run(config: RunConfig) -> RunResult:
             accuracy=accuracy, timing=timing, metrics=metrics,
             provenance=provenance, error=error,
         )
-        store.append_result(r)  # Modul-Attribut-Aufruf → in Tests patchbar
+        # Persistenz darf den Core↔GUI-Vertrag ("run() wirft nie") NICHT brechen:
+        # ein Store-Fehler (Platte voll/Rechte) wird notiert, das RunResult aber
+        # trotzdem geliefert. (Modul-Attribut-Aufruf → in Tests patchbar.)
+        try:
+            store.append_result(r)
+        except Exception as store_e:  # noqa: BLE001
+            note = f"store: {type(store_e).__name__}: {store_e}"
+            r.error = f"{r.error} | {note}" if r.error else note
         return r
 
     # 1) IR → kanonische Größen
@@ -114,10 +125,10 @@ def run(config: RunConfig) -> RunResult:
     except Exception as e:
         return _result(STATUS_COMPILE_ERROR, error=f"input build: {type(e).__name__}: {e}")
 
-    # 3) Quelltext → ladbarer Kernel (persistiert + gecacht)
+    # 3) Quelltext → ladbarer Kernel (persistiert + gecacht). load_kernel emittiert
+    #    lazy selbst (nur bei Cache-Miss) → kein doppeltes emit auf dem Cache-Pfad.
     try:
-        source = emit(config)
-        comp = load_kernel(config, source)
+        comp = load_kernel(config)
         kernel_path = store.store_relpath(comp.kernel_path)
     except Exception as e:
         return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")
@@ -149,8 +160,10 @@ def run(config: RunConfig) -> RunResult:
         b = benchmark(comp.launch, A, B, C)
         timing["run_ms"] = round(b["run_ms"], 5)
         timing["bench_iters"] = b["iters"]
-        m = compute_metrics(M, N, K, b["run_ms"])
-        metrics = {"tflops": round(m["tflops"], 3)}
+        # compute_metrics-dict weiterreichen (nicht neu bauen) → künftige Schlüssel
+        # (TZ 4: GB/s, %-Peak) überleben ohne weitere Edit-Stelle hier.
+        metrics = compute_metrics(M, N, K, b["run_ms"])
+        metrics["tflops"] = round(metrics["tflops"], 3)
     except Exception as e:
         return _result(STATUS_RUN_ERROR, error=f"bench: {type(e).__name__}: {str(e)[:400]}")
 
