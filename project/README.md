@@ -1,4 +1,4 @@
-# einsum / GEMM Performance Explorer (cuTile)
+# cuTile Performance Lab
 
 **Group-Specific Component — MLA, FSU Jena.** Team: Moritz Martin, Oliver Dietzel.
 

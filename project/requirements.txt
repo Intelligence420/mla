@@ -1,6 +1,12 @@
-# GUI + plotting (install into the existing project venv)
-dash
-dash-bootstrap-components
-plotly
-pandas
+# GUI + plotting (install into the existing project venv).
+# Versionen gepinnt (PLAN §8-Antipattern: kein Bleeding-Edge tracken).
+#
+# dash[diskcache] zieht das Background-Callback-Extra (psutil + multiprocess) —
+# nötig für den DiskcacheManager (mehrsekündiger cuTile-Compile als Hintergrund-Job).
+dash[diskcache]==4.4.0
+dash-bootstrap-components==2.0.4
+plotly==6.8.0
+pandas==3.0.3
+diskcache==5.6.3       # In-Process-Cache-Backend des DiskcacheManager (direkt importiert)
+filelock==3.29.0       # prozessübergreifender GPU-Lock um run() (fcntl → Auto-Freigabe bei Cancel)
 # torch (CUDA), cuda.tile, triton, cupy are provided by /home/mla08/MLA/mla/.venv

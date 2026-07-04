@@ -23,7 +23,7 @@ def _header(config: RunConfig) -> str:
     t = config.tile
     return (
         "# " + "=" * 74 + "\n"
-        "# Auto-generiert vom einsum/GEMM Performance Explorer (Codegen C1).\n"
+        "# Auto-generiert vom cuTile Performance Lab (Codegen C1).\n"
         "# NICHT von Hand editieren — aus einer RunConfig erzeugt.\n"
         f"# Ausdruck : {config.expr}\n"
         f"# Format   : {config.dtype} -> {config.acc_dtype} (Akku)\n"
