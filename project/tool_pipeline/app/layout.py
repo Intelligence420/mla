@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from dash import html
 
+from .components import controls
+
 APP_TITLE = "einsum / GEMM Performance-Explorer"
 APP_SUBTITLE = "cuTile · live auf der GPU"
 
@@ -43,20 +45,8 @@ def _topbar() -> html.Header:
     return html.Header(
         style=_TOPBAR,
         children=[
-            html.Span("⚡", style={"fontSize": "18px"}),
             html.H1(APP_TITLE, style={"fontSize": "17px", "margin": 0, "fontWeight": 650}),
             html.Span(APP_SUBTITLE, style={"marginLeft": "auto", "opacity": 0.85, "fontSize": "12.5px"}),
-        ],
-    )
-
-
-def _sidebar_placeholder() -> html.Div:
-    return html.Div(
-        style=_PLACEHOLDER,
-        children=[
-            html.H2("Steuerung", style={"fontSize": "12px", "letterSpacing": "0.08em",
-                                        "textTransform": "uppercase", "color": "#6b7280"}),
-            html.P("Größen-Eingaben + Run folgen (TODO 3)."),
         ],
     )
 
@@ -76,7 +66,7 @@ def build_layout() -> html.Div:
             html.Div(
                 style=_BODY,
                 children=[
-                    html.Aside(id="sidebar", style=_SIDEBAR, children=_sidebar_placeholder()),
+                    html.Aside(id="sidebar", style=_SIDEBAR, children=controls.build_controls()),
                     html.Main(id="main", style=_MAIN, children=_main_placeholder()),
                 ],
             ),
