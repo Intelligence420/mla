@@ -1,21 +1,23 @@
-"""Controls-Sidebar (TZ 2 / TODO 3): Größen M/N/K + Run/Cancel + Progress,
-dazu die **read-only** Anzeige der in TZ 2 fest verdrahteten Konfiguration.
+"""Controls-Sidebar: Größen M/N/K, die zu vergleichenden **Zahlenformate**,
+Run/Cancel + Progress, dazu die **read-only** Anzeige der festen Konfiguration.
 
 Enthält die Dash-freie, **headless-testbare** Naht-Logik:
 
-* ``config_from_controls(m, n, k) -> RunConfig`` — Control-Werte → RunConfig
-  (setzt NUR die Größen; family/expr/dtype/acc/tile/swizzle bleiben Default).
-* ``validate_sizes(m, n, k) -> str | None``      — Eingabe-Prüfung; deutscher
-  Fehlertext oder ``None`` (ok).
+* ``validate_sizes(m, n, k) -> str | None``               — Größen-Prüfung.
+* ``config_from_controls(m, n, k) -> RunConfig``          — Größen → eine
+  RunConfig (fp16→fp32-Default; von der Einzellauf-Naht weiterbenutzt).
+* ``configs_from_selection(m, n, k, sel) -> [RunConfig]`` — Größen + Format-
+  Auswahl → eine RunConfig je (dtype, acc)-Kombi (Batch-Vergleich, TZ 3).
+* ``validate_selection(sel) -> str | None``               — Auswahl-Prüfung.
 
-Diese beiden Funktionen sind bewusst Dash-frei und werden in
-``tests/test_app_controls.py`` geprüft. ``build_controls()`` liefert das
-Sidebar-Fragment für das Layout.
+Die (dtype→acc)-Kombis (``COMBOS``) werden aus ``schema.ALLOWED_ACC`` abgeleitet
+(Single Source of Truth → kein Drift): unzulässige Acc-Kombis existieren dadurch
+gar nicht in der Auswahl — die **Acc-Regeln sind durch Konstruktion erzwungen**.
 
-Naht-Regel (README): importiert NUR ``tool_pipeline.schema`` (RunConfig) —
-**kein** run/torch/cuda, damit der Haupt-Prozess CUDA-frei (fork-sicher) bleibt.
-Die IDs sind als Konstanten exportiert, damit ``callbacks.py`` (TODO 6) sie
-importiert statt Strings zu duplizieren.
+Naht-Regel (README): importiert NUR ``tool_pipeline.schema`` — **kein**
+run/torch/cuda, damit der Haupt-Prozess CUDA-frei (fork-sicher) bleibt. Die IDs
+sind als Konstanten exportiert, damit ``callbacks.py`` sie importiert statt
+Strings zu duplizieren.
 """
 
 from __future__ import annotations
@@ -26,17 +28,55 @@ from typing import Optional
 import dash_bootstrap_components as dbc
 from dash import html
 
-from ...schema import RunConfig
+from ...schema import ALLOWED_ACC, RunConfig
 
 # --- Komponenten-IDs (von callbacks.py importiert) ---------------------------
 ID_M, ID_N, ID_K = "in-m", "in-n", "in-k"
+ID_DTYPES = "sel-dtypes"          # Multi-Select der zu vergleichenden Formate
+ID_DTYPE_INFO = "dtypes-info"     # Info-Marker (Tooltip: erklärt 'links → rechts')
 ID_RUN, ID_CANCEL = "btn-run", "btn-cancel"
 ID_PROGRESS, ID_STATUS = "run-progress", "run-status"
 
-# TZ-2-Fixwerte = die RunConfig-Defaults selbst (Single Source of Truth: ändert
-# sich ein Default, ändert sich die Anzeige automatisch mit).
+# Feste (nicht wählbare) Werte = die RunConfig-Defaults selbst (Single Source of
+# Truth). dtype/acc sind ab TZ 3 wählbar (siehe COMBOS) und daher NICHT mehr hier.
 _DEFAULT = RunConfig()
 _DEFAULT_SIZE = 512  # Startwert je Größe (= cli.py-Default; klein, deterministisch)
+
+# Anzeige-Reihenfolge der Compute-dtypes. fp32-plain (Anker ohne Tensor-Cores)
+# ist optional und aktuell nicht in run._build_operands gebaut → hier ausgelassen.
+_DTYPE_ORDER = ("fp16", "bf16", "tf32", "fp8e4m3", "fp8e5m2")
+
+
+def combo_key(dtype: str, acc: str) -> str:
+    """Kanonischer Checklist-Wert einer (dtype, acc)-Kombi."""
+    return f"{dtype}:{acc}"
+
+
+def parse_combo(key: str) -> tuple[str, str]:
+    """Checklist-Wert → (dtype, acc) — Umkehrung von ``combo_key``."""
+    dtype, _, acc = key.partition(":")
+    return dtype, acc
+
+
+def combo_label(dtype: str, acc: str) -> str:
+    """Menschlich lesbares Label (z. B. ``'fp8e4m3 → fp16'``)."""
+    return f"{dtype} → {acc}"
+
+
+# Wählbare (dtype, acc)-Kombis: aus ALLOWED_ACC abgeleitet (kein Drift), pro
+# dtype fp32 (genau/Anker) vor fp16 (schneller). Das ist die vollständige, durch
+# Konstruktion regel-konforme Vergleichs-Auswahl.
+COMBOS = [
+    (d, a)
+    for d in _DTYPE_ORDER
+    for a in sorted(ALLOWED_ACC[d], key=lambda x: x != "fp32")
+]
+_VALID_KEYS = {combo_key(d, a) for (d, a) in COMBOS}
+
+# Default-Auswahl: ein Spektrum über den Tradeoff (genau → schnell/ungenau).
+_DEFAULT_SELECTION = [combo_key("fp16", "fp32"),
+                      combo_key("tf32", "fp32"),
+                      combo_key("fp8e4m3", "fp16")]
 
 _H2 = {"fontSize": "11px", "letterSpacing": "0.08em", "textTransform": "uppercase",
        "color": "#6b7280", "margin": "18px 0 8px"}
@@ -82,15 +122,46 @@ def config_from_controls(m, n, k) -> RunConfig:
     return RunConfig(dim_sizes={"i": int(float(m)), "k": int(float(k)), "j": int(float(n))})
 
 
+def validate_selection(selection) -> Optional[str]:
+    """Prüfe die Format-Auswahl (Liste von ``combo_key``-Strings).
+
+    :returns: deutscher Fehlertext, oder ``None`` (ok). Leere Auswahl und
+              unbekannte Schlüssel werden abgelehnt.
+    """
+    if not selection:
+        return "Bitte mindestens ein Zahlenformat für den Vergleich auswählen."
+    unknown = [s for s in selection if s not in _VALID_KEYS]
+    if unknown:
+        return f"Unbekannte Format-Auswahl: {unknown}."
+    return None
+
+
+def configs_from_selection(m, n, k, selection) -> list[RunConfig]:
+    """M/N/K + Format-Auswahl → eine ``RunConfig`` je gewählter (dtype, acc)-Kombi.
+
+    Die Liste ist in kanonischer ``COMBOS``-Reihenfolge (unabhängig von der
+    Klick-Reihenfolge) — deterministisch, und das erste Element ist das
+    **primäre** Format für die KPI-Karten. Achsen-Zuordnung wie
+    ``config_from_controls`` (i=M, k=K, j=N). Erwartet vorher validierte Eingaben.
+    """
+    sizes = {"i": int(float(m)), "k": int(float(k)), "j": int(float(n))}
+    chosen = set(selection)
+    return [
+        RunConfig(dim_sizes=dict(sizes), dtype=d, acc_dtype=a)
+        for (d, a) in COMBOS
+        if combo_key(d, a) in chosen
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Dash-Komponentenbaum
 # ---------------------------------------------------------------------------
 def _fixed_config() -> html.Div:
-    """Read-only Anzeige der festen TZ-2-Konfiguration (aus den Defaults)."""
+    """Read-only Anzeige der (weiterhin) festen Konfiguration. dtype/acc sind ab
+    TZ 3 wählbar (siehe Format-Auswahl) und stehen daher NICHT mehr hier."""
     c, t = _DEFAULT, _DEFAULT.tile
     rows = [
         ("Ausdruck", c.expr),
-        ("Format", f"{c.dtype} → {c.acc_dtype}"),
         ("Tile", f"TM={t['TM']} · TN={t['TN']} · TK={t['TK']}"),
         ("Swizzle", "an" if c.swizzle else "aus"),
     ]
@@ -115,8 +186,45 @@ def _size_input(id_: str, label: str) -> html.Div:
     ])
 
 
+def _dtype_header() -> list:
+    """Abschnitts-Überschrift der Format-Auswahl + Hover-Info-Tooltip, der die
+    Schreibweise ``Compute-dtype → Akkumulator/Output`` erklärt (das ``→`` ist
+    sonst nicht selbsterklärend)."""
+    info = html.Span(
+        " ⓘ", id=ID_DTYPE_INFO,
+        style={"cursor": "help", "color": "#8b5cf6", "fontWeight": 700,
+               "textTransform": "none"},
+    )
+    tip = dbc.Tooltip(
+        [
+            html.Div("Schreibweise:  Compute-dtype  →  Akkumulator/Output",
+                     style={"fontWeight": 600, "marginBottom": "5px"}),
+            html.Div("Links: Zahlenformat der Eingaben A, B, in dem gerechnet wird "
+                     "(z. B. fp8e4m3 — 8-Bit)."),
+            html.Div("Rechts: Format des Akkumulators (interne Zwischensumme) und "
+                     "des Ergebnisses (z. B. fp16 — schneller, oder fp32 — genauer)."),
+            html.Div("Regel: bf16/tf32 summieren immer in fp32; fp16/fp8 dürfen fp16 "
+                     "oder fp32.", style={"marginTop": "5px", "opacity": 0.8}),
+        ],
+        target=ID_DTYPE_INFO, placement="right",
+        style={"maxWidth": "330px", "textAlign": "left", "fontSize": "12px"},
+    )
+    return [html.H2(["Zahlenformate (Vergleich)", info], style=_H2), tip]
+
+
+def _dtype_select() -> html.Div:
+    """Multi-Select der zu vergleichenden (dtype→acc)-Formate. Die Acc-Regeln
+    sind durch die Kombi-Liste erzwungen — unzulässige Kombis existieren nicht."""
+    options = [{"label": combo_label(d, a), "value": combo_key(d, a)} for (d, a) in COMBOS]
+    return dbc.Checklist(
+        id=ID_DTYPES, options=options, value=list(_DEFAULT_SELECTION),
+        style={"fontSize": "13px"}, inputStyle={"marginRight": "6px"},
+    )
+
+
 def build_controls() -> html.Div:
-    """Sidebar-Inhalt: feste Config (read-only) + Größen + Run/Cancel + Progress."""
+    """Sidebar-Inhalt: feste Config (read-only) + Größen + Format-Auswahl +
+    Run/Cancel + Progress."""
     return html.Div([
         html.H2("Operation (fest)", style={**_H2, "marginTop": 0}),
         _fixed_config(),
@@ -125,6 +233,9 @@ def build_controls() -> html.Div:
         _size_input(ID_M, "M  (Zeilen, Index i)"),
         _size_input(ID_N, "N  (Spalten, Index j)"),
         _size_input(ID_K, "K  (Kontraktion, Index k)"),
+
+        *_dtype_header(),
+        _dtype_select(),
 
         html.Div(
             style={"display": "flex", "gap": "8px", "marginTop": "18px"},
