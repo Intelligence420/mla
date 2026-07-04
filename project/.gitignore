@@ -1,0 +1,3 @@
+# Dash-Background-Callback-Cache (DiskcacheManager, prozessübergreifende Job-Koordination).
+# Ephemer, maschinenlokal — gehört nicht ins Repo.
+.cache/
