@@ -1,4 +1,4 @@
-# Performance Explorer — Projekt- & Fortschrittsplan
+# cuTile Performance Lab — Projekt- & Fortschrittsplan
 
 > Group-Specific Component (MLA, FSU Jena). Team: Moritz Martin, Oliver Dietzel.
 > Lebendes Planungsdokument — Single Source of Truth für Entscheidungen & Erkenntnisse.
@@ -6,7 +6,7 @@
 
 ## 1. Projekt
 
-**Idee 2 — Interaktiver einsum/GEMM-Performance-Explorer (GPU / cuTile).**
+**Idee 2 — cuTile Performance Lab: interaktiver einsum/GEMM-Explorer (GPU / cuTile).**
 Ein Tool: Nutzer gibt einen einsum-/GEMM-Ausdruck ein → daraus wird **live** ein cuTile-Kernel **generiert**, mit verstellbarem Zahlenformat / Tiling / Swizzle auf der GPU **gemessen** und in interaktiven Graphen (Durchsatz, Genauigkeit, Roofline) **visualisiert**. Substanz laut Pitch: Kernel-Erzeugung + ehrliche Messung (nicht die GUI-Optik).
 
 **Deadlines:** Presentation (20 min, lauffähiger Prototyp + Ergebnisse) **08.07.2026** · Finaler Sphinx-Report (blogartig) **27.07.2026**.

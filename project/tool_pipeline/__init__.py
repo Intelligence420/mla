@@ -1,1 +1,1 @@
-"""einsum/GEMM Performance Explorer — package root."""
+"""cuTile Performance Lab — package root."""

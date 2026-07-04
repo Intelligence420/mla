@@ -43,7 +43,7 @@ def print_summary(res) -> None:
     s = res.provenance.get("sizes", {})
     acc, tim, met = res.accuracy, res.timing, res.metrics
 
-    print("=== einsum/GEMM Performance Explorer — Lauf ===")
+    print("=== cuTile Performance Lab — Lauf ===")
     print(f"Ausdruck : {c.get('expr')}   (M={s.get('M','?')}, N={s.get('N','?')}, K={s.get('K','?')})")
     print(f"Format   : {c.get('dtype')} -> {c.get('acc_dtype')}   "
           f"Tile: TM={t.get('TM')} TN={t.get('TN')} TK={t.get('TK')}   swizzle={c.get('swizzle')}")

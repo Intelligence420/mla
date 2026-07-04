@@ -39,7 +39,7 @@ def create_app() -> Dash:
 
     app = Dash(
         __name__,
-        title="einsum/GEMM Performance Explorer",
+        title="cuTile Performance Lab",
         external_stylesheets=[dbc.themes.BOOTSTRAP],
         background_callback_manager=manager,
         update_title=None,  # kein "Updating..."-Flackern im Browser-Tab

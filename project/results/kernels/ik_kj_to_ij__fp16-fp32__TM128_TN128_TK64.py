@@ -1,5 +1,5 @@
 # ==========================================================================
-# Auto-generiert vom einsum/GEMM Performance Explorer (Codegen C1).
+# Auto-generiert vom cuTile Performance Lab (Codegen C1).
 # NICHT von Hand editieren — aus einer RunConfig erzeugt.
 # Ausdruck : ik,kj->ij
 # Format   : fp16 -> fp32 (Akku)

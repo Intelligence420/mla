@@ -12,8 +12,8 @@ from dash import html
 
 from .components import controls
 
-APP_TITLE = "einsum / GEMM Performance-Explorer"
-APP_SUBTITLE = "cuTile · live auf der GPU"
+APP_TITLE = "cuTile Performance Lab"
+APP_SUBTITLE = "einsum/GEMM · live generiert · verifiziert · gemessen"
 
 
 def _topbar() -> html.Header:
