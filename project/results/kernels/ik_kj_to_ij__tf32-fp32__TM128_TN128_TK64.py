@@ -2,12 +2,12 @@
 # Auto-generiert vom cuTile Performance Lab (Codegen C1).
 # NICHT von Hand editieren — aus einer RunConfig erzeugt.
 # Ausdruck : ik,kj->ij
-# Format   : fp16 -> fp32 (Akku)
+# Format   : tf32 -> fp32 (Akku)
 # Tile     : TM=128 TN=128 TK=64 | swizzle=False
 # ==========================================================================
 """Generierter cuTile-GEMM (Codegen C1) — Kontraktion ik,kj->ij.
 
-Input-dtype: fp16 (Laufzeit-torch-dtype, steht NICHT im Kernel-Koerper).
+Input-dtype: tf32 -> im Kernel via ct.astype auf ct.tfloat32 gecastet (VOR ct.mma; ohne Cast liefe es auf CUDA-Cores).
 Akkumulator: fp32 (ct.float32).
 Tile-Literale: TM=128, TN=128, TK=64 (fest in den Quelltext gebacken).
 
@@ -44,6 +44,8 @@ def gemm(A, B, C,
                     padding_mode=ct.PaddingMode.ZERO)
         b = ct.load(B, index=(kk, j), shape=(TK, TN),
                     padding_mode=ct.PaddingMode.ZERO)
+        a = ct.astype(a, ct.tfloat32)
+        b = ct.astype(b, ct.tfloat32)
         acc = ct.mma(a, b, acc)
 
     # ct.store schneidet out-of-bounds Elemente am Rand automatisch ab.

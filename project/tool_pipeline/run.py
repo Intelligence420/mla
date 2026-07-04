@@ -68,8 +68,13 @@ def _build_operands(dtype: str, M: int, N: int, K: int):
         t = _TORCH_DTYPE[dtype]
         return (torch.randn(M, K, dtype=t, device="cuda"),
                 torch.randn(K, N, dtype=t, device="cuda"))
+    if dtype == "tf32":
+        # tf32-Operanden sind normale fp32-Tensoren; die tf32-Reduktion macht
+        # der Kernel-Cast (ct.astype .. ct.tfloat32), NICHT der Input-dtype.
+        return (torch.randn(M, K, dtype=torch.float32, device="cuda"),
+                torch.randn(K, N, dtype=torch.float32, device="cuda"))
     raise NotImplementedError(
-        f"input-dtype {dtype!r} noch nicht implementiert (tf32/fp8 folgen in TZ 3)."
+        f"input-dtype {dtype!r} noch nicht implementiert (fp8 folgt in TZ 3)."
     )
 
 

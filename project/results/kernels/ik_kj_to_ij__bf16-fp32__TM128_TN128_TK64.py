@@ -7,7 +7,7 @@
 # ==========================================================================
 """Generierter cuTile-GEMM (Codegen C1) — Kontraktion ik,kj->ij.
 
-Input-dtype: bf16 (Laufzeit-torch-dtype, steht NICHT im Kernel).
+Input-dtype: bf16 (Laufzeit-torch-dtype, steht NICHT im Kernel-Koerper).
 Akkumulator: fp32 (ct.float32).
 Tile-Literale: TM=128, TN=128, TK=64 (fest in den Quelltext gebacken).
 

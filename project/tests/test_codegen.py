@@ -31,8 +31,11 @@ from tool_pipeline.schema import RunConfig, RunResult  # noqa: E402
 # (Die lockeren fp16-Output-Toleranzen 2e-1/2e-2 gehören erst in TZ 3.)
 ATOL, RTOL = 1e-2, 1e-3
 
-# Compute-/Akku-dtype-Label → torch-dtype für die Test-Operanden.
-_TORCH = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
+# Compute-/Akku-dtype-Label → torch-dtype für die Test-Operanden. tf32-Eingaben
+# sind normale float32-Tensoren (der tfloat32-Cast passiert im Kernel), genau
+# wie in run._build_operands.
+_TORCH = {"fp16": torch.float16, "bf16": torch.bfloat16,
+          "tf32": torch.float32, "fp32": torch.float32}
 
 
 def _run_gemm(M: int, N: int, K: int, dtype: str = "fp16", acc: str = "fp32"):
@@ -145,6 +148,41 @@ def test_gemm_bf16_across_sizes():
 def test_gemm_bf16_orientation():
     """bf16: Orientierungs-Wächter (rechnet A@B, keinen Doppelgänger)."""
     _assert_orientation("bf16", "fp32")
+
+
+def test_gemm_tf32_across_sizes():
+    """tf32→fp32: fp32-Eingaben, im Kernel auf tfloat32 gecastet; stimmt gegen fp32."""
+    for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+        _assert_matches_fp32(M, N, K, "tf32", "fp32")
+
+
+def test_gemm_tf32_orientation():
+    """tf32: Orientierungs-Wächter."""
+    _assert_orientation("tf32", "fp32")
+
+
+def test_emit_tf32_has_astype_cast():
+    """Performance-Wächter: der tf32-Kernel MUSS ct.astype(.., ct.tfloat32) VOR
+    ct.mma enthalten — ohne Cast liefe fp32 still auf CUDA-Cores (rechnerisch
+    korrekt, ~30x langsamer), was ein reiner Korrektheitstest NICHT fängt.
+    fp16/bf16 dürfen umgekehrt KEINEN solchen Input-Cast haben.
+    """
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    src = build_gemm_module(tile, "tf32", "fp32")
+    assert "ct.astype(a, ct.tfloat32)" in src and "ct.astype(b, ct.tfloat32)" in src, \
+        "tf32-Kernel fehlt der tfloat32-Cast (Tensor-Core-Pfad)"
+    assert "ct.tfloat32" not in build_gemm_module(tile, "fp16", "fp32"), \
+        "fp16-Kernel darf keinen tfloat32-Cast enthalten"
+
+
+def test_build_gemm_module_rejects_unknown_input_dtype():
+    """Unbekannter Input-dtype → ValueError (statt still einen Kernel ohne den
+    ggf. nötigen Cast zu emittieren)."""
+    try:
+        build_gemm_module({"TM": 128, "TN": 128, "TK": 64}, "fp4", "fp32")
+    except ValueError:
+        return
+    raise AssertionError("build_gemm_module hätte bei dtype='fp4' ValueError werfen müssen")
 
 
 def test_emit_deterministic():
