@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tool_pipeline.codegen.compile import clear_cache, load_kernel  # noqa: E402
 from tool_pipeline.codegen.emit import emit  # noqa: E402
 from tool_pipeline.codegen.templates.contraction import build_gemm_module  # noqa: E402
+from tool_pipeline.measure.verify import _TOLERANCES  # noqa: E402
 from tool_pipeline.schema import RunConfig, RunResult  # noqa: E402
 
 # Output ist fp32 (= acc_dtype) → STRAFFE Toleranz: der reale fp32-Akku-Fehler
@@ -30,18 +31,61 @@ from tool_pipeline.schema import RunConfig, RunResult  # noqa: E402
 # (Die lockeren fp16-Output-Toleranzen 2e-1/2e-2 gehören erst in TZ 3.)
 ATOL, RTOL = 1e-2, 1e-3
 
+# Compute-/Akku-dtype-Label → torch-dtype für die Test-Operanden.
+_TORCH = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
 
-def _run_gemm(M: int, N: int, K: int):
-    """Echten Codegen-Pfad fahren: emit → load → launch. Gibt (A, B, C=fp32)."""
-    cfg = RunConfig(dim_sizes={"i": M, "k": K, "j": N})
+
+def _run_gemm(M: int, N: int, K: int, dtype: str = "fp16", acc: str = "fp32"):
+    """Echten Codegen-Pfad fahren: emit → load → launch. Gibt (A, B, C).
+
+    `dtype`/`acc` steuern Compute- bzw. Akku-/Output-dtype (Default fp16→fp32 =
+    der TZ-1-Anker, unverändert). Die weiteren in-scope-Formate werden pro
+    TZ-3-Teilschritt freigeschaltet.
+    """
+    cfg = RunConfig(dim_sizes={"i": M, "k": K, "j": N}, dtype=dtype, acc_dtype=acc)
     launch = load_kernel(cfg, emit(cfg)).launch
     torch.manual_seed(0)
-    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
-    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
-    C = torch.empty(M, N, dtype=torch.float32, device="cuda")   # Output = acc_dtype
+    in_t, out_t = _TORCH[dtype], _TORCH[acc]
+    A = torch.randn(M, K, dtype=in_t, device="cuda")
+    B = torch.randn(K, N, dtype=in_t, device="cuda")
+    C = torch.empty(M, N, dtype=out_t, device="cuda")   # Output = acc_dtype
     launch(A, B, C)
     torch.cuda.synchronize()
     return A, B, C
+
+
+def _assert_matches_fp32(M: int, N: int, K: int, dtype: str, acc: str):
+    """Generierter Kernel stimmt gegen die fp32-Referenz — mit der
+    **Produktions-Toleranz** des Formats (Quelle: measure.verify._TOLERANCES,
+    keine Duplikat-Werte)."""
+    atol, rtol = _TOLERANCES[(dtype, acc)]
+    A, B, C = _run_gemm(M, N, K, dtype, acc)
+    ref = torch.einsum("ik,kj->ij", A.float(), B.float())
+    assert C.shape == (M, N), f"{dtype}->{acc} {(M, N, K)}: Shape {tuple(C.shape)}"
+    assert C.dtype == _TORCH[acc], f"{dtype}->{acc}: Output-dtype {C.dtype} != {acc}"
+    err = (C.float() - ref).abs().max().item()
+    assert torch.allclose(C.float(), ref, atol=atol, rtol=rtol), \
+        f"{dtype}->{acc} {(M, N, K)} weicht ab: max_abs_err={err:.3e} (atol={atol}, rtol={rtol})"
+
+
+def _assert_orientation(dtype: str, acc: str):
+    """Orientierungs-Wächter je Format: exakt A@B, kein transponierter Doppelgänger.
+
+    Quadratische Inputs → alle Doppelgänger sind shape-legal, nur die Zahlen
+    unterscheiden sie. err_AB < 1.0 passt für alle in-scope-Formate (auch die
+    fp16-/fp8-Akku-Pfade mit ~0.2 realem Fehler)."""
+    M = N = K = 256
+    A, B, C = _run_gemm(M, N, K, dtype, acc)
+    Af, Bf, Cf = A.float(), B.float(), C.float()
+    err_AB = (Cf - Af @ Bf).abs().max().item()
+    imposters = {
+        "A@B^T": (Cf - Af @ Bf.T).abs().max().item(),
+        "B@A": (Cf - Bf @ Af).abs().max().item(),
+        "(A@B)^T": (Cf - (Af @ Bf).T).abs().max().item(),
+    }
+    assert err_AB < 1.0, f"{dtype}->{acc}: A@B sollte passen, err={err_AB:.3e}"
+    assert min(imposters.values()) > 10.0, \
+        f"{dtype}->{acc}: ein Doppelgänger liegt verdächtig nah: {imposters}"
 
 
 def test_gemm_correct_across_sizes():
@@ -88,6 +132,21 @@ def test_gemm_computes_AB_not_transpose():
         f"ein Doppelgänger liegt verdächtig nah: {imposters}"
 
 
+def test_gemm_bf16_across_sizes():
+    """bf16→fp32 (Akku fp32 = Pflicht): stimmt gegen fp32 — glatt UND ragged.
+
+    bf16 ist nativ (kein Kernel-Cast, Akku fp32) → derselbe erzeugte Kernel wie
+    fp16, nur mit bf16-Operanden; prüft, dass der Codegen dtype-agnostisch bleibt.
+    """
+    for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+        _assert_matches_fp32(M, N, K, "bf16", "fp32")
+
+
+def test_gemm_bf16_orientation():
+    """bf16: Orientierungs-Wächter (rechnet A@B, keinen Doppelgänger)."""
+    _assert_orientation("bf16", "fp32")
+
+
 def test_emit_deterministic():
     """Gleiche Config → byte-identischer Quelltext (Cache-/Reproduzierbarkeit)."""
     assert emit(RunConfig()) == emit(RunConfig())
@@ -126,9 +185,9 @@ def test_run_returns_result_on_compile_error():
     st.append_result = lambda r, path=None: None
     try:
         for cfg in [
-            RunConfig(expr="ki,kj->ij"),      # nicht-kanonisch → reshape lehnt ab
-            RunConfig(family="elementwise"),  # falsche Familie → parse lehnt ab
-            RunConfig(dtype="tf32"),          # out-of-scope Input-dtype → _build_inputs
+            RunConfig(expr="ki,kj->ij"),                  # nicht-kanonisch → reshape lehnt ab
+            RunConfig(family="elementwise"),              # falsche Familie → parse lehnt ab
+            RunConfig(dtype="bf16", acc_dtype="fp16"),    # unzulässige Acc-Kombi → check_dtype_combo
         ]:
             res = R.run(cfg)
             assert isinstance(res, RunResult), "run() darf nicht werfen"

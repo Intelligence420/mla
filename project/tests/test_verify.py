@@ -25,7 +25,7 @@ from tool_pipeline.measure.verify import (  # noqa: E402
     _tolerances,
     verify,
 )
-from tool_pipeline.schema import RunConfig  # noqa: E402
+from tool_pipeline.schema import ALLOWED_ACC, RunConfig  # noqa: E402
 
 _ACCURACY_KEYS = {"max_abs_err", "mean_abs_err", "rel_err", "passed", "atol", "rtol"}
 
@@ -51,6 +51,13 @@ def test_tolerances_cover_exactly_the_in_scope_combos():
         ("fp32", "fp32"),
     }
     assert set(_TOLERANCES) == expected, set(_TOLERANCES) ^ expected
+
+
+def test_tolerances_agree_with_schema_acc_rules():
+    """Anti-Drift: verify._TOLERANCES deckt genau die von schema.ALLOWED_ACC
+    erlaubten (dtype, acc)-Kombis ab — eine Regel, zwei Verteidigungslinien."""
+    from_rules = {(d, a) for d, accs in ALLOWED_ACC.items() for a in accs}
+    assert set(_TOLERANCES) == from_rules, set(_TOLERANCES) ^ from_rules
 
 
 def test_tolerances_fp16_gate_unchanged():

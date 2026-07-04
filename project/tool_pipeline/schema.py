@@ -5,7 +5,10 @@ einzige Naht `run(config) -> result` (siehe `run.py`) spricht ausschließlich
 diese beiden Typen; `app/` baut `RunConfig`, der Core liefert `RunResult`.
 
 Bewusst als reine Daten-Container (`@dataclass`) gehalten: **keine** Logik für
-dtype-Mapping, Parsing oder Messung — das gehört in die jeweiligen Stufen.
+das dtype→torch/cuTile-*Mapping*, Parsing oder Messung — das gehört in die
+jeweiligen Stufen. Die dtype/acc-*Regeln* (welche Format-Kombis überhaupt
+zulässig sind) sind dagegen Vertrags-Daten und liegen hier (`ALLOWED_ACC`),
+torch-/cuTile-frei, damit die fork-sichere GUI sie importieren kann.
 So bleiben spätere Achsen rein **additiv**: neuer dtype/Tile/Swizzle/Familie/
 Baseline = neues Feld oder neuer Status-Zweig, kein Umbau.
 
@@ -27,6 +30,41 @@ STATUS_OK = "ok"                       # compiliert, verifiziert, gemessen
 STATUS_VERIFY_FAILED = "verify_failed"  # läuft, aber Zahlen != fp32-Referenz
 STATUS_COMPILE_ERROR = "compile_error"  # emittierter Quelltext compiliert nicht
 STATUS_RUN_ERROR = "run_error"          # compiliert, crasht aber beim Launch/Run
+
+
+# ---------------------------------------------------------------------------
+# dtype/acc-Regeln (Teil des Core↔GUI-Vertrags, TZ 3).
+# ---------------------------------------------------------------------------
+# Erlaubte Akkumulator-dtypes je Compute-dtype (PLAN §5, empirisch belegt):
+# bf16 & tf32 MÜSSEN in fp32 akkumulieren; fp16 & fp8 dürfen fp16 oder fp32;
+# fp32 (Anker) nur fp32. **Single Source of Truth der Acc-Regeln** — gelesen von
+# `run._build_inputs` (frühe Prüfung, Stufe 2) und den GUI-Controls; `measure.verify`
+# hält für exakt dieselben (dtype, acc)-Kombis die Toleranzen (zweite
+# Verteidigungslinie). Bewusst torch-/cuTile-frei (fork-sichere GUI kann es laden).
+ALLOWED_ACC: dict[str, tuple[str, ...]] = {
+    "fp16":    ("fp16", "fp32"),
+    "bf16":    ("fp32",),
+    "tf32":    ("fp32",),
+    "fp8e4m3": ("fp16", "fp32"),
+    "fp8e5m2": ("fp16", "fp32"),
+    "fp32":    ("fp32",),
+}
+
+
+def check_dtype_combo(dtype: str, acc_dtype: str) -> Optional[str]:
+    """Prüft (dtype, acc_dtype) gegen die Acc-Regeln (`ALLOWED_ACC`).
+
+    :returns: ``None`` wenn zulässig, sonst ein deutscher Fehlertext (für einen
+              sauberen Fehler-Status statt eines still falschen Laufs).
+    """
+    allowed = ALLOWED_ACC.get(dtype)
+    if allowed is None:
+        return (f"Compute-dtype {dtype!r} nicht unterstützt "
+                f"(verfügbar: {sorted(ALLOWED_ACC)}).")
+    if acc_dtype not in allowed:
+        return (f"Akkumulator {acc_dtype!r} für Compute-dtype {dtype!r} "
+                f"unzulässig (erlaubt: {list(allowed)}).")
+    return None
 
 
 # ---------------------------------------------------------------------------
