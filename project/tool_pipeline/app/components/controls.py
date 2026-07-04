@@ -20,6 +20,7 @@ importiert statt Strings zu duplizieren.
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import dash_bootstrap_components as dbc
@@ -59,6 +60,10 @@ def validate_sizes(m, n, k) -> Optional[str]:
             fv = float(v)
         except (TypeError, ValueError):
             return f"{name} ist keine Zahl: {v!r}."
+        # inf/nan bestehen float(), würden aber int() zum Werfen bringen (N1) →
+        # früh abfangen, damit validate_sizes NIE eine Exception wirft.
+        if not math.isfinite(fv):
+            return f"{name} muss eine endliche Zahl sein (bekommen: {v!r})."
         if fv != int(fv):
             return f"{name} muss ganzzahlig sein (bekommen: {v!r})."
         if int(fv) < 1:

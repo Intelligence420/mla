@@ -63,6 +63,8 @@ def test_validate_rejects_bad_inputs():
         (0, 8, 8), (8, -3, 8),             # <= 0
         (8, 8, 512.5),                     # nicht ganzzahlig
         (8, "x", 8),                       # nicht numerisch
+        (float("inf"), 8, 8), (8, float("nan"), 8),  # N1: inf/nan (Float)
+        ("inf", 8, 8), (8, 8, "nan"),                # N1: inf/nan (String)
     ]
     for m, n, k in bad:
         msg = validate_sizes(m, n, k)
