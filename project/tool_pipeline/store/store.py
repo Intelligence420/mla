@@ -91,8 +91,14 @@ def store_relpath(path: Union[str, Path]) -> str:
 # ---------------------------------------------------------------------------
 def append_result(result: Union[RunResult, dict[str, Any]],
                   path: Path = RESULTS_JSONL) -> Path:
-    """Ein `RunResult` als **eine** JSON-Zeile an `results.jsonl` anhängen."""
+    """Ein `RunResult` als **eine** JSON-Zeile an `results.jsonl` anhängen.
+
+    `kernel_source` (GUI-Code-Anzeige) wird aus der zu schreibenden Kopie entfernt —
+    der Quelltext liegt bereits als `kernels/<slug>.py` vor, gehört also nicht als
+    Bloat in jede JSONL-Zeile. Das übergebene RunResult bleibt unverändert.
+    """
     d = result.to_dict() if isinstance(result, RunResult) else dict(result)
+    d.pop("kernel_source", None)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(d, ensure_ascii=False)
     with path.open("a", encoding="utf-8") as f:
