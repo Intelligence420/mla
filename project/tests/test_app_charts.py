@@ -110,6 +110,24 @@ def test_scatter_yaxis_is_log():
     assert fig.layout.yaxis.type == "log"
 
 
+def test_scatter_single_format_has_legend():
+    """Ein-Format-Scatter erzwingt eine Legende (der Punkt wäre sonst unbeschriftet
+    — auch im PNG-Export ohne Hover)."""
+    fig = figure_accuracy_throughput([_ok("bf16", "fp32", 18.6, 4.8e-7)])
+    assert fig.layout.showlegend is True
+    assert len(fig.data) == 1 and fig.data[0].name == "bf16 → fp32"
+
+
+def test_scatter_x_autoranges_but_bar_starts_at_zero():
+    """Scatter-x NICHT bei 0 verankert (geclusterte Durchsätze brauchen Trennschärfe);
+    der Durchsatz-Balken startet weiterhin bei 0."""
+    scat = figure_accuracy_throughput([_ok("fp16", "fp32", 18.5, 7e-7),
+                                       _ok("tf32", "fp32", 7.0, 3e-4)])
+    assert scat.layout.xaxis.rangemode != "tozero"
+    bar = figure_throughput([_ok("fp16", "fp32", 18.5, 7e-7)])
+    assert bar.layout.xaxis.rangemode == "tozero"
+
+
 def test_scatter_rel_err_zero_is_clamped():
     """rel_err == 0 (perfekt) darf die log-Achse nicht sprengen (Clamp > 0)."""
     fig = figure_accuracy_throughput([_ok("fp16", "fp32", 18.5, 0.0)])

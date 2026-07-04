@@ -64,7 +64,8 @@ def _build_operands(dtype: str, M: int, N: int, K: int):
     (torch.float32 + Kernel-Cast) und fp8 (fp16→`.to(fp8)`) kommen als eigene
     Zweige in den folgenden Teil-Schritten dazu.
     """
-    if dtype in ("fp16", "bf16"):
+    if dtype in ("fp16", "bf16", "fp32"):
+        # Native torch-dtypes (fp32 = Anker/Diagnose ohne Tensor-Core-Pfad).
         t = _TORCH_DTYPE[dtype]
         return (torch.randn(M, K, dtype=t, device="cuda"),
                 torch.randn(K, N, dtype=t, device="cuda"))

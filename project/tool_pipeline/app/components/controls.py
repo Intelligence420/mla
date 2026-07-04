@@ -42,8 +42,9 @@ ID_PROGRESS, ID_STATUS = "run-progress", "run-status"
 _DEFAULT = RunConfig()
 _DEFAULT_SIZE = 512  # Startwert je Größe (= cli.py-Default; klein, deterministisch)
 
-# Anzeige-Reihenfolge der Compute-dtypes. fp32-plain (Anker ohne Tensor-Cores)
-# ist optional und aktuell nicht in run._build_operands gebaut → hier ausgelassen.
+# Anzeige-Reihenfolge der wählbaren Compute-dtypes. fp32-plain (Anker ohne
+# Tensor-Cores) ist baubar/verifizierbar, aber bewusst NICHT in der GUI-Auswahl
+# (Diagnose-Format, nur programmatisch via RunConfig) → hier ausgelassen.
 _DTYPE_ORDER = ("fp16", "bf16", "tf32", "fp8e4m3", "fp8e5m2")
 
 

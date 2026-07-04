@@ -223,6 +223,13 @@ def test_gemm_fp8_orientation():
     _assert_orientation("fp8e4m3", "fp16")
 
 
+def test_gemm_fp32_plain_verify():
+    """fp32-plain (Anker/Diagnose, kein Tensor-Core): baubar UND gegen fp32
+    verifiziert (schließt die 'erlaubt aber nicht baubar'-Lücke)."""
+    for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+        _assert_matches_fp32(M, N, K, "fp32", "fp32")
+
+
 def test_fp8_variants_differ():
     """e4m3 und e5m2 liefern echt verschiedene Ergebnisse (kein stiller Upcast
     auf ein gemeinsames Format) — beide fp8-Pfade sind real unterschiedlich."""

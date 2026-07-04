@@ -42,11 +42,14 @@ _TOLERANCES: dict[tuple[str, str], tuple[float, float]] = {
     # bf16 & tf32: Akku IMMER fp32 (Pflicht); tf32 = astype-Cast im Kernel.
     ("bf16", "fp32"): (1.0, 2e-2),
     ("tf32", "fp32"): (1.0, 2e-2),
-    # fp8 e4m3: fp32-Akku (max_abs ≈ 1.5e-5) oder fp16-Akku (schneller, ≈ 0.16).
-    ("fp8e4m3", "fp32"): (8.0, 2e-1),
+    # fp8 e4m3 & e5m2: pro Akku GETRENNT gaten (sonst prüfte der genaue fp32-Akku-
+    # Pfad so lasch wie der grobe fp16-Akku-Pfad). fp32-Akku ist sehr genau
+    # (max_abs ≈ 1.5e-5 @512³, da die fp8-Quantisierung aus dem Diff gegen die
+    # fp8-Referenz herausfällt) → straffes Gate wie der fp16→fp32-Anker. fp16-Akku
+    # ist grob (≈ 0.16) → eigenes lockeres Gate (e5m2 mit gröberer Mantisse lockerer).
+    ("fp8e4m3", "fp32"): (2e-1, 2e-2),
     ("fp8e4m3", "fp16"): (8.0, 2e-1),
-    # fp8 e5m2 (gröberes Mantissen-Format → etwas lockerer).
-    ("fp8e5m2", "fp32"): (16.0, 3e-1),
+    ("fp8e5m2", "fp32"): (2e-1, 2e-2),
     ("fp8e5m2", "fp16"): (16.0, 3e-1),
     # Anker/Diagnose: reines fp32 (kein Tensor-Core), sehr straff.
     ("fp32", "fp32"): (1e-2, 1e-3),

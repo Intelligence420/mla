@@ -31,6 +31,14 @@ _PALETTE = ["#2a78d6", "#1baf7a", "#eda100", "#008300",
 _FORMAT_COLOR = {combo_key(d, a): _PALETTE[i % len(_PALETTE)] for i, (d, a) in enumerate(COMBOS)}
 _FALLBACK = "#898781"
 
+# Invariante „eine Farbe je Format": die Palette MUSS mindestens so viele Farben
+# haben wie es Kombis gibt — sonst würde `i % len` still zwei Formate gleich
+# einfärben. Lieber laut beim Import scheitern als leise die Farbidentität brechen.
+assert len(COMBOS) <= len(_PALETTE), (
+    f"_PALETTE hat nur {len(_PALETTE)} Farben für {len(COMBOS)} Format-Kombis — "
+    f"Palette erweitern (sonst teilen sich zwei Formate eine Farbe)."
+)
+
 _INK = "#0b0b0b"          # Primär-Ink (Titel, Wert-Labels)
 _INK2 = "#52514e"         # Sekundär-Ink (Achsentitel)
 _MUTED = "#898781"        # Achsen-Ticks / Hinweise
@@ -172,10 +180,17 @@ def figure_accuracy_throughput(results, primary_key: Optional[str] = None) -> go
                            "max_abs %{customdata[2]:.2e}<extra></extra>"),
         ))
     _style(fig, title="Genauigkeit ↔ Durchsatz", xaxis_title="TFLOP/s  (→ schneller)")
-    fig.update_xaxes(rangemode="tozero")
-    # y-Achsentitel steht senkrecht → KEIN Pfeil (würde mitgedreht und zeigte
-    # seitlich); stattdessen Worte, die unabhängig von der Drehung stimmen.
-    fig.update_yaxes(type="log", title="rel. Fehler vs fp32 · kleiner = genauer")
+    # Auch bei genau EINEM Format eine Legende (sonst wäre der einzelne Punkt
+    # unbeschriftet — auch im PNG-Export ohne Hover).
+    fig.update_layout(showlegend=True)
+    # x NICHT bei 0 verankern: die Durchsätze clustern dicht (~18–20) mit einem
+    # Ausreißer (tf32 ~7); Auto-Range gibt dem Scatter horizontale Trennschärfe.
+    fig.update_xaxes(rangemode="normal")
+    # y-Achsentitel steht senkrecht → KEIN Pfeil (würde mitgedreht); Worte statt
+    # Pfeil. Feste Dekaden-Ticks (dtick=1) + 10^n-Format → ruhige, konsistente
+    # log-Achse (kein 1µ/0.001-SI-Mix, keine nackten Minor-Mantissen).
+    fig.update_yaxes(type="log", title="rel. Fehler vs fp32 · kleiner = genauer",
+                     dtick=1, exponentformat="power", showexponent="all")
     return fig
 
 
