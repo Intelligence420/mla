@@ -22,6 +22,7 @@ einzelne Stufen — der Ablauf hier bleibt.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import cuda.tile as ct
 import torch
@@ -92,10 +93,12 @@ def run(config: RunConfig) -> RunResult:
     timing: dict = {}
     metrics: dict = {}
     kernel_path = None
+    kernel_source = None
 
     def _result(status: str, error: str | None = None) -> RunResult:
         r = RunResult(
             status=status, config=config.to_dict(), kernel_path=kernel_path,
+            kernel_source=kernel_source,
             accuracy=accuracy, timing=timing, metrics=metrics,
             provenance=provenance, error=error,
         )
@@ -130,6 +133,13 @@ def run(config: RunConfig) -> RunResult:
     try:
         comp = load_kernel(config)
         kernel_path = store.store_relpath(comp.kernel_path)
+        # Quelltext für die GUI-Code-Anzeige mitführen (das persistierte Artefakt =
+        # exakt was compiliert wurde). Lesefehler darf einen sonst gesunden Lauf
+        # NICHT kippen → still auf None; der Store lässt das Feld ohnehin weg.
+        try:
+            kernel_source = Path(comp.kernel_path).read_text(encoding="utf-8")
+        except OSError:
+            kernel_source = None
     except Exception as e:
         return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")
 
