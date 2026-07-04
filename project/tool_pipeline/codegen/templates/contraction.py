@@ -17,13 +17,13 @@ KEIN Permute.
 
 # ---------------------------------------------------------------------------
 # acc-dtype-Mapping: Akkumulator-Label -> ct-dtype-Ausdruck, als Literal in den
-# Kernel substituiert. Nur fp32 ist heute nutzbar; fp16 folgt mit dem fp8-Pfad
-# (fp8 -> fp16-Akku). bf16/tf32 sind reine COMPUTE-Formate und NIE Akkumulatoren
-# (sie akkumulieren zwingend in fp32) — daher stehen sie hier bewusst nicht.
+# Kernel substituiert. fp32 und fp16 sind nutzbar (fp16-/fp8-Compute duerfen in
+# fp16 akkumulieren — schneller). bf16/tf32 sind reine COMPUTE-Formate und NIE
+# Akkumulatoren (sie akkumulieren zwingend in fp32) — daher hier bewusst nicht.
 # ---------------------------------------------------------------------------
 _ACC_DTYPE_MAP = {
     "fp32": "ct.float32",
-    # "fp16": "ct.float16",   # folgt mit dem fp8-Pfad (fp8 -> fp16-Akku)
+    "fp16": "ct.float16",
 }
 
 

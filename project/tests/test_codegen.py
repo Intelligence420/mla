@@ -35,23 +35,31 @@ ATOL, RTOL = 1e-2, 1e-3
 # sind normale float32-Tensoren (der tfloat32-Cast passiert im Kernel), genau
 # wie in run._build_operands.
 _TORCH = {"fp16": torch.float16, "bf16": torch.bfloat16,
-          "tf32": torch.float32, "fp32": torch.float32}
+          "tf32": torch.float32, "fp32": torch.float32,
+          "fp8e4m3": torch.float8_e4m3fn, "fp8e5m2": torch.float8_e5m2}
+
+
+def _rand_operand(rows: int, cols: int, dtype: str):
+    """Zufalls-Operand im Compute-`dtype`. fp8 via fp16→.to() (randn kann kein
+    fp8), sonst direkt — spiegelt run._build_operands."""
+    t = _TORCH[dtype]
+    if dtype.startswith("fp8"):
+        return torch.randn(rows, cols, dtype=torch.float16, device="cuda").to(t)
+    return torch.randn(rows, cols, dtype=t, device="cuda")
 
 
 def _run_gemm(M: int, N: int, K: int, dtype: str = "fp16", acc: str = "fp32"):
     """Echten Codegen-Pfad fahren: emit → load → launch. Gibt (A, B, C).
 
     `dtype`/`acc` steuern Compute- bzw. Akku-/Output-dtype (Default fp16→fp32 =
-    der TZ-1-Anker, unverändert). Die weiteren in-scope-Formate werden pro
-    TZ-3-Teilschritt freigeschaltet.
+    der TZ-1-Anker, unverändert).
     """
     cfg = RunConfig(dim_sizes={"i": M, "k": K, "j": N}, dtype=dtype, acc_dtype=acc)
     launch = load_kernel(cfg, emit(cfg)).launch
     torch.manual_seed(0)
-    in_t, out_t = _TORCH[dtype], _TORCH[acc]
-    A = torch.randn(M, K, dtype=in_t, device="cuda")
-    B = torch.randn(K, N, dtype=in_t, device="cuda")
-    C = torch.empty(M, N, dtype=out_t, device="cuda")   # Output = acc_dtype
+    A = _rand_operand(M, K, dtype)
+    B = _rand_operand(K, N, dtype)
+    C = torch.empty(M, N, dtype=_TORCH[acc], device="cuda")   # Output = acc_dtype
     launch(A, B, C)
     torch.cuda.synchronize()
     return A, B, C
@@ -183,6 +191,45 @@ def test_build_gemm_module_rejects_unknown_input_dtype():
     except ValueError:
         return
     raise AssertionError("build_gemm_module hätte bei dtype='fp4' ValueError werfen müssen")
+
+
+def test_gemm_fp16_fp16_acc():
+    """fp16→fp16 (fp16-Akku + fp16-Output): der neue Akku-Pfad auch ohne fp8."""
+    for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+        _assert_matches_fp32(M, N, K, "fp16", "fp16")
+
+
+def test_gemm_fp8e4m3_verify():
+    """fp8 e4m3 × Akku fp32 UND fp16 (der schnellste Kandidat): stimmt gegen fp32.
+
+    fp8 braucht KEINEN Kernel-Cast (Host-seitig gecastet); der Kernel rechnet die
+    fp8-Tiles direkt. Geprüft mit glatten UND ragged Größen.
+    """
+    for acc in ("fp32", "fp16"):
+        for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+            _assert_matches_fp32(M, N, K, "fp8e4m3", acc)
+
+
+def test_gemm_fp8e5m2_verify():
+    """fp8 e5m2 × Akku fp32 UND fp16: stimmt gegen fp32 (glatt + ragged)."""
+    for acc in ("fp32", "fp16"):
+        for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+            _assert_matches_fp32(M, N, K, "fp8e5m2", acc)
+
+
+def test_gemm_fp8_orientation():
+    """fp8: Orientierungs-Wächter für BEIDE Akku-Kernel (fp32- und fp16-Akku)."""
+    _assert_orientation("fp8e4m3", "fp32")
+    _assert_orientation("fp8e4m3", "fp16")
+
+
+def test_fp8_variants_differ():
+    """e4m3 und e5m2 liefern echt verschiedene Ergebnisse (kein stiller Upcast
+    auf ein gemeinsames Format) — beide fp8-Pfade sind real unterschiedlich."""
+    _, _, C4 = _run_gemm(256, 256, 256, "fp8e4m3", "fp32")
+    _, _, C5 = _run_gemm(256, 256, 256, "fp8e5m2", "fp32")
+    diff = (C4.float() - C5.float()).abs().max().item()
+    assert diff > 1e-2, f"e4m3 vs e5m2 verdächtig gleich: max_diff={diff:.3e}"
 
 
 def test_emit_deterministic():

@@ -73,8 +73,15 @@ def _build_operands(dtype: str, M: int, N: int, K: int):
         # der Kernel-Cast (ct.astype .. ct.tfloat32), NICHT der Input-dtype.
         return (torch.randn(M, K, dtype=torch.float32, device="cuda"),
                 torch.randn(K, N, dtype=torch.float32, device="cuda"))
+    if dtype in ("fp8e4m3", "fp8e5m2"):
+        # torch.randn kann fp8 NICHT direkt erzeugen -> fp16 bauen und host-seitig
+        # casten (genau wie in analysis/dtype_analyse.py bewiesen). Der Kernel
+        # rechnet die fp8-Tiles direkt (kein in-Kernel-Cast).
+        fp8 = torch.float8_e4m3fn if dtype == "fp8e4m3" else torch.float8_e5m2
+        return (torch.randn(M, K, dtype=torch.float16, device="cuda").to(fp8),
+                torch.randn(K, N, dtype=torch.float16, device="cuda").to(fp8))
     raise NotImplementedError(
-        f"input-dtype {dtype!r} noch nicht implementiert (fp8 folgt in TZ 3)."
+        f"input-dtype {dtype!r} noch nicht implementiert."
     )
 
 
