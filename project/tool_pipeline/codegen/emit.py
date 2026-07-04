@@ -24,7 +24,7 @@ def _header(config: RunConfig) -> str:
     return (
         "# " + "=" * 74 + "\n"
         "# Auto-generiert vom cuTile Performance Lab (Codegen C1).\n"
-        "# NICHT von Hand editieren — aus einer RunConfig erzeugt.\n"
+        "# Aus einer RunConfig erzeugt.\n"
         f"# Ausdruck : {config.expr}\n"
         f"# Format   : {config.dtype} -> {config.acc_dtype} (Akku)\n"
         f"# Tile     : TM={t.get('TM')} TN={t.get('TN')} TK={t.get('TK')}"

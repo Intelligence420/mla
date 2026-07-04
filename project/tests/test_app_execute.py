@@ -83,7 +83,9 @@ def test_execute_batch_renders_charts_kpis_verify_code():
     finally:
         restore()
     assert isinstance(comps, list) and comps, "execute_run muss eine nicht-leere Liste liefern"
-    assert _types(comps).count("Graph") == 2, "es müssen zwei Vergleichs-Charts (dcc.Graph) da sein"
+    types = _types(comps)
+    assert types.count("Graph") == 2, "es müssen zwei Vergleichs-Charts (dcc.Graph) da sein"
+    assert types.count("Tab") == 2, "je Format ein Detail-Tab (durchklickbar)"
     txt = _text(comps)
     assert "erfolgreich" in txt, f"kein ok-Status: {txt[:200]}"
     assert "TFLOP/s" in txt and "PASS" in txt, f"KPIs/Verify fehlen: {txt[:300]}"

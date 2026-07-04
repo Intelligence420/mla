@@ -54,18 +54,6 @@ def _alert(title: str, body: str, color: str):
     return dbc.Alert([html.Strong(title), html.Br(), html.Span(body)], color=color, className="mb-3")
 
 
-def render_result(result) -> list:
-    """RunResult → Detail-Komponenten (Status · Kontext · KPIs · Verify · Code)."""
-    parts = [
-        kpis.render_status(result),
-        kpis.render_context(result),
-        kpis.render_kpis(result),
-        kpis.render_verify(result),
-        code_panel.render_code_panel(result.kernel_source, result.kernel_path),
-    ]
-    return [p for p in parts if p is not None]
-
-
 def _format_status_strip(results) -> html.Div:
     """Kompakte Statuszeile je gewähltem Format — auch fehlgeschlagene bleiben
     sichtbar (statt still aus den Charts zu verschwinden)."""
@@ -80,9 +68,40 @@ def _format_status_strip(results) -> html.Div:
     return html.Div(badges, className="mb-3")
 
 
+# Abschnitts-Überschrift (wie in den Controls)
+_SECTION = {"fontSize": "11px", "letterSpacing": "0.08em", "textTransform": "uppercase",
+            "color": "#6b7280", "margin": "10px 0 4px"}
+
+
+def _format_label(result) -> str:
+    cfg = result.config or {}
+    return f"{cfg.get('dtype')} → {cfg.get('acc_dtype')}"
+
+
+def _tab_content(result) -> html.Div:
+    """Detail EINES Formats: KPIs (Durchsatz/Median/Compile) · Verify · Kontext ·
+    generierter Kernel. Bei Fehl-Status zusätzlich der Status (Grund)."""
+    parts = []
+    if result.status != "ok":
+        parts.append(kpis.render_status(result))   # Fehlergrund im Tab sichtbar machen
+    parts += [
+        kpis.render_context(result),
+        kpis.render_kpis(result),
+        kpis.render_verify(result),
+        code_panel.render_code_panel(result.kernel_source, result.kernel_path),
+    ]
+    return html.Div([p for p in parts if p is not None], className="pt-3")
+
+
 def render_comparison(results) -> list:
-    """Batch-Ergebnisse → Main: zwei Vergleichs-Charts (alle verifizierten Formate),
-    Status je Format, dann das Detail-Panel des **primären** (ersten) Formats."""
+    """Batch-Ergebnisse → Main (von oben nach unten):
+
+    1. Headline-Status des primären Formats,
+    2. beide Vergleichs-Charts **untereinander** (je volle Breite → größer),
+    3. Status-Badges je Format,
+    4. **Tabs je Format** — Durchsatz/Median/Verify/Kernel jedes Formats einzeln
+       anschaubar und durchklickbar.
+    """
     if not results:
         return [_alert("Kein Ergebnis", "Keine Formate ausgewählt.", "warning")]
     primary = results[0]
@@ -90,20 +109,33 @@ def render_comparison(results) -> list:
     primary_key = f"{pcfg.get('dtype')}:{pcfg.get('acc_dtype')}"
     n_ok = sum(1 for r in results if r.status == "ok")
 
-    charts_row = dbc.Row(
+    charts_stacked = html.Div(
         [
-            dbc.Col(dcc.Graph(figure=charts.figure_throughput(results, primary_key),
-                              config=_GRAPH_CONFIG, style={"height": "340px"}), md=6),
-            dbc.Col(dcc.Graph(figure=charts.figure_accuracy_throughput(results, primary_key),
-                              config=_GRAPH_CONFIG, style={"height": "340px"}), md=6),
+            dcc.Graph(figure=charts.figure_throughput(results, primary_key),
+                      config=_GRAPH_CONFIG, style={"height": "420px", "width": "100%"}),
+            dcc.Graph(figure=charts.figure_accuracy_throughput(results, primary_key),
+                      config=_GRAPH_CONFIG, style={"height": "440px", "width": "100%"}),
         ],
-        className="g-3 mb-2",
+        className="mb-2",
     )
-    header = html.Div(f"{n_ok}/{len(results)} Formate verifiziert",
-                      style={"fontSize": "12px", "color": "#6b7280", "marginBottom": "8px"})
+    summary = html.Div(f"{n_ok}/{len(results)} Formate verifiziert",
+                       style={"fontSize": "12px", "color": "#6b7280", "margin": "2px 0 8px"})
 
-    parts = [header, charts_row, _format_status_strip(results), html.Hr()]
-    parts += render_result(primary)
+    tabs = dbc.Tabs(
+        [dbc.Tab(_tab_content(r), label=_format_label(r), tab_id=f"fmt-{i}")
+         for i, r in enumerate(results)],
+        active_tab="fmt-0",
+    )
+
+    parts = [
+        kpis.render_status(primary),                 # 1) Headline ganz oben
+        summary,
+        charts_stacked,                              # 2) Charts untereinander
+        _format_status_strip(results),               # 3) Status je Format
+        html.Hr(),
+        html.Div("Detail je Format", style=_SECTION),
+        tabs,                                        # 4) je Format einzeln, durchklickbar
+    ]
     return [p for p in parts if p is not None]
 
 

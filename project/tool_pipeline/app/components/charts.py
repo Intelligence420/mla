@@ -173,7 +173,9 @@ def figure_accuracy_throughput(results, primary_key: Optional[str] = None) -> go
         ))
     _style(fig, title="Genauigkeit ↔ Durchsatz", xaxis_title="TFLOP/s  (→ schneller)")
     fig.update_xaxes(rangemode="tozero")
-    fig.update_yaxes(type="log", title="rel. Fehler vs fp32  (↓ genauer)")
+    # y-Achsentitel steht senkrecht → KEIN Pfeil (würde mitgedreht und zeigte
+    # seitlich); stattdessen Worte, die unabhängig von der Drehung stimmen.
+    fig.update_yaxes(type="log", title="rel. Fehler vs fp32 · kleiner = genauer")
     return fig
 
 

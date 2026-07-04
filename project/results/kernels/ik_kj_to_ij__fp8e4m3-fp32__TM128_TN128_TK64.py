@@ -1,6 +1,6 @@
 # ==========================================================================
 # Auto-generiert vom cuTile Performance Lab (Codegen C1).
-# NICHT von Hand editieren — aus einer RunConfig erzeugt.
+# Aus einer RunConfig erzeugt.
 # Ausdruck : ik,kj->ij
 # Format   : fp8e4m3 -> fp32 (Akku)
 # Tile     : TM=128 TN=128 TK=64 | swizzle=False
