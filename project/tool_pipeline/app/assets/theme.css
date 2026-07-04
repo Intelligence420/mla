@@ -1,1 +1,70 @@
-/* Dash auto-serves assets/. Theme + targeted polish (proper, not vibe-coded). */
+/* ==========================================================================
+   einsum/GEMM Performance-Explorer — Theme (TZ 2 / TODO 7).
+   Dash serviert assets/ automatisch. Schlichte, professionelle Politur über
+   Bootstrap (dbc) — bewusst kein Vibe-Coding. Das Grundgerüst-Styling wurde
+   aus layout.py hierher migriert (Container tragen jetzt CSS-Klassen).
+   ========================================================================== */
+
+:root {
+  --ink: #1f2530;
+  --muted: #6b7280;
+  --line: #e4e7ec;
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+/* --- Topbar --- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 22px;
+  color: #fff;
+  background: linear-gradient(90deg, #3b2f63, #5b21b6);
+  box-shadow: 0 1px 4px rgba(16, 24, 40, 0.15);
+}
+.topbar h1 { font-size: 17px; margin: 0; font-weight: 650; }
+.topbar .topbar-sub { margin-left: auto; opacity: 0.85; font-size: 12.5px; }
+
+/* --- Grundgerüst (Sidebar links, Main rechts) --- */
+.app-body { display: flex; min-height: calc(100vh - 52px); }
+.sidebar {
+  width: 320px;
+  flex-shrink: 0;
+  padding: 18px 16px;
+  border-right: 1px solid var(--line);
+  background: #fafafc;
+}
+.main { flex: 1; padding: 20px 24px; overflow: auto; }
+.main-placeholder { color: var(--muted); }
+
+/* --- Karten (dbc.Card → .card): dezenter Rahmen + Schatten --- */
+.main .card {
+  border: 1px solid var(--line) !important;
+  border-radius: 11px !important;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+/* --- Code-Panel (dcc.Markdown ```python```): heller Block, monospace, scrollbar --- */
+.main pre {
+  background: #f8f9fc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow: auto;
+  font-size: 12.5px;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.main pre code { background: transparent; padding: 0; }
+
+/* Eingaben etwas kompakter in der schmalen Sidebar */
+.sidebar input.form-control { font-size: 13px; }
