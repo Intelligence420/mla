@@ -127,7 +127,7 @@ def launch(A, B, C):
 # braucht dafuer eine ECHTE Datei auf der Platte -- ein reines ``exec`` aus einem
 # String scheitert mit ``OSError: could not get source code``. Der spaetere
 # compile.py-Consumer schreibt den emittierten Text ohnehin nach
-# ``results/kernels/<hash>.py`` und importiert von dort; dieser Selbsttest
+# ``results/kernels/<slug>.py`` und importiert von dort; dieser Selbsttest
 # spiegelt genau diesen Datei-basierten Ladepfad.
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
