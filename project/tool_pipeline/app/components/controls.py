@@ -240,16 +240,16 @@ def build_controls() -> html.Div:
         html.Div(
             style={"display": "flex", "gap": "8px", "marginTop": "18px"},
             children=[
-                dbc.Button("▶  Run", id=ID_RUN, color="primary", n_clicks=0,
+                dbc.Button("▶  Vergleichen", id=ID_RUN, color="primary", n_clicks=0,
                            style={"flex": 1}),
                 dbc.Button("Abbrechen", id=ID_CANCEL, color="secondary", outline=True,
                            n_clicks=0, disabled=True),
             ],
         ),
 
-        # Indeterminater Balken + Statustext; Sichtbarkeit/Text steuert der
-        # Background-Callback (TODO 6) über running=/progress=. Startzustand: verborgen.
-        dbc.Progress(id=ID_PROGRESS, value=100, striped=True, animated=True,
+        # Determinater Fortschritt (Format i/N) + Statustext; Sichtbarkeit steuert
+        # der Background-Callback über running=, Wert/Text über progress=. Start: verborgen.
+        dbc.Progress(id=ID_PROGRESS, value=0, striped=True, animated=True,
                      style={"display": "none", "marginTop": "12px", "height": "8px"}),
         html.Div(id=ID_STATUS, children="", style={"marginTop": "6px", "fontSize": "12px",
                                                     "color": "#6b7280", "minHeight": "16px"}),

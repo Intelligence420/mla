@@ -1,8 +1,9 @@
-"""Headless-Test der Callback-Kernlogik ``execute_run`` (TZ 2 / TODO 6).
+"""Headless-Test der Callback-Kernlogik ``execute_run`` (TZ 3: Batch-Vergleich).
 
-Fährt den **echten** Lauf-Pfad ohne Dash-Server: validieren → RunConfig →
-GPU-Lock → ``run()`` → gerenderte Main-Komponenten. Damit ist die Logik hinter
-dem Background-Callback headless geprüft; das Dash-Plumbing (running=/cancel=,
+Fährt den **echten** Lauf-Pfad ohne Dash-Server: validieren → RunConfig je Format
+→ EIN GPU-Lock → ``run()`` je Format → gerenderte Main-Komponenten (zwei
+Vergleichs-Charts + Primär-Detail). Damit ist die Logik hinter dem Background-
+Callback headless geprüft; das Dash-Plumbing (running=/progress=/cancel=,
 Worker-Prozess) deckt der reale Server-Smoke ab.
 
 Braucht GPU + cuTile. ``results.jsonl`` wird in eine temp-Datei umgeleitet
@@ -18,8 +19,10 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tool_pipeline.app.callbacks import execute_run  # noqa: E402
+from tool_pipeline.app.components.controls import combo_key  # noqa: E402
 
 _TMP_JSONL = Path(os.environ.get("SP", "/tmp")) / "execute_probe.jsonl"
+_SEL = [combo_key("fp16", "fp32"), combo_key("bf16", "fp32")]  # kleiner 2-Format-Batch
 
 
 def _text(node) -> str:
@@ -43,6 +46,24 @@ def _text(node) -> str:
     return " ".join(x for x in out if x)
 
 
+def _types(node, acc=None) -> list:
+    """Alle Komponenten-Typen im Baum sammeln (rekursiv) — z. B. um 'Graph' zu zählen."""
+    acc = [] if acc is None else acc
+    if hasattr(node, "to_plotly_json"):
+        j = node.to_plotly_json()
+        acc.append(j.get("type"))
+        ch = (j.get("props", {}) or {}).get("children")
+        if isinstance(ch, (list, tuple)):
+            for c in ch:
+                _types(c, acc)
+        elif ch is not None:
+            _types(ch, acc)
+    elif isinstance(node, (list, tuple)):
+        for c in node:
+            _types(c, acc)
+    return acc
+
+
 def _redirect_store():
     """store.append_result → temp-JSONL (results.jsonl unberührt); gibt (restore)."""
     import tool_pipeline.store.store as S
@@ -53,26 +74,37 @@ def _redirect_store():
     return lambda: setattr(S, "append_result", orig)
 
 
-def test_execute_valid_run_renders_kpis_verify_code():
-    """Gültige Größen → echter GPU-Lauf → Status ok + KPIs + Verify PASS + Code."""
+def test_execute_batch_renders_charts_kpis_verify_code():
+    """Gültiger 2-Format-Batch → echter GPU-Lauf: zwei Charts + Status ok + KPIs +
+    Verify PASS + Code des primären Formats; beide Formate im Status-Strip."""
     restore = _redirect_store()
     try:
-        comps = execute_run(m=128, n=128, k=64)   # i=M, k=K, j=N (glatte Tile-Vielfache)
+        comps = execute_run(128, 128, 64, _SEL)   # i=M, k=K, j=N (glatte Tile-Vielfache)
     finally:
         restore()
     assert isinstance(comps, list) and comps, "execute_run muss eine nicht-leere Liste liefern"
+    assert _types(comps).count("Graph") == 2, "es müssen zwei Vergleichs-Charts (dcc.Graph) da sein"
     txt = _text(comps)
     assert "erfolgreich" in txt, f"kein ok-Status: {txt[:200]}"
     assert "TFLOP/s" in txt and "PASS" in txt, f"KPIs/Verify fehlen: {txt[:300]}"
     assert "ct.mma" in txt, "generierter Kernel-Quelltext fehlt im Code-Panel"
+    assert "fp16 → fp32" in txt and "bf16 → fp32" in txt, "Status-Strip zeigt nicht beide Formate"
 
 
 def test_execute_invalid_sizes_no_run():
-    """Ungültige Größe → Warnung, KEIN GPU-Lauf (keine KPIs, kein Code)."""
-    comps = execute_run(m=0, n=128, k=64)
+    """Ungültige Größe → Warnung, KEIN GPU-Lauf (keine Charts/KPIs/Code)."""
+    comps = execute_run(0, 128, 64, _SEL)
     txt = _text(comps)
     assert "Ungültige Eingabe" in txt, txt[:200]
-    assert "TFLOP/s" not in txt and "ct.mma" not in txt, "es hätte kein Lauf stattfinden dürfen"
+    assert _types(comps).count("Graph") == 0 and "ct.mma" not in txt, "kein Lauf erwartet"
+
+
+def test_execute_empty_selection_no_run():
+    """Leere Format-Auswahl → Warnung, KEIN GPU-Lauf."""
+    comps = execute_run(128, 128, 64, [])
+    txt = _text(comps)
+    assert "Ungültige Auswahl" in txt, txt[:200]
+    assert _types(comps).count("Graph") == 0, "kein Lauf/Chart bei leerer Auswahl erwartet"
 
 
 def test_execute_survives_run_import_failure():
@@ -84,7 +116,7 @@ def test_execute_survives_run_import_failure():
     orig = sys.modules.get("tool_pipeline.run")
     sys.modules["tool_pipeline.run"] = stub
     try:
-        comps = execute_run(4, 4, 4)               # gültige Größen → Pfad erreicht den Import
+        comps = execute_run(4, 4, 4, _SEL)         # gültig → Pfad erreicht den Import
     finally:
         if orig is not None:
             sys.modules["tool_pipeline.run"] = orig

@@ -1,26 +1,26 @@
-"""Live-Lauf-Callback (TZ 2 / TODO 6) — das Herzstück des Live-Loops.
+"""Live-Vergleichs-Callback (TZ 3) — das Herzstück des Live-Loops.
 
-Klick auf „Run" → Background-Callback (Worker-Prozess) → RunConfig aus M/N/K →
-prozessübergreifender GPU-Lock → die **eine Naht** ``run(config)`` → Ergebnis
-(Status, KPIs, Verify, generierter Code) in den Main-Bereich.
+Klick auf „Vergleichen" → Background-Callback (Worker-Prozess) → je gewähltem
+Format eine RunConfig → **ein** prozessübergreifender GPU-Lock über den ganzen
+Batch → die **eine Naht** ``run(config)`` je Format → zwei Vergleichs-Charts
+(Durchsatz + Genauigkeit↔Durchsatz) plus KPIs/Verify/Code des primären Formats
+in den Main-Bereich.
 
-Zwei Design-Punkte (siehe PLAN §2/§8 + die TZ-2-Entscheidungen):
+Zwei Design-Punkte (PLAN §2/§8 + die TZ-2/TZ-3-Entscheidungen):
 
 * **Fork-Sicherheit:** ``run``/torch/cuda werden **lazy im Worker** importiert
   (in ``execute_run``), nie im Modulkopf → der Haupt-Dash-Prozess bleibt CUDA-frei.
   Der DiskcacheManager forkt den Haupt-Prozess; hielte der einen CUDA-Kontext,
   wäre er im Fork kaputt.
 * **GPU-Lock:** ``filelock.FileLock`` (fcntl) serialisiert die ``run()``-Aufrufe
-  prozessübergreifend. Bei Prozess-Tod (Cancel terminiert den Worker) gibt das OS
-  den flock **automatisch** frei — kein verwaister Lock. Doppelklick in derselben
-  Session verhindert zusätzlich ``running=`` (Button-Disable).
+  prozessübergreifend. Der ganze Batch läuft unter EINEM Lock (eine Vergleichs-
+  Aktion = eine GPU-Session). Bei Prozess-Tod (Cancel) gibt das OS den flock
+  **automatisch** frei — kein verwaister Lock.
 
-Progress ist bewusst **indeterminat** (freigegebene Entscheidung): ``running=``
-zeigt einen animierten Balken + Statustext, solange der Lauf läuft. ``run()`` ist
-ein einziger, opaker Aufruf ohne echte Sub-Schritte → kein erfundener ``set_progress``.
-
-Die Kernlogik ``execute_run`` ist Dash-frei und wird headless (mit echtem GPU-Lauf)
-in ``tests/test_app_execute.py`` geprüft; ``register`` verdrahtet nur den Callback.
+Fortschritt ist **determinat je Format** (TZ 3): ``set_progress`` meldet
+„Format i/N …" (echte Sub-Schritte); ``running=`` blendet den Balken ein/aus und
+schaltet die Buttons. Die Kernlogik ``execute_run`` ist Dash-frei und wird headless
+(mit echtem GPU-Lauf) in ``tests/test_app_execute.py`` geprüft.
 """
 
 from __future__ import annotations
@@ -28,10 +28,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import dash_bootstrap_components as dbc
-from dash import Input, Output, State, html
+from dash import Input, Output, State, dcc, html
 from filelock import FileLock, Timeout
 
-from .components import code_panel, controls, kpis
+from .components import charts, code_panel, controls, kpis
 
 # GPU-Lock + Timeout. .cache/ ist gitignored; Parent wird vor dem Lock sichergestellt.
 _PROJECT_DIR = Path(__file__).resolve().parents[2]
@@ -41,9 +41,13 @@ _LOCK_TIMEOUT = 60  # s — danach freundliche „GPU belegt"-Meldung statt endl
 # Progress-Balken sichtbar/verborgen (via running=)
 _PROG_SHOW = {"display": "block", "marginTop": "12px", "height": "8px"}
 _PROG_HIDE = {"display": "none", "marginTop": "12px", "height": "8px"}
-# Ehrlich: der Background-Job kann rechnen ODER (bei belegtem GPU-Lock) darauf warten
-# — beides während running=True aktiv ist. Daher nicht bloß „läuft" (Fund F des Audits).
-_RUNNING_TEXT = "GPU-Lauf aktiv… (rechnet oder wartet · Abbrechen möglich)"
+
+# Plotly-Toolbar der Charts: PNG-Export (Kamera-Knopf) an, unnötige Werkzeuge weg.
+_GRAPH_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+    "toImageButtonOptions": {"format": "png", "filename": "cutile-vergleich", "scale": 2},
+}
 
 
 def _alert(title: str, body: str, color: str):
@@ -51,7 +55,7 @@ def _alert(title: str, body: str, color: str):
 
 
 def render_result(result) -> list:
-    """RunResult → Liste der Main-Komponenten (Status · Kontext · KPIs · Verify · Code)."""
+    """RunResult → Detail-Komponenten (Status · Kontext · KPIs · Verify · Code)."""
     parts = [
         kpis.render_status(result),
         kpis.render_context(result),
@@ -62,39 +66,97 @@ def render_result(result) -> list:
     return [p for p in parts if p is not None]
 
 
-def execute_run(m, n, k) -> list:
-    """Reine Ablauflogik eines Laufs (Dash-frei, headless testbar):
-    validieren → RunConfig → GPU-Lock → ``run()`` → rendern.
+def _format_status_strip(results) -> html.Div:
+    """Kompakte Statuszeile je gewähltem Format — auch fehlgeschlagene bleiben
+    sichtbar (statt still aus den Charts zu verschwinden)."""
+    badges = []
+    for r in results:
+        cfg = r.config or {}
+        lbl = f"{cfg.get('dtype')} → {cfg.get('acc_dtype')}"
+        ok = r.status == "ok"
+        badges.append(dbc.Badge(f"{lbl}: {'PASS' if ok else r.status}",
+                                color="success" if ok else "danger",
+                                className="me-2 mb-1"))
+    return html.Div(badges, className="mb-3")
+
+
+def render_comparison(results) -> list:
+    """Batch-Ergebnisse → Main: zwei Vergleichs-Charts (alle verifizierten Formate),
+    Status je Format, dann das Detail-Panel des **primären** (ersten) Formats."""
+    if not results:
+        return [_alert("Kein Ergebnis", "Keine Formate ausgewählt.", "warning")]
+    primary = results[0]
+    pcfg = primary.config or {}
+    primary_key = f"{pcfg.get('dtype')}:{pcfg.get('acc_dtype')}"
+    n_ok = sum(1 for r in results if r.status == "ok")
+
+    charts_row = dbc.Row(
+        [
+            dbc.Col(dcc.Graph(figure=charts.figure_throughput(results, primary_key),
+                              config=_GRAPH_CONFIG, style={"height": "340px"}), md=6),
+            dbc.Col(dcc.Graph(figure=charts.figure_accuracy_throughput(results, primary_key),
+                              config=_GRAPH_CONFIG, style={"height": "340px"}), md=6),
+        ],
+        className="g-3 mb-2",
+    )
+    header = html.Div(f"{n_ok}/{len(results)} Formate verifiziert",
+                      style={"fontSize": "12px", "color": "#6b7280", "marginBottom": "8px"})
+
+    parts = [header, charts_row, _format_status_strip(results), html.Hr()]
+    parts += render_result(primary)
+    return [p for p in parts if p is not None]
+
+
+def execute_run(m, n, k, selection, progress=None) -> list:
+    """Reine Ablauflogik des Batch-Vergleichs (Dash-frei, headless testbar):
+    validieren → RunConfig je Format → EIN GPU-Lock → ``run()`` je Format → rendern.
 
     Gibt **immer** eine Liste von Main-Komponenten zurück (nie eine Exception):
-    ungültige Eingabe → Warnung (kein GPU-Lauf); GPU belegt → freundliche Meldung;
-    sonst das gerenderte RunResult (inkl. sauber angezeigter Fehler-Stati).
+    ungültige Größen/Auswahl → Warnung (kein GPU-Lauf); GPU belegt → freundliche
+    Meldung; sonst der gerenderte Vergleich (inkl. sauber angezeigter Fehler-Stati).
+
+    ``progress`` ist der optionale Dash-``set_progress``-Callback → headless mit
+    ``None`` testbar.
     """
+    def _set(pct: int, text: str) -> None:
+        if progress is not None:
+            progress((pct, text))
+
     err = controls.validate_sizes(m, n, k)
     if err:
         return [_alert("Ungültige Eingabe", err, "warning")]
+    err = controls.validate_selection(selection)
+    if err:
+        return [_alert("Ungültige Auswahl", err, "warning")]
 
     # ALLES ab hier steht IM try — inkl. Config-Bau, Lazy-Import (kann ImportError
-    # werfen, falls torch/cuda.tile im Worker fehlen/kaputt sind), mkdir/Lock und
-    # das Rendern —, damit execute_run die Zusage „gibt immer eine Liste zurück,
-    # nie eine Exception" wirklich hält (Naht-Vertrag; Fund A des Error-Audits).
+    # werfen), mkdir/Lock, die run()-Schleife und das Rendern —, damit execute_run
+    # die Zusage „gibt immer eine Liste zurück, nie eine Exception" hält (Naht-
+    # Vertrag; Fund A des Error-Audits). ``finally`` setzt Balken/Text zurück.
     try:
-        cfg = controls.config_from_controls(m, n, k)
+        configs = controls.configs_from_selection(m, n, k, selection)
         from tool_pipeline.run import run  # lazy → Haupt-Prozess bleibt CUDA-frei
         _GPU_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        results = []
+        total = len(configs)
         with FileLock(str(_GPU_LOCK)).acquire(timeout=_LOCK_TIMEOUT):
-            result = run(cfg)
-        return render_result(result)
+            for i, cfg in enumerate(configs, 1):
+                _set(int(100 * (i - 1) / total),
+                     f"Format {i}/{total}: {cfg.dtype} → {cfg.acc_dtype} …")
+                results.append(run(cfg))
+        return render_comparison(results)
     except Timeout:
         return [_alert("GPU belegt",
                        f"Ein anderer Lauf hält die GPU seit über {_LOCK_TIMEOUT}s. "
                        f"Bitte erneut versuchen.", "warning")]
     except Exception as e:  # noqa: BLE001 — Import-/Lock-/Infra-Fehler dürfen die UI nicht crashen
         return [_alert("Interner Fehler", f"{type(e).__name__}: {e}", "danger")]
+    finally:
+        _set(100, "")  # Balken/Statustext zurücksetzen, egal wie der Batch endete
 
 
 def register(app) -> None:
-    """Den Background-Lauf-Callback an der App registrieren (aus ``create_app``)."""
+    """Den Background-Vergleichs-Callback an der App registrieren (aus ``create_app``)."""
 
     @app.callback(
         Output("main", "children"),
@@ -102,15 +164,16 @@ def register(app) -> None:
         State(controls.ID_M, "value"),
         State(controls.ID_N, "value"),
         State(controls.ID_K, "value"),
+        State(controls.ID_DTYPES, "value"),
         background=True,
         running=[
             (Output(controls.ID_RUN, "disabled"), True, False),
             (Output(controls.ID_CANCEL, "disabled"), False, True),
             (Output(controls.ID_PROGRESS, "style"), _PROG_SHOW, _PROG_HIDE),
-            (Output(controls.ID_STATUS, "children"), _RUNNING_TEXT, ""),
         ],
+        progress=[Output(controls.ID_PROGRESS, "value"), Output(controls.ID_STATUS, "children")],
         cancel=[Input(controls.ID_CANCEL, "n_clicks")],
         prevent_initial_call=True,
     )
-    def _on_run(n_clicks, m, n, k):
-        return execute_run(m, n, k)
+    def _on_run(set_progress, n_clicks, m, n, k, selection):
+        return execute_run(m, n, k, selection, progress=set_progress)
