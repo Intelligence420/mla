@@ -120,6 +120,30 @@ def test_baselines_not_in_slug():
     assert a == b, (a, b)
 
 
+def test_gpu_state_returns_dict():
+    """gpu_state() liefert ein dict; wo nvidia-smi da ist, die erwarteten Keys."""
+    from tool_pipeline.measure.provenance import gpu_state
+
+    d = gpu_state()
+    assert isinstance(d, dict), d
+    if d:  # nvidia-smi vorhanden
+        for k in ("sm_clock_mhz", "temp_c", "power_w"):
+            assert k in d, d
+
+
+def test_gpu_state_graceful_without_nvidia_smi():
+    """Ohne nvidia-smi im PATH → leeres dict (kein Crash)."""
+    import shutil
+    from tool_pipeline.measure import provenance as P
+
+    orig = shutil.which
+    shutil.which = lambda name: None
+    try:
+        assert P.gpu_state() == {}, "ohne nvidia-smi muss gpu_state() {} liefern"
+    finally:
+        shutil.which = orig
+
+
 # ---------------------------------------------------------------------------
 # Reale Messung — braucht GPU + cuTile (überspringt sich sonst).
 # ---------------------------------------------------------------------------
@@ -279,6 +303,29 @@ def test_baselines_fp8_graceful():
     assert res.status == "ok", f"status={res.status} error={res.error}"
     bl = res.metrics["baselines"]
     assert "available" in bl["cublas"] and "available" in bl["naive"], bl
+
+
+def test_run_provenance_has_gpu_state():
+    """run() legt den GPU-Zustand pro Lauf in provenance ab (auf diesem Host
+    mit nvidia-smi → nicht leer, mit numerischem sm_clock_mhz)."""
+    if not _has_cuda():
+        print("  (übersprungen: keine CUDA-GPU)")
+        return
+    import tool_pipeline.run as R
+    from tool_pipeline.schema import RunConfig
+    from tool_pipeline.store import store as st
+
+    orig = st.append_result
+    st.append_result = lambda r, path=None: None
+    try:
+        res = R.run(RunConfig(dim_sizes={"i": 256, "k": 256, "j": 256}))
+    finally:
+        st.append_result = orig
+    assert res.status == "ok", f"status={res.status} error={res.error}"
+    assert "gpu_state" in res.provenance, res.provenance
+    gs = res.provenance["gpu_state"]
+    assert isinstance(gs, dict) and gs, gs                 # nvidia-smi ist hier da
+    assert gs.get("sm_clock_mhz") is not None, gs
 
 
 def _main() -> int:

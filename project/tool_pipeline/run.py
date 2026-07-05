@@ -33,6 +33,7 @@ from .intermediate_representation.reshape import to_canonical
 from .measure.baselines import measure_baselines
 from .measure.bench import benchmark, time_first_launch
 from .measure.metrics import compute_metrics
+from .measure.provenance import gpu_state
 from .measure.verify import verify
 from .schema import (
     STATUS_COMPILE_ERROR,
@@ -108,7 +109,8 @@ def _build_inputs(config: RunConfig, M: int, N: int, K: int):
 
 
 def _provenance(config: RunConfig) -> dict:
-    """Leichte Provenienz (TZ 1). GPU-Takt/Temp/Power via nvidia-smi = TZ 4."""
+    """Statische Provenienz-Basis. `sizes` wird nach dem Parsen, `gpu_state`
+    (Takt/Temp/Power via nvidia-smi) nach der Messung ergänzt (TZ 4)."""
     return {
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
         "dtype": config.dtype,
@@ -214,6 +216,10 @@ def run(config: RunConfig) -> RunResult:
         metrics["tflops"] = round(metrics["tflops"], 3)
     except Exception as e:
         return _result(STATUS_RUN_ERROR, error=f"bench: {type(e).__name__}: {str(e)[:400]}")
+
+    # GPU-Zustand direkt NACH der Messung (Takt/Temp/Power spiegeln die gemessene
+    # Last) — additiv in provenance, pro Lauf. Graceful (leer, falls nvidia-smi fehlt).
+    provenance["gpu_state"] = gpu_state()
 
     # 7) Optionale Baselines (cuBLAS-Obergrenze / naive-cuTile-Untergrenze) —
     #    additiv in metrics["baselines"]. Optional & sekundär → ein Fehler hier
