@@ -2,12 +2,12 @@
 # Auto-generiert vom cuTile Performance Lab (Codegen C1).
 # Aus einer RunConfig erzeugt.
 # Ausdruck : ik,kj->ij
-# Format   : fp16 -> fp32 (Akku)
+# Format   : bf16 -> fp32 (Akku)
 # Tile     : TM=128 TN=128 TK=64 | swizzle=False
 # ==========================================================================
 """Generierter cuTile-GEMM (Codegen C1) — Kontraktion ik,kj->ij.
 
-Input-dtype: fp16 (Laufzeit-torch-dtype, steht NICHT im Kernel-Koerper).
+Input-dtype: bf16 (Laufzeit-torch-dtype, steht NICHT im Kernel-Koerper).
 Akkumulator: fp32 (ct.float32).
 Tile-Literale: TM=128, TN=128, TK=64 (fest in den Quelltext gebacken).
 

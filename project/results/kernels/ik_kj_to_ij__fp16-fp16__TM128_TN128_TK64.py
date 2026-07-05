@@ -2,13 +2,13 @@
 # Auto-generiert vom cuTile Performance Lab (Codegen C1).
 # Aus einer RunConfig erzeugt.
 # Ausdruck : ik,kj->ij
-# Format   : fp16 -> fp32 (Akku)
+# Format   : fp16 -> fp16 (Akku)
 # Tile     : TM=128 TN=128 TK=64 | swizzle=False
 # ==========================================================================
 """Generierter cuTile-GEMM (Codegen C1) — Kontraktion ik,kj->ij.
 
 Input-dtype: fp16 (Laufzeit-torch-dtype, steht NICHT im Kernel-Koerper).
-Akkumulator: fp32 (ct.float32).
+Akkumulator: fp16 (ct.float16).
 Tile-Literale: TM=128, TN=128, TK=64 (fest in den Quelltext gebacken).
 
 Bewiesene Orientierung: a=(TM,TK), b=(TK,TN), ct.mma(a,b,acc)->(TM,TN),
@@ -35,7 +35,7 @@ def gemm(A, B, C,
     j = ct.bid(1)
 
     # Akkumulator unabhaengig vom Input-dtype (Standardmuster aus cuTile).
-    acc = ct.full((TM, TN), 0, dtype=ct.float32)
+    acc = ct.full((TM, TN), 0, dtype=ct.float16)
 
     # K-Schleife: ceil(K / TK) K-Kacheln; Padding-Zeros am Rand sind fuer den
     # MAC neutral (0 * x + acc == acc), daher kein explizites Masking noetig.

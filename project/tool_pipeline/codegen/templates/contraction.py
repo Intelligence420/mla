@@ -16,16 +16,33 @@ KEIN Permute.
 """
 
 # ---------------------------------------------------------------------------
-# acc-dtype-Mapping: erweiterbar fuer TZ3 (bf16/tf32/fp8). In TZ1 nur fp32.
-# Der String kommt aus der IR/Config; hier wird er auf den ct-dtype-Ausdruck
-# abgebildet, der als Literal in den Kernel-Quelltext substituiert wird.
+# acc-dtype-Mapping: Akkumulator-Label -> ct-dtype-Ausdruck, als Literal in den
+# Kernel substituiert. fp32 und fp16 sind nutzbar (fp16-/fp8-Compute duerfen in
+# fp16 akkumulieren — schneller). bf16/tf32 sind reine COMPUTE-Formate und NIE
+# Akkumulatoren (sie akkumulieren zwingend in fp32) — daher hier bewusst nicht.
 # ---------------------------------------------------------------------------
 _ACC_DTYPE_MAP = {
     "fp32": "ct.float32",
-    # TZ3 (noch NICHT implementiert):
-    # "bf16": "ct.bfloat16",
-    # "tf32": "ct.tfloat32",
-    # "fp16": "ct.float16",
+    "fp16": "ct.float16",
+}
+
+
+# ---------------------------------------------------------------------------
+# Input-dtype-Mapping: braucht das Format einen Cast VOR ct.mma?
+# tf32 hat auf diesem cuTile-Build KEIN mma-Flag — fp32-Daten muessen im Kernel
+# per ct.astype(.., ct.tfloat32) auf den Tensor-Core-Pfad gecastet werden (ohne
+# Cast liefe es still auf CUDA-Cores, ~0.2 statt ~6 TFLOP/s: rechnerisch korrekt,
+# aber falsches Tempo). fp16/bf16 sind nativ, fp8 wird host-seitig gecastet ->
+# alle brauchen KEINEN Kernel-Cast (Wert None). Zugleich die Validierungs-
+# Whitelist der zulaessigen Input-dtypes.
+# ---------------------------------------------------------------------------
+_INPUT_CAST = {
+    "fp16": None,
+    "bf16": None,
+    "tf32": "ct.tfloat32",
+    "fp8e4m3": None,
+    "fp8e5m2": None,
+    "fp32": None,
 }
 
 
@@ -51,6 +68,13 @@ def build_gemm_module(tile: dict, dtype: str, acc_dtype: str) -> str:
         )
     acc_ct = _ACC_DTYPE_MAP[acc_dtype]
 
+    if dtype not in _INPUT_CAST:
+        raise ValueError(
+            f"input-dtype {dtype!r} nicht unterstuetzt "
+            f"(verfuegbar: {sorted(_INPUT_CAST)})"
+        )
+    cast_ct = _INPUT_CAST[dtype]
+
     try:
         tm = int(tile["TM"])
         tn = int(tile["TN"])
@@ -58,9 +82,20 @@ def build_gemm_module(tile: dict, dtype: str, acc_dtype: str) -> str:
     except KeyError as e:
         raise ValueError(f"tile-dict fehlt Schluessel {e}") from e
 
+    # Optionaler Input-Cast VOR ct.mma (nur tf32) — als Quelltext-Bloecke, damit
+    # der emittierte Kernel byte-stabil und selbstdokumentierend bleibt.
+    if cast_ct is not None:
+        dtype_doc = (f"Input-dtype: {dtype} -> im Kernel via ct.astype auf {cast_ct} "
+                     f"gecastet (VOR ct.mma; ohne Cast liefe es auf CUDA-Cores).")
+        cast_block = (f"        a = ct.astype(a, {cast_ct})\n"
+                      f"        b = ct.astype(b, {cast_ct})\n")
+    else:
+        dtype_doc = f"Input-dtype: {dtype} (Laufzeit-torch-dtype, steht NICHT im Kernel-Koerper)."
+        cast_block = ""
+
     return f'''"""Generierter cuTile-GEMM (Codegen C1) — Kontraktion ik,kj->ij.
 
-Input-dtype: {dtype} (Laufzeit-torch-dtype, steht NICHT im Kernel).
+{dtype_doc}
 Akkumulator: {acc_dtype} ({acc_ct}).
 Tile-Literale: TM={tm}, TN={tn}, TK={tk} (fest in den Quelltext gebacken).
 
@@ -97,7 +132,7 @@ def gemm(A, B, C,
                     padding_mode=ct.PaddingMode.ZERO)
         b = ct.load(B, index=(kk, j), shape=(TK, TN),
                     padding_mode=ct.PaddingMode.ZERO)
-        acc = ct.mma(a, b, acc)
+{cast_block}        acc = ct.mma(a, b, acc)
 
     # ct.store schneidet out-of-bounds Elemente am Rand automatisch ab.
     ct.store(C, index=(i, j), tile=ct.astype(acc, C.dtype))
