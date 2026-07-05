@@ -51,6 +51,46 @@ def _mixed():
     ]
 
 
+def _ok_bl(dtype, acc, tflops, rel, cublas=None, naive=None, maxabs=1e-4) -> RunResult:
+    """ok-Lauf inkl. optionaler Baseline-TFLOP/s (in metrics['baselines'])."""
+    met = {"tflops": tflops, "gbps": 85.0, "arithmetic_intensity": 128.0,
+           "percent_peak_flops": 5.0, "percent_peak_bw": 31.0}
+    bl = {}
+    if cublas is not None:
+        bl["cublas"] = {"available": True, "tflops": cublas}
+    if naive is not None:
+        bl["naive"] = {"available": True, "tflops": naive}
+    if bl:
+        met["baselines"] = bl
+    return RunResult(status="ok", config={"dtype": dtype, "acc_dtype": acc},
+                     metrics=met, accuracy={"rel_err": rel, "max_abs_err": maxabs, "passed": True})
+
+
+def test_throughput_single_series_without_baselines():
+    """Ohne Baselines bleibt es EINE Balken-Serie (unveränderter TZ-3-Pfad)."""
+    fig = figure_throughput(_mixed())
+    assert len(fig.data) == 1 and fig.data[0].type == "bar"
+
+
+def test_throughput_grouped_with_baselines():
+    """Mit cuBLAS+naive → drei gruppierte Serien (cuTile/cuBLAS/naive), barmode=group."""
+    results = [_ok_bl("fp16", "fp32", 18.5, 7e-7, cublas=20.0, naive=2.0),
+               _ok_bl("tf32", "fp32", 7.0, 3e-4, cublas=8.0, naive=1.0)]
+    fig = figure_throughput(results)
+    assert [t.name for t in fig.data] == \
+        ["cuTile (getunt)", "cuBLAS (Obergrenze)", "naive-cuTile (Untergrenze)"], [t.name for t in fig.data]
+    assert fig.layout.barmode == "group"
+    # cuTile-Serie trägt die Format-Farben; die Baseline-Serien NICHT (neutral).
+    assert set(fig.data[0].marker.color) <= set(_FORMAT_COLOR.values())
+    assert fig.data[1].marker.color not in _FORMAT_COLOR.values()
+
+
+def test_throughput_grouped_only_available_baseline():
+    """Nur cuBLAS zugeschaltet → zwei Serien (cuTile + cuBLAS), keine naive-Serie."""
+    fig = figure_throughput([_ok_bl("fp16", "fp32", 18.5, 7e-7, cublas=20.0)])
+    assert [t.name for t in fig.data] == ["cuTile (getunt)", "cuBLAS (Obergrenze)"]
+
+
 def test_throughput_one_bar_per_verified_run():
     """Nur die drei verifizierten Läufe werden zu Balken (2 nicht-ok ausgelassen)."""
     fig = figure_throughput(_mixed())

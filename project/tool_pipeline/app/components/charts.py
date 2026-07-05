@@ -68,10 +68,24 @@ def _points(results) -> list[dict]:
         if tf is None or rel is None or not math.isfinite(tf):
             continue
         key = combo_key(dt, ac)
+
+        # Baseline-TFLOP/s (falls mitgemessen + verfügbar) — additiv, für die
+        # gruppierte Balken-Serie in figure_throughput. Fehlend → None (kein Balken).
+        bl = met.get("baselines") or {}
+
+        def _bl_tflops(name):
+            e = bl.get(name) or {}
+            v = e.get("tflops")
+            return float(v) if e.get("available") and isinstance(v, (int, float)) else None
+
         pts.append({
             "key": key, "label": combo_label(dt, ac),
             "tflops": float(tf), "rel_err": float(rel),
             "max_abs_err": acc.get("max_abs_err"),
+            "gbps": met.get("gbps"),
+            "percent_peak_flops": met.get("percent_peak_flops"),
+            "cublas": _bl_tflops("cublas"),
+            "naive": _bl_tflops("naive"),
             "color": _FORMAT_COLOR.get(key, _FALLBACK),
         })
     return pts
@@ -115,17 +129,30 @@ def _empty(msg: str) -> go.Figure:
 # ---------------------------------------------------------------------------
 # Chart 1: Durchsatz je Format (Balken)
 # ---------------------------------------------------------------------------
+# Baseline-Farben: bewusst NEUTRAL (kein Verbrauch der Format-Palette, die bei 8
+# Kombis am Limit ist) — cuBLAS dunkelgrau, naive-cuTile hellgrau + Schraffur.
+_BASE_CUBLAS = _INK2       # dunkelgrau = Obergrenze
+_BASE_NAIVE = _MUTED       # hellgrau (+ Muster) = Untergrenze
+
+
 def figure_throughput(results, primary_key: Optional[str] = None) -> go.Figure:
     """Horizontaler Balken: TFLOP/s je verifiziertem Format (schnellstes oben).
 
-    Identität über die Achsen-Labels + Farbe; das primäre Format erhält eine
-    Ink-Umrandung.
+    Ohne Baselines: eine Serie, Identität über Achsen-Label + Format-Farbe, das
+    primäre Format mit Ink-Umrandung. Mit zugeschalteten Baselines: **gruppierte**
+    Balken je Format — cuTile (Format-Farbe) neben cuBLAS (dunkelgrau, Obergrenze)
+    und naive-cuTile (hellgrau/schraffiert, Untergrenze). Baselines verbrauchen
+    KEINE Format-Farben (Palette am Limit) und werden per Ink/Muster abgesetzt.
     """
     pts = _points(results)
     if not pts:
         return _empty("Noch keine verifizierten Läufe.")
     prim = _resolve_primary(pts, primary_key)
     pts = sorted(pts, key=lambda p: p["tflops"])  # aufsteigend → größtes oben (h-Balken)
+
+    has_baselines = any(p["cublas"] is not None or p["naive"] is not None for p in pts)
+    if has_baselines:
+        return _figure_throughput_grouped(pts, prim)
 
     fig = go.Figure(go.Bar(
         x=[p["tflops"] for p in pts],
@@ -143,6 +170,42 @@ def figure_throughput(results, primary_key: Optional[str] = None) -> go.Figure:
         hovertemplate="%{customdata[0]}<br>%{x:.2f} TFLOP/s<extra></extra>",
     ))
     _style(fig, title="Durchsatz je Format", xaxis_title="TFLOP/s")
+    fig.update_xaxes(rangemode="tozero")
+    fig.update_yaxes(automargin=True)
+    return fig
+
+
+def _figure_throughput_grouped(pts: list[dict], prim: Optional[str]) -> go.Figure:
+    """Gruppierte Balken cuTile vs Baselines (aufgerufen, wenn Baselines vorliegen)."""
+    labels = [p["label"] for p in pts]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="cuTile (getunt)", y=labels, x=[p["tflops"] for p in pts], orientation="h",
+        marker=dict(color=[p["color"] for p in pts],
+                    line=dict(color=_INK, width=[2 if p["key"] == prim else 0 for p in pts]),
+                    cornerradius=3),
+        text=[f"{p['tflops']:.1f}" for p in pts], textposition="outside",
+        textfont=dict(color=_INK, size=10), cliponaxis=False,
+        hovertemplate="cuTile · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>",
+    ))
+    if any(p["cublas"] is not None for p in pts):
+        fig.add_trace(go.Bar(
+            name="cuBLAS (Obergrenze)", y=labels, x=[p["cublas"] for p in pts],
+            orientation="h", marker=dict(color=_BASE_CUBLAS, cornerradius=3),
+            hovertemplate="cuBLAS · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>",
+        ))
+    if any(p["naive"] is not None for p in pts):
+        fig.add_trace(go.Bar(
+            name="naive-cuTile (Untergrenze)", y=labels, x=[p["naive"] for p in pts],
+            orientation="h",
+            marker=dict(color=_BASE_NAIVE, cornerradius=3,
+                        pattern=dict(shape="/", fgcolor="#ffffff", size=6)),
+            hovertemplate="naiv · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>",
+        ))
+    _style(fig, title="Durchsatz — cuTile vs Baselines", xaxis_title="TFLOP/s")
+    fig.update_layout(barmode="group",
+                      legend=dict(orientation="h", yanchor="top", y=-0.18, x=0),
+                      margin=dict(l=12, r=16, t=44, b=66))
     fig.update_xaxes(rangemode="tozero")
     fig.update_yaxes(automargin=True)
     return fig

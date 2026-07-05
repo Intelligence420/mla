@@ -37,6 +37,26 @@ def _ok() -> RunResult:
     )
 
 
+_PROV_FULL = {**_PROV, "gpu_state": {"sm_clock_mhz": 2418.0, "mem_clock_mhz": None,
+                                     "temp_c": 40.0, "power_w": 12.9, "util_pct": 1.0}}
+
+
+def _ok_full() -> RunResult:
+    """ok-Lauf mit dem VOLLEN TZ-4-Metriksatz (Verteilung, GB/s, %-Peak, arithm.
+    Intensität, Baselines) + GPU-Zustand in der Provenienz."""
+    return RunResult(
+        status="ok", config=RunConfig().to_dict(), kernel_path="results/kernels/x.py",
+        accuracy={"max_abs_err": 1.7e-4, "passed": True, "atol": 0.01, "rtol": 0.001},
+        timing={"compile_ms": 52.9, "run_ms": 0.0246, "min_ms": 0.0243,
+                "p90_ms": 0.0247, "sigma_ms": 0.0020, "bench_iters": 30},
+        metrics={"tflops": 10.9, "gbps": 85.3, "arithmetic_intensity": 128.0,
+                 "percent_peak_flops": 5.1, "percent_peak_bw": 31.3,
+                 "baselines": {"cublas": {"available": True, "tflops": 11.8},
+                               "naive": {"available": True, "tflops": 1.2}}},
+        provenance=dict(_PROV_FULL), error=None,
+    )
+
+
 def _verify_failed() -> RunResult:
     return RunResult(
         status="verify_failed", config=RunConfig().to_dict(),
@@ -132,6 +152,30 @@ def test_run_error_partial_timing():
     assert "305.0" in kt          # compile_ms vorhanden
     assert "—" in kt              # run_ms/tflops fehlen
     assert "Launch-Crash" in _renders(kpis.render_status, r)
+
+
+def test_kpis_shows_roofline_cards_and_distribution():
+    """Der volle Metriksatz erscheint: GB/s, arithm. Intensität, %-Peak-sub und die
+    Verteilung (min/p90/σ) auf der Median-Karte."""
+    kt = _renders(kpis.render_kpis, _ok_full())
+    assert "GB/s" in kt and "85.3" in kt, kt
+    assert "FLOP/Byte" in kt and "128.0" in kt, kt
+    assert "% vom Peak" in kt, kt                     # %-Peak als sub
+    assert "min 0.0243" in kt and "σ" in kt, kt        # Verteilung
+    assert "10.90" in kt, kt                           # Durchsatz weiter da
+
+
+def test_kpis_shows_baseline_cards():
+    """Baseline-Vergleiche: Anteil an cuBLAS (~92 %) + Tuning-Speedup (~9.1×)."""
+    kt = _renders(kpis.render_kpis, _ok_full())
+    assert "Anteil an cuBLAS" in kt and "92" in kt, kt   # 10.9/11.8*100 ≈ 92
+    assert "Tuning-Speedup" in kt and "9.1" in kt, kt     # 10.9/1.2 ≈ 9.1
+
+
+def test_context_shows_gpu_state():
+    """render_context zeigt den GPU-Zustand (Takt/Temp/Power); [N/A]-Felder fehlen still."""
+    ct = _renders(kpis.render_context, _ok_full())
+    assert "GPU-Zustand" in ct and "2418 MHz" in ct and "40 °C" in ct and "12.9 W" in ct, ct
 
 
 def test_code_panel_with_and_without_source():
