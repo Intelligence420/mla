@@ -96,6 +96,31 @@ def test_compute_metrics_run_ms_zero_graceful():
 
 
 # ---------------------------------------------------------------------------
+# Baselines — headless prüfbare Anteile (kein GPU nötig).
+# ---------------------------------------------------------------------------
+def test_measure_baselines_unknown_name_graceful():
+    """Unbekannte Baseline → available=False + Grund, ohne GPU/Crash."""
+    import torch
+    from tool_pipeline.measure.baselines import measure_baselines
+    from tool_pipeline.schema import RunConfig
+
+    A = torch.zeros(4, 4); B = torch.zeros(4, 4); C = torch.zeros(4, 4)
+    out = measure_baselines(["bogus"], A, B, C, RunConfig())
+    assert out["bogus"]["available"] is False and "note" in out["bogus"], out
+
+
+def test_baselines_not_in_slug():
+    """Baselines ändern den Kernel-Quelltext NICHT → gleicher Config-Slug
+    (kein Cache-Split, keine doppelte Kernel-Datei)."""
+    from tool_pipeline.schema import RunConfig
+    from tool_pipeline.store.store import config_slug
+
+    a = config_slug(RunConfig(baselines=[]))
+    b = config_slug(RunConfig(baselines=["cublas", "naive"]))
+    assert a == b, (a, b)
+
+
+# ---------------------------------------------------------------------------
 # Reale Messung — braucht GPU + cuTile (überspringt sich sonst).
 # ---------------------------------------------------------------------------
 def _has_cuda() -> bool:
@@ -203,6 +228,57 @@ def test_run_metrics_has_roofline_keys():
     assert m["arithmetic_intensity"] == 128.0, m
     assert m["tflops"] > 0 and m["gbps"] > 0, m
     assert 0 < m["percent_peak_flops"] <= 100.0, m
+
+
+def test_baselines_cublas_naive_real():
+    """cuBLAS + naive-cuTile werden mitgemessen; Obergrenze ≥ Untergrenze.
+
+    cuBLAS ist die hochoptimierte Bibliothek (Obergrenze), der naive 16³-Kernel
+    die untunte cuTile-Variante (Untergrenze) — beide positiv, cuBLAS ≥ naive.
+    """
+    if not _has_cuda():
+        print("  (übersprungen: keine CUDA-GPU)")
+        return
+    import tool_pipeline.run as R
+    from tool_pipeline.schema import RunConfig
+    from tool_pipeline.store import store as st
+
+    orig = st.append_result
+    st.append_result = lambda r, path=None: None
+    try:
+        res = R.run(RunConfig(dim_sizes={"i": 512, "k": 512, "j": 512},
+                              baselines=["cublas", "naive"]))
+    finally:
+        st.append_result = orig
+    assert res.status == "ok", f"status={res.status} error={res.error}"
+    bl = res.metrics["baselines"]
+    assert bl["cublas"]["available"] and bl["naive"]["available"], bl
+    cub, nai = bl["cublas"]["tflops"], bl["naive"]["tflops"]
+    assert cub > 0 and nai > 0, bl
+    assert cub >= nai, f"cuBLAS (Obergrenze) sollte ≥ naive (Untergrenze) sein: {bl}"
+
+
+def test_baselines_fp8_graceful():
+    """fp8-Lauf mit Baselines kippt nicht: naive läuft, cuBLAS ist entweder
+    verfügbar oder sauber als nicht verfügbar markiert (kein Crash)."""
+    if not _has_cuda():
+        print("  (übersprungen: keine CUDA-GPU)")
+        return
+    import tool_pipeline.run as R
+    from tool_pipeline.schema import RunConfig
+    from tool_pipeline.store import store as st
+
+    orig = st.append_result
+    st.append_result = lambda r, path=None: None
+    try:
+        res = R.run(RunConfig(dim_sizes={"i": 256, "k": 256, "j": 256},
+                              dtype="fp8e4m3", acc_dtype="fp16",
+                              baselines=["cublas", "naive"]))
+    finally:
+        st.append_result = orig
+    assert res.status == "ok", f"status={res.status} error={res.error}"
+    bl = res.metrics["baselines"]
+    assert "available" in bl["cublas"] and "available" in bl["naive"], bl
 
 
 def _main() -> int:

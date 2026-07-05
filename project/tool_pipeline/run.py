@@ -30,6 +30,7 @@ import torch
 from .codegen.compile import load_kernel
 from .intermediate_representation.parse import parse
 from .intermediate_representation.reshape import to_canonical
+from .measure.baselines import measure_baselines
 from .measure.bench import benchmark, time_first_launch
 from .measure.metrics import compute_metrics
 from .measure.verify import verify
@@ -213,5 +214,14 @@ def run(config: RunConfig) -> RunResult:
         metrics["tflops"] = round(metrics["tflops"], 3)
     except Exception as e:
         return _result(STATUS_RUN_ERROR, error=f"bench: {type(e).__name__}: {str(e)[:400]}")
+
+    # 7) Optionale Baselines (cuBLAS-Obergrenze / naive-cuTile-Untergrenze) —
+    #    additiv in metrics["baselines"]. Optional & sekundär → ein Fehler hier
+    #    kippt den bereits verifizierten+gemessenen ok-Lauf NICHT (graceful).
+    if config.baselines:
+        try:
+            metrics["baselines"] = measure_baselines(config.baselines, A, B, C, config)
+        except Exception as e:  # noqa: BLE001
+            metrics["baselines"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
     return _result(STATUS_OK)
