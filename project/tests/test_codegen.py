@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tool_pipeline.codegen.compile import clear_cache, load_kernel  # noqa: E402
 from tool_pipeline.codegen.emit import emit  # noqa: E402
 from tool_pipeline.codegen.templates.contraction import build_gemm_module  # noqa: E402
+from tool_pipeline.measure.verify import _TOLERANCES  # noqa: E402
 from tool_pipeline.schema import RunConfig, RunResult  # noqa: E402
 
 # Output ist fp32 (= acc_dtype) → STRAFFE Toleranz: der reale fp32-Akku-Fehler
@@ -30,18 +31,72 @@ from tool_pipeline.schema import RunConfig, RunResult  # noqa: E402
 # (Die lockeren fp16-Output-Toleranzen 2e-1/2e-2 gehören erst in TZ 3.)
 ATOL, RTOL = 1e-2, 1e-3
 
+# Compute-/Akku-dtype-Label → torch-dtype für die Test-Operanden. tf32-Eingaben
+# sind normale float32-Tensoren (der tfloat32-Cast passiert im Kernel), genau
+# wie in run._build_operands.
+_TORCH = {"fp16": torch.float16, "bf16": torch.bfloat16,
+          "tf32": torch.float32, "fp32": torch.float32,
+          "fp8e4m3": torch.float8_e4m3fn, "fp8e5m2": torch.float8_e5m2}
 
-def _run_gemm(M: int, N: int, K: int):
-    """Echten Codegen-Pfad fahren: emit → load → launch. Gibt (A, B, C=fp32)."""
-    cfg = RunConfig(dim_sizes={"i": M, "k": K, "j": N})
+
+def _rand_operand(rows: int, cols: int, dtype: str):
+    """Zufalls-Operand im Compute-`dtype`. fp8 via fp16→.to() (randn kann kein
+    fp8), sonst direkt — spiegelt run._build_operands."""
+    t = _TORCH[dtype]
+    if dtype.startswith("fp8"):
+        return torch.randn(rows, cols, dtype=torch.float16, device="cuda").to(t)
+    return torch.randn(rows, cols, dtype=t, device="cuda")
+
+
+def _run_gemm(M: int, N: int, K: int, dtype: str = "fp16", acc: str = "fp32"):
+    """Echten Codegen-Pfad fahren: emit → load → launch. Gibt (A, B, C).
+
+    `dtype`/`acc` steuern Compute- bzw. Akku-/Output-dtype (Default fp16→fp32 =
+    der TZ-1-Anker, unverändert).
+    """
+    cfg = RunConfig(dim_sizes={"i": M, "k": K, "j": N}, dtype=dtype, acc_dtype=acc)
     launch = load_kernel(cfg, emit(cfg)).launch
     torch.manual_seed(0)
-    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
-    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
-    C = torch.empty(M, N, dtype=torch.float32, device="cuda")   # Output = acc_dtype
+    A = _rand_operand(M, K, dtype)
+    B = _rand_operand(K, N, dtype)
+    C = torch.empty(M, N, dtype=_TORCH[acc], device="cuda")   # Output = acc_dtype
     launch(A, B, C)
     torch.cuda.synchronize()
     return A, B, C
+
+
+def _assert_matches_fp32(M: int, N: int, K: int, dtype: str, acc: str):
+    """Generierter Kernel stimmt gegen die fp32-Referenz — mit der
+    **Produktions-Toleranz** des Formats (Quelle: measure.verify._TOLERANCES,
+    keine Duplikat-Werte)."""
+    atol, rtol = _TOLERANCES[(dtype, acc)]
+    A, B, C = _run_gemm(M, N, K, dtype, acc)
+    ref = torch.einsum("ik,kj->ij", A.float(), B.float())
+    assert C.shape == (M, N), f"{dtype}->{acc} {(M, N, K)}: Shape {tuple(C.shape)}"
+    assert C.dtype == _TORCH[acc], f"{dtype}->{acc}: Output-dtype {C.dtype} != {acc}"
+    err = (C.float() - ref).abs().max().item()
+    assert torch.allclose(C.float(), ref, atol=atol, rtol=rtol), \
+        f"{dtype}->{acc} {(M, N, K)} weicht ab: max_abs_err={err:.3e} (atol={atol}, rtol={rtol})"
+
+
+def _assert_orientation(dtype: str, acc: str):
+    """Orientierungs-Wächter je Format: exakt A@B, kein transponierter Doppelgänger.
+
+    Quadratische Inputs → alle Doppelgänger sind shape-legal, nur die Zahlen
+    unterscheiden sie. err_AB < 1.0 passt für alle in-scope-Formate (auch die
+    fp16-/fp8-Akku-Pfade mit ~0.2 realem Fehler)."""
+    M = N = K = 256
+    A, B, C = _run_gemm(M, N, K, dtype, acc)
+    Af, Bf, Cf = A.float(), B.float(), C.float()
+    err_AB = (Cf - Af @ Bf).abs().max().item()
+    imposters = {
+        "A@B^T": (Cf - Af @ Bf.T).abs().max().item(),
+        "B@A": (Cf - Bf @ Af).abs().max().item(),
+        "(A@B)^T": (Cf - (Af @ Bf).T).abs().max().item(),
+    }
+    assert err_AB < 1.0, f"{dtype}->{acc}: A@B sollte passen, err={err_AB:.3e}"
+    assert min(imposters.values()) > 10.0, \
+        f"{dtype}->{acc}: ein Doppelgänger liegt verdächtig nah: {imposters}"
 
 
 def test_gemm_correct_across_sizes():
@@ -88,6 +143,102 @@ def test_gemm_computes_AB_not_transpose():
         f"ein Doppelgänger liegt verdächtig nah: {imposters}"
 
 
+def test_gemm_bf16_across_sizes():
+    """bf16→fp32 (Akku fp32 = Pflicht): stimmt gegen fp32 — glatt UND ragged.
+
+    bf16 ist nativ (kein Kernel-Cast, Akku fp32) → derselbe erzeugte Kernel wie
+    fp16, nur mit bf16-Operanden; prüft, dass der Codegen dtype-agnostisch bleibt.
+    """
+    for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+        _assert_matches_fp32(M, N, K, "bf16", "fp32")
+
+
+def test_gemm_bf16_orientation():
+    """bf16: Orientierungs-Wächter (rechnet A@B, keinen Doppelgänger)."""
+    _assert_orientation("bf16", "fp32")
+
+
+def test_gemm_tf32_across_sizes():
+    """tf32→fp32: fp32-Eingaben, im Kernel auf tfloat32 gecastet; stimmt gegen fp32."""
+    for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+        _assert_matches_fp32(M, N, K, "tf32", "fp32")
+
+
+def test_gemm_tf32_orientation():
+    """tf32: Orientierungs-Wächter."""
+    _assert_orientation("tf32", "fp32")
+
+
+def test_emit_tf32_has_astype_cast():
+    """Performance-Wächter: der tf32-Kernel MUSS ct.astype(.., ct.tfloat32) VOR
+    ct.mma enthalten — ohne Cast liefe fp32 still auf CUDA-Cores (rechnerisch
+    korrekt, ~30x langsamer), was ein reiner Korrektheitstest NICHT fängt.
+    fp16/bf16 dürfen umgekehrt KEINEN solchen Input-Cast haben.
+    """
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    src = build_gemm_module(tile, "tf32", "fp32")
+    assert "ct.astype(a, ct.tfloat32)" in src and "ct.astype(b, ct.tfloat32)" in src, \
+        "tf32-Kernel fehlt der tfloat32-Cast (Tensor-Core-Pfad)"
+    assert "ct.tfloat32" not in build_gemm_module(tile, "fp16", "fp32"), \
+        "fp16-Kernel darf keinen tfloat32-Cast enthalten"
+
+
+def test_build_gemm_module_rejects_unknown_input_dtype():
+    """Unbekannter Input-dtype → ValueError (statt still einen Kernel ohne den
+    ggf. nötigen Cast zu emittieren)."""
+    try:
+        build_gemm_module({"TM": 128, "TN": 128, "TK": 64}, "fp4", "fp32")
+    except ValueError:
+        return
+    raise AssertionError("build_gemm_module hätte bei dtype='fp4' ValueError werfen müssen")
+
+
+def test_gemm_fp16_fp16_acc():
+    """fp16→fp16 (fp16-Akku + fp16-Output): der neue Akku-Pfad auch ohne fp8."""
+    for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+        _assert_matches_fp32(M, N, K, "fp16", "fp16")
+
+
+def test_gemm_fp8e4m3_verify():
+    """fp8 e4m3 × Akku fp32 UND fp16 (der schnellste Kandidat): stimmt gegen fp32.
+
+    fp8 braucht KEINEN Kernel-Cast (Host-seitig gecastet); der Kernel rechnet die
+    fp8-Tiles direkt. Geprüft mit glatten UND ragged Größen.
+    """
+    for acc in ("fp32", "fp16"):
+        for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+            _assert_matches_fp32(M, N, K, "fp8e4m3", acc)
+
+
+def test_gemm_fp8e5m2_verify():
+    """fp8 e5m2 × Akku fp32 UND fp16: stimmt gegen fp32 (glatt + ragged)."""
+    for acc in ("fp32", "fp16"):
+        for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+            _assert_matches_fp32(M, N, K, "fp8e5m2", acc)
+
+
+def test_gemm_fp8_orientation():
+    """fp8: Orientierungs-Wächter für BEIDE Akku-Kernel (fp32- und fp16-Akku)."""
+    _assert_orientation("fp8e4m3", "fp32")
+    _assert_orientation("fp8e4m3", "fp16")
+
+
+def test_gemm_fp32_plain_verify():
+    """fp32-plain (Anker/Diagnose, kein Tensor-Core): baubar UND gegen fp32
+    verifiziert (schließt die 'erlaubt aber nicht baubar'-Lücke)."""
+    for (M, N, K) in [(256, 256, 256), (130, 100, 70)]:
+        _assert_matches_fp32(M, N, K, "fp32", "fp32")
+
+
+def test_fp8_variants_differ():
+    """e4m3 und e5m2 liefern echt verschiedene Ergebnisse (kein stiller Upcast
+    auf ein gemeinsames Format) — beide fp8-Pfade sind real unterschiedlich."""
+    _, _, C4 = _run_gemm(256, 256, 256, "fp8e4m3", "fp32")
+    _, _, C5 = _run_gemm(256, 256, 256, "fp8e5m2", "fp32")
+    diff = (C4.float() - C5.float()).abs().max().item()
+    assert diff > 1e-2, f"e4m3 vs e5m2 verdächtig gleich: max_diff={diff:.3e}"
+
+
 def test_emit_deterministic():
     """Gleiche Config → byte-identischer Quelltext (Cache-/Reproduzierbarkeit)."""
     assert emit(RunConfig()) == emit(RunConfig())
@@ -126,9 +277,9 @@ def test_run_returns_result_on_compile_error():
     st.append_result = lambda r, path=None: None
     try:
         for cfg in [
-            RunConfig(expr="ki,kj->ij"),      # nicht-kanonisch → reshape lehnt ab
-            RunConfig(family="elementwise"),  # falsche Familie → parse lehnt ab
-            RunConfig(dtype="tf32"),          # out-of-scope Input-dtype → _build_inputs
+            RunConfig(expr="ki,kj->ij"),                  # nicht-kanonisch → reshape lehnt ab
+            RunConfig(family="elementwise"),              # falsche Familie → parse lehnt ab
+            RunConfig(dtype="bf16", acc_dtype="fp16"),    # unzulässige Acc-Kombi → check_dtype_combo
         ]:
             res = R.run(cfg)
             assert isinstance(res, RunResult), "run() darf nicht werfen"

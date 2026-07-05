@@ -40,37 +40,68 @@ from .schema import (
     STATUS_VERIFY_FAILED,
     RunConfig,
     RunResult,
+    check_dtype_combo,
 )
 from .store import store
 
-# dtype-Label → torch-dtype: nur die in TZ 1 nötigen (fp16-Input, fp32-Akku/
-# Output). Reine Auflösungs-Tabelle, KEIN Zulässigkeits-Gate — der Input-dtype
-# wird in _build_inputs separat auf fp16 beschränkt. bf16/tf32/fp8 = TZ 3.
+# dtype-Label → torch-dtype: reine Auflösungs-Tabelle (Compute-Input + Akku/
+# Output), KEIN Zulässigkeits-Gate. Die Acc-Regeln erzwingt
+# schema.check_dtype_combo; welche Input-dtypes tatsächlich baubar sind,
+# entscheidet _build_operands. (tf32-Input ist torch.float32 + Kernel-Cast, fp8
+# wird gecastet — beides in _build_operands; hier nur die direkt via
+# torch.randn nutzbaren.)
 _TORCH_DTYPE = {
     "fp16": torch.float16,
+    "bf16": torch.bfloat16,
     "fp32": torch.float32,
 }
+
+
+def _build_operands(dtype: str, M: int, N: int, K: int):
+    """Baue A=(M,K), B=(K,N) im Compute-`dtype` (deterministisch; Seed außen).
+
+    Wächst pro TZ-3-dtype: fp16/bf16 sind native `torch.randn`-dtypes; tf32
+    (torch.float32 + Kernel-Cast) und fp8 (fp16→`.to(fp8)`) kommen als eigene
+    Zweige in den folgenden Teil-Schritten dazu.
+    """
+    if dtype in ("fp16", "bf16", "fp32"):
+        # Native torch-dtypes (fp32 = Anker/Diagnose ohne Tensor-Core-Pfad).
+        t = _TORCH_DTYPE[dtype]
+        return (torch.randn(M, K, dtype=t, device="cuda"),
+                torch.randn(K, N, dtype=t, device="cuda"))
+    if dtype == "tf32":
+        # tf32-Operanden sind normale fp32-Tensoren; die tf32-Reduktion macht
+        # der Kernel-Cast (ct.astype .. ct.tfloat32), NICHT der Input-dtype.
+        return (torch.randn(M, K, dtype=torch.float32, device="cuda"),
+                torch.randn(K, N, dtype=torch.float32, device="cuda"))
+    if dtype in ("fp8e4m3", "fp8e5m2"):
+        # torch.randn kann fp8 NICHT direkt erzeugen -> fp16 bauen und host-seitig
+        # casten (genau wie in analysis/dtype_analyse.py bewiesen). Der Kernel
+        # rechnet die fp8-Tiles direkt (kein in-Kernel-Cast).
+        fp8 = torch.float8_e4m3fn if dtype == "fp8e4m3" else torch.float8_e5m2
+        return (torch.randn(M, K, dtype=torch.float16, device="cuda").to(fp8),
+                torch.randn(K, N, dtype=torch.float16, device="cuda").to(fp8))
+    raise NotImplementedError(
+        f"input-dtype {dtype!r} noch nicht implementiert."
+    )
 
 
 def _build_inputs(config: RunConfig, M: int, N: int, K: int):
     """Deterministische Eingaben A=(M,K), B=(K,N) + Output C=(M,N).
 
     Output-dtype = `acc_dtype` (ehrliches Ergebnis, bewahrt Akku-Präzision).
+    Die Acc-Regeln werden HIER hart erzwungen (Stufe-2-Frühprüfung, erste
+    Verteidigungslinie gegen still falsche Format-Kombis) — `measure.verify`
+    prüft dieselben Kombis später ein zweites Mal über seine Toleranztabelle.
     """
-    # TZ 1: nur fp16-Input (bf16/tf32/fp8 = TZ 3). Zulässigkeit bewusst getrennt
-    # von der torch-dtype-Auflösung, damit fp32 (für den Output) im Map bleiben
-    # kann, ohne fp32/bf16 als Eingabe-dtype durchzulassen.
-    if config.dtype != "fp16":
-        raise NotImplementedError(
-            f"TZ 1: nur input-dtype 'fp16' (bekommen: {config.dtype!r}; bf16/tf32/fp8 = TZ 3)."
-        )
-    if config.acc_dtype not in _TORCH_DTYPE:
-        raise NotImplementedError(f"TZ 1: acc-dtype {config.acc_dtype!r} nicht unterstützt (nur fp32).")
+    err = check_dtype_combo(config.dtype, config.acc_dtype)
+    if err:
+        raise NotImplementedError(err)
+    if config.acc_dtype not in _TORCH_DTYPE:  # Sicherheitsnetz (Regeln decken das ab)
+        raise NotImplementedError(f"acc-dtype {config.acc_dtype!r} nicht nach torch auflösbar.")
     torch.manual_seed(0)
-    in_dt = _TORCH_DTYPE[config.dtype]
+    A, B = _build_operands(config.dtype, M, N, K)
     out_dt = _TORCH_DTYPE[config.acc_dtype]
-    A = torch.randn(M, K, dtype=in_dt, device="cuda")
-    B = torch.randn(K, N, dtype=in_dt, device="cuda")
     C = torch.empty(M, N, dtype=out_dt, device="cuda")
     return A, B, C
 
