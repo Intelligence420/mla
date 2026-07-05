@@ -206,9 +206,10 @@ def run(config: RunConfig) -> RunResult:
         timing["p90_ms"] = round(b["p90_ms"], 5)      # 90.-Perzentil (Ausreißer-Kopf)
         timing["sigma_ms"] = round(b["sigma_ms"], 5)  # Streuung über die Iterationen
         timing["bench_iters"] = b["iters"]
-        # compute_metrics-dict weiterreichen (nicht neu bauen) → künftige Schlüssel
-        # (TZ 4: GB/s, %-Peak) überleben ohne weitere Edit-Stelle hier.
-        metrics = compute_metrics(M, N, K, b["run_ms"])
+        # compute_metrics-dict komplett übernehmen (nicht neu bauen) → die
+        # TZ-4-Keys (GB/s, arithm. Intensität, %-Peak) fließen automatisch mit;
+        # dtype/acc_dtype werden für Bytes/Peak gebraucht.
+        metrics = compute_metrics(M, N, K, b["run_ms"], config.dtype, config.acc_dtype)
         metrics["tflops"] = round(metrics["tflops"], 3)
     except Exception as e:
         return _result(STATUS_RUN_ERROR, error=f"bench: {type(e).__name__}: {str(e)[:400]}")

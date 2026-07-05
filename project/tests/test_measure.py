@@ -15,7 +15,9 @@ import sys
 # project/ auf den Pfad, damit `tool_pipeline` importierbar ist (standalone-Lauf).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tool_pipeline.hardware import peak_tflops  # noqa: E402
 from tool_pipeline.measure.bench import _summarize_times  # noqa: E402
+from tool_pipeline.measure.metrics import compute_metrics, gemm_bytes  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +48,51 @@ def test_summarize_times_single_value():
     d = _summarize_times([4.2])
     assert d["run_ms"] == d["min_ms"] == d["p90_ms"] == 4.2, d
     assert d["sigma_ms"] == 0.0, d
+
+
+# ---------------------------------------------------------------------------
+# Abgeleitete Metriken — headless, exakt vorhersagbar (kein GPU nötig).
+# ---------------------------------------------------------------------------
+def test_gemm_bytes_known_values():
+    """512³, fp16(2 B)→fp32(4 B): bytes = 2·(M·K+K·N) + 4·(M·N) = 2 097 152."""
+    assert gemm_bytes(512, 512, 512, "fp16", "fp32") == 2_097_152
+    # tf32 liegt als float32 (4 B) im Speicher (Cast passiert im Kernel): nur die
+    # Inputs wachsen 2→4 B, der fp32-Output ist in beiden Fällen 4 B.
+    assert gemm_bytes(512, 512, 512, "tf32", "fp32") == 4 * (512 * 512 + 512 * 512) + 4 * (512 * 512)
+    # fp8 (1 B) Input, fp16 (2 B) Output.
+    assert gemm_bytes(512, 512, 512, "fp8e4m3", "fp16") == (
+        1 * (512 * 512 + 512 * 512) + 2 * (512 * 512))
+
+
+def test_compute_metrics_known_values():
+    """512³ fp16→fp32 @ run_ms=1.0 → exakt nachrechenbare Kennzahlen.
+
+    flops=2·512³=268 435 456; bytes=2 097 152 ⇒ arithm. Intensität = 128 FLOP/Byte
+    (deterministisch, GPU-unabhängig). Bei 1 ms: TFLOP/s=0.2684…, GB/s=2.097…,
+    %-Peak-flops=0.2684/213·100≈0.1, %-Peak-bw=2.097/273·100≈0.8.
+    """
+    m = compute_metrics(512, 512, 512, 1.0, "fp16", "fp32")
+    assert m["arithmetic_intensity"] == 128.0, m
+    assert m["gbps"] == 2.1, m                       # round(2.097152, 2)
+    assert abs(m["tflops"] - 0.268435456) < 1e-9, m
+    assert m["percent_peak_flops"] == 0.1, m
+    assert m["percent_peak_bw"] == 0.8, m
+
+
+def test_compute_metrics_fp32_peak_none():
+    """fp32-plain hat keinen Tensor-Core-Peak → %-Peak-flops ist None (kein
+    irreführender Nenner); GB/s/Intensität bleiben aber definiert."""
+    m = compute_metrics(256, 256, 256, 0.5, "fp32", "fp32")
+    assert peak_tflops("fp32") is None
+    assert m["percent_peak_flops"] is None, m
+    assert m["gbps"] is not None and m["arithmetic_intensity"] is not None, m
+
+
+def test_compute_metrics_run_ms_zero_graceful():
+    """run_ms=0 → tflops/gbps NaN statt Division durch Null (kein Crash)."""
+    m = compute_metrics(128, 128, 128, 0.0, "fp16", "fp32")
+    assert m["tflops"] != m["tflops"], m             # NaN != NaN
+    assert m["gbps"] != m["gbps"], m
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +175,34 @@ def test_run_timing_has_distribution():
     for k in ("compile_ms", "run_ms", "min_ms", "p90_ms", "sigma_ms", "bench_iters"):
         assert k in res.timing, f"timing fehlt {k}: {res.timing}"
     assert res.timing["min_ms"] <= res.timing["run_ms"] <= res.timing["p90_ms"], res.timing
+
+
+def test_run_metrics_has_roofline_keys():
+    """run() liefert die Roofline-Metriken in RunResult.metrics (512³ fp16→fp32).
+
+    arithm. Intensität = 128 FLOP/Byte ist deterministisch (GPU-unabhängig) und
+    hier hart prüfbar; GB/s/TFLOP/s/%-Peak müssen positiv und plausibel sein.
+    """
+    if not _has_cuda():
+        print("  (übersprungen: keine CUDA-GPU)")
+        return
+    import tool_pipeline.run as R
+    from tool_pipeline.schema import RunConfig
+    from tool_pipeline.store import store as st
+
+    orig = st.append_result
+    st.append_result = lambda r, path=None: None
+    try:
+        res = R.run(RunConfig(dim_sizes={"i": 512, "k": 512, "j": 512}))
+    finally:
+        st.append_result = orig
+    assert res.status == "ok", f"status={res.status} error={res.error}"
+    m = res.metrics
+    for k in ("tflops", "gbps", "arithmetic_intensity", "percent_peak_flops", "percent_peak_bw"):
+        assert k in m, f"metrics fehlt {k}: {m}"
+    assert m["arithmetic_intensity"] == 128.0, m
+    assert m["tflops"] > 0 and m["gbps"] > 0, m
+    assert 0 < m["percent_peak_flops"] <= 100.0, m
 
 
 def _main() -> int:
