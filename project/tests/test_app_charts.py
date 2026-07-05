@@ -17,7 +17,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tool_pipeline.app.components.charts import (  # noqa: E402
+    _BASE_CUBLAS,
     _FORMAT_COLOR,
+    _SERIES_CUTILE,
     figure_accuracy_throughput,
     figure_throughput,
 )
@@ -49,6 +51,92 @@ def _mixed():
         _failed("bf16", "fp32"),          # verify_failed → NICHT im Chart
         RunResult(status="compile_error", config={"dtype": "fp8e5m2", "acc_dtype": "fp32"}),
     ]
+
+
+def _ok_bl(dtype, acc, tflops, rel, cublas=None, naive=None, maxabs=1e-4) -> RunResult:
+    """ok-Lauf inkl. optionaler Baseline-TFLOP/s (in metrics['baselines'])."""
+    met = {"tflops": tflops, "gbps": 85.0, "arithmetic_intensity": 128.0,
+           "percent_peak_flops": 5.0, "percent_peak_bw": 31.0}
+    bl = {}
+    if cublas is not None:
+        bl["cublas"] = {"available": True, "tflops": cublas}
+    if naive is not None:
+        bl["naive"] = {"available": True, "tflops": naive}
+    if bl:
+        met["baselines"] = bl
+    return RunResult(status="ok", config={"dtype": dtype, "acc_dtype": acc},
+                     metrics=met, accuracy={"rel_err": rel, "max_abs_err": maxabs, "passed": True})
+
+
+def test_throughput_single_series_without_baselines():
+    """Ohne Baselines bleibt es EINE Balken-Serie (unveränderter TZ-3-Pfad)."""
+    fig = figure_throughput(_mixed())
+    assert len(fig.data) == 1 and fig.data[0].type == "bar"
+
+
+def test_throughput_grouped_with_baselines():
+    """Mit cuBLAS+naive → drei gruppierte Serien (cuTile/cuBLAS/naive), barmode=group."""
+    results = [_ok_bl("fp16", "fp32", 18.5, 7e-7, cublas=20.0, naive=2.0),
+               _ok_bl("tf32", "fp32", 7.0, 3e-4, cublas=8.0, naive=1.0)]
+    fig = figure_throughput(results)
+    assert [t.name for t in fig.data] == \
+        ["cuTile (getunt)", "cuBLAS (Obergrenze)", "naive-cuTile (Untergrenze)"], [t.name for t in fig.data]
+    assert fig.layout.barmode == "group"
+    # In gruppierten Charts kodiert die Farbe die SERIE (Format = y-Achse):
+    # cuTile trägt die eine Serien-Farbe, cuBLAS die neutrale Baseline-Farbe.
+    assert fig.data[0].marker.color == _SERIES_CUTILE
+    assert fig.data[1].marker.color == _BASE_CUBLAS
+
+
+def test_throughput_grouped_only_available_baseline():
+    """Nur cuBLAS zugeschaltet → zwei Serien (cuTile + cuBLAS), keine naive-Serie."""
+    fig = figure_throughput([_ok_bl("fp16", "fp32", 18.5, 7e-7, cublas=20.0)])
+    assert [t.name for t in fig.data] == ["cuTile (getunt)", "cuBLAS (Obergrenze)"]
+
+
+def _ok_sw(dtype, acc, tflops, rel, swizzle, cublas=None, naive=None) -> RunResult:
+    """ok-Lauf mit explizitem swizzle-Flag (+ optionale Baselines)."""
+    met = {"tflops": tflops}
+    bl = {}
+    if cublas is not None:
+        bl["cublas"] = {"available": True, "tflops": cublas}
+    if naive is not None:
+        bl["naive"] = {"available": True, "tflops": naive}
+    if bl:
+        met["baselines"] = bl
+    return RunResult(status="ok",
+                     config={"dtype": dtype, "acc_dtype": acc, "swizzle": swizzle},
+                     metrics=met, accuracy={"rel_err": rel, "max_abs_err": 1e-4, "passed": True})
+
+
+def test_throughput_swizzle_compare_grouped():
+    """Beide Swizzle-Zustände je Format → gruppierte Serien 'ohne/mit Swizzle',
+    barmode=group, mit-Swizzle schraffiert."""
+    results = [_ok_sw("fp16", "fp32", 10.0, 7e-7, False),
+               _ok_sw("fp16", "fp32", 11.5, 7e-7, True),
+               _ok_sw("tf32", "fp32", 4.9, 3e-4, False),
+               _ok_sw("tf32", "fp32", 5.2, 3e-4, True)]
+    fig = figure_throughput(results)
+    assert [t.name for t in fig.data][:2] == ["ohne Swizzle", "mit Swizzle"], [t.name for t in fig.data]
+    assert fig.layout.barmode == "group"
+    assert fig.data[1].marker.pattern.shape == "/"      # mit Swizzle = schraffiert
+
+
+def test_throughput_swizzle_compare_with_baselines():
+    """Swizzle-A/B + Baselines → beide Swizzle-Serien PLUS cuBLAS/naive-Serien."""
+    results = [_ok_sw("fp16", "fp32", 10.0, 7e-7, False, cublas=12.0, naive=1.2),
+               _ok_sw("fp16", "fp32", 11.5, 7e-7, True)]
+    names = [t.name for t in figure_throughput(results).data]
+    assert "ohne Swizzle" in names and "mit Swizzle" in names
+    assert any("cuBLAS" in n for n in names) and any("naive" in n for n in names)
+
+
+def test_throughput_all_swizzled_is_single_series():
+    """Modus 'an' (alle Punkte swizzle=True) → KEIN A/B, eine Balken-Serie."""
+    results = [_ok_sw("fp16", "fp32", 11.5, 7e-7, True),
+               _ok_sw("tf32", "fp32", 5.2, 3e-4, True)]
+    fig = figure_throughput(results)
+    assert len(fig.data) == 1 and fig.data[0].type == "bar"
 
 
 def test_throughput_one_bar_per_verified_run():

@@ -40,7 +40,8 @@ def emit(config: RunConfig) -> str:
         NotImplementedError: für Familien außer `contraction` (TZ 7).
     """
     if config.family == "contraction":
-        body = build_gemm_module(config.tile, config.dtype, config.acc_dtype)
+        body = build_gemm_module(config.tile, config.dtype, config.acc_dtype,
+                                 swizzle=config.swizzle)
     else:
         raise NotImplementedError(
             f"TZ 1: nur family='contraction'; '{config.family}' "

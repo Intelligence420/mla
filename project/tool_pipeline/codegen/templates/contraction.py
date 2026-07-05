@@ -46,7 +46,14 @@ _INPUT_CAST = {
 }
 
 
-def build_gemm_module(tile: dict, dtype: str, acc_dtype: str) -> str:
+# GROUP_M der L2-Swizzle-Rasterung (grouped-M): wie viele M-Kachel-Zeilen zu einer
+# L2-lokalen Gruppe zusammengefasst werden. Fester Wert — der Swizzle ist ein
+# Ein/Aus-Schalter (Control), GROUP_M die bewaehrte Standard-Gruppe (wie Triton).
+_SWIZZLE_GROUP_M = 8
+
+
+def build_gemm_module(tile: dict, dtype: str, acc_dtype: str,
+                      swizzle: bool = False) -> str:
     """Baue den cuTile-Modul-Quelltext fuer ein Plain-GEMM ``ik,kj->ij``.
 
     :param tile:      Tile-Literale ``{"TM": .., "TN": .., "TK": ..}``. Werden
@@ -56,6 +63,10 @@ def build_gemm_module(tile: dict, dtype: str, acc_dtype: str) -> str:
                       nur zur Doku im Docstring des generierten Moduls.
     :param acc_dtype: Akkumulator-dtype-Label; ueber ``_ACC_DTYPE_MAP`` auf den
                       ct-dtype-Ausdruck abgebildet.
+    :param swizzle:   L2-Swizzle (grouped-M-Rasterung) an/aus. Bei ``False`` ist
+                      der erzeugte Quelltext **byte-identisch** zu TZ 1-3; bei
+                      ``True`` wird nur die Block->Kachel-Zuordnung bijektiv
+                      umgeordnet (Orientierung/mma bleiben unberuehrt).
     :returns:         Vollstaendiger, ausfuehrbarer Modul-Quelltext als String.
                       Konvention fuer den compile.py-Consumer: der Modul
                       definiert eine Funktion ``launch(A, B, C)`` (C ist vorab
@@ -93,6 +104,37 @@ def build_gemm_module(tile: dict, dtype: str, acc_dtype: str) -> str:
         dtype_doc = f"Input-dtype: {dtype} (Laufzeit-torch-dtype, steht NICHT im Kernel-Koerper)."
         cast_block = ""
 
+    # Swizzle-Bloecke: bei swizzle=False EXAKT die TZ-1-Zeilen (byte-identisch);
+    # bei swizzle=True eine bijektive grouped-M-Rasterung der Block->Kachel-Zuordnung.
+    if swizzle:
+        group_m = _SWIZZLE_GROUP_M
+        swizzle_doc = (f" L2-Swizzle EIN (grouped-M-Rasterung, GROUP_M={group_m}): i/j "
+                       f"werden bijektiv umgeordnet (dieselbe Kachelmenge, L2-freundlichere Reihenfolge).")
+        group_const = f"GROUP_M = {group_m}\n"
+        bid_block = (
+            "    # L2-Swizzle: grouped-M-Rasterung — dieselben (i, j) wie ohne Swizzle,\n"
+            "    # nur in L2-freundlicherer Reihenfolge (Bloecke einer Gruppe teilen sich\n"
+            "    # B-Spalten). Bijektiv -> Ergebnis unveraendert; Orientierung/mma unberuehrt.\n"
+            "    num_pid_m = ct.cdiv(M, TM)\n"
+            "    num_pid_n = ct.cdiv(N, TN)\n"
+            "    pid = ct.bid(0) * num_pid_n + ct.bid(1)\n"
+            "    num_pid_in_group = GROUP_M * num_pid_n\n"
+            "    group_id = pid // num_pid_in_group\n"
+            "    first_pid_m = group_id * GROUP_M\n"
+            "    group_size_m = min(num_pid_m - first_pid_m, GROUP_M)\n"
+            "    local = pid % num_pid_in_group\n"
+            "    i = first_pid_m + (local % group_size_m)\n"
+            "    j = local // group_size_m\n"
+        )
+    else:
+        swizzle_doc = ""
+        group_const = ""
+        bid_block = (
+            "    # 2D-Grid: i laeuft ueber M-Kacheln, j ueber N-Kacheln.\n"
+            "    i = ct.bid(0)\n"
+            "    j = ct.bid(1)\n"
+        )
+
     return f'''"""Generierter cuTile-GEMM (Codegen C1) — Kontraktion ik,kj->ij.
 
 {dtype_doc}
@@ -100,7 +142,7 @@ Akkumulator: {acc_dtype} ({acc_ct}).
 Tile-Literale: TM={tm}, TN={tn}, TK={tk} (fest in den Quelltext gebacken).
 
 Bewiesene Orientierung: a=(TM,TK), b=(TK,TN), ct.mma(a,b,acc)->(TM,TN),
-KEIN Operanden-Swap, KEIN Permute. i=bid(0)=M-Kachel, j=bid(1)=N-Kachel.
+KEIN Operanden-Swap, KEIN Permute. i=bid(0)=M-Kachel, j=bid(1)=N-Kachel.{swizzle_doc}
 """
 
 import cuda.tile as ct
@@ -110,7 +152,7 @@ import torch
 TM = {tm}
 TN = {tn}
 TK = {tk}
-
+{group_const}
 
 @ct.kernel
 def gemm(A, B, C,
@@ -118,10 +160,7 @@ def gemm(A, B, C,
          N: ct.Constant[int],
          K: ct.Constant[int]):
     """Berechne eine (TM, TN)-Ausgabekachel von C = A @ B."""
-    # 2D-Grid: i laeuft ueber M-Kacheln, j ueber N-Kacheln.
-    i = ct.bid(0)
-    j = ct.bid(1)
-
+{bid_block}
     # Akkumulator unabhaengig vom Input-dtype (Standardmuster aus cuTile).
     acc = ct.full((TM, TN), 0, dtype={acc_ct})
 

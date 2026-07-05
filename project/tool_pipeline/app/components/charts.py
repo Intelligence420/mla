@@ -68,10 +68,25 @@ def _points(results) -> list[dict]:
         if tf is None or rel is None or not math.isfinite(tf):
             continue
         key = combo_key(dt, ac)
+
+        # Baseline-TFLOP/s (falls mitgemessen + verfügbar) — additiv, für die
+        # gruppierte Balken-Serie in figure_throughput. Fehlend → None (kein Balken).
+        bl = met.get("baselines") or {}
+
+        def _bl_tflops(name):
+            e = bl.get(name) or {}
+            v = e.get("tflops")
+            return float(v) if e.get("available") and isinstance(v, (int, float)) else None
+
         pts.append({
             "key": key, "label": combo_label(dt, ac),
+            "swizzle": bool(cfg.get("swizzle")),
             "tflops": float(tf), "rel_err": float(rel),
             "max_abs_err": acc.get("max_abs_err"),
+            "gbps": met.get("gbps"),
+            "percent_peak_flops": met.get("percent_peak_flops"),
+            "cublas": _bl_tflops("cublas"),
+            "naive": _bl_tflops("naive"),
             "color": _FORMAT_COLOR.get(key, _FALLBACK),
         })
     return pts
@@ -115,17 +130,49 @@ def _empty(msg: str) -> go.Figure:
 # ---------------------------------------------------------------------------
 # Chart 1: Durchsatz je Format (Balken)
 # ---------------------------------------------------------------------------
+# Baseline-Farben: bewusst NEUTRAL (kein Verbrauch der Format-Palette, die bei 8
+# Kombis am Limit ist) — cuBLAS dunkelgrau, naive-cuTile hellgrau + Schraffur.
+_BASE_CUBLAS = _INK2       # dunkelgrau = Obergrenze
+_BASE_NAIVE = _MUTED       # hellgrau (+ Muster) = Untergrenze
+
+# In GRUPPIERTEN Charts kodiert die Farbe die **Serie** (cuTile/ohne/mit Swizzle),
+# nicht das Format — das Format steht auf der y-Achse. So ist die Legende ehrlich
+# (ein Swatch = eine Serie) statt irreführend einfarbig bei mehrfarbigen Balken.
+# Im Standard-Chart (eine Serie) bleibt die Farbe = Format (Kopplung zum Scatter).
+_SERIES_CUTILE = _PALETTE[0]   # Blau = unser (getunter) cuTile-Kernel
+
+
+def _subtitle(fig: go.Figure, text: str) -> None:
+    """Dezente Unterzeile unter dem Titel (erklärt die Farb-/Rahmen-Kodierung)."""
+    fig.add_annotation(text=text, showarrow=False, xref="paper", yref="paper",
+                       x=0.0, y=1.05, xanchor="left", yanchor="bottom",
+                       font=dict(color=_MUTED, size=10.5))
+
+
 def figure_throughput(results, primary_key: Optional[str] = None) -> go.Figure:
     """Horizontaler Balken: TFLOP/s je verifiziertem Format (schnellstes oben).
 
-    Identität über die Achsen-Labels + Farbe; das primäre Format erhält eine
-    Ink-Umrandung.
+    Ohne Baselines: eine Serie, Identität über Achsen-Label + Format-Farbe, das
+    primäre Format mit Ink-Umrandung. Mit zugeschalteten Baselines: **gruppierte**
+    Balken je Format — cuTile (Format-Farbe) neben cuBLAS (dunkelgrau, Obergrenze)
+    und naive-cuTile (hellgrau/schraffiert, Untergrenze). Baselines verbrauchen
+    KEINE Format-Farben (Palette am Limit) und werden per Ink/Muster abgesetzt.
     """
     pts = _points(results)
     if not pts:
         return _empty("Noch keine verifizierten Läufe.")
     prim = _resolve_primary(pts, primary_key)
+
+    # Swizzle-A/B: liegen für Formate BEIDE Zustände vor → gruppierter Vergleich.
+    swz_set = {p["swizzle"] for p in pts}
+    if True in swz_set and False in swz_set:
+        return _figure_throughput_swizzle(pts, prim)
+
     pts = sorted(pts, key=lambda p: p["tflops"])  # aufsteigend → größtes oben (h-Balken)
+
+    has_baselines = any(p["cublas"] is not None or p["naive"] is not None for p in pts)
+    if has_baselines:
+        return _figure_throughput_grouped(pts, prim)
 
     fig = go.Figure(go.Bar(
         x=[p["tflops"] for p in pts],
@@ -143,6 +190,116 @@ def figure_throughput(results, primary_key: Optional[str] = None) -> go.Figure:
         hovertemplate="%{customdata[0]}<br>%{x:.2f} TFLOP/s<extra></extra>",
     ))
     _style(fig, title="Durchsatz je Format", xaxis_title="TFLOP/s")
+    fig.update_layout(bargap=0.4)                        # etwas Luft (nicht bildfüllend)
+    fig.update_xaxes(rangemode="tozero")
+    fig.update_yaxes(automargin=True)
+    return fig
+
+
+def _base_bar(name: str, labels: list, xs: list, color: str, hover: str,
+              pattern: Optional[str] = None) -> go.Bar:
+    """Eine Baseline-/Serien-Balkenspur (neutrale Farbe, mit Wert-Labels, damit
+    die Zahl NICHT nur im Hover steht — auch winzige naive-Balken bleiben ablesbar)."""
+    marker = dict(color=color, cornerradius=3)
+    if pattern:
+        marker["pattern"] = dict(shape=pattern, fgcolor="#ffffff", size=6)
+    return go.Bar(
+        name=name, y=labels, x=xs, orientation="h", marker=marker,
+        text=[f"{v:.1f}" if v is not None else "" for v in xs],
+        textposition="outside", textfont=dict(color=_INK2, size=10), cliponaxis=False,
+        hovertemplate=hover + " · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>",
+    )
+
+
+def _figure_throughput_grouped(pts: list[dict], prim: Optional[str]) -> go.Figure:
+    """Gruppierte Balken cuTile vs Baselines (aufgerufen, wenn Baselines vorliegen).
+
+    Farbe = Serie (cuTile blau, cuBLAS dunkelgrau, naive hellgrau/schraffiert);
+    Format steht auf der y-Achse → ehrliche Legende. Alle Balken beschriftet."""
+    labels = [p["label"] for p in pts]
+    prim_line = dict(color=_INK, width=[2 if p["key"] == prim else 0 for p in pts])
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="cuTile (getunt)", y=labels, x=[p["tflops"] for p in pts], orientation="h",
+        marker=dict(color=_SERIES_CUTILE, line=prim_line, cornerradius=3),
+        text=[f"{p['tflops']:.1f}" for p in pts], textposition="outside",
+        textfont=dict(color=_INK, size=10), cliponaxis=False,
+        hovertemplate="cuTile · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>",
+    ))
+    if any(p["cublas"] is not None for p in pts):
+        fig.add_trace(_base_bar("cuBLAS (Obergrenze)", labels, [p["cublas"] for p in pts],
+                                _BASE_CUBLAS, "cuBLAS"))
+    if any(p["naive"] is not None for p in pts):
+        fig.add_trace(_base_bar("naive-cuTile (Untergrenze)", labels, [p["naive"] for p in pts],
+                                _BASE_NAIVE, "naiv", pattern="/"))
+    _style(fig, title="Durchsatz — cuTile vs Baselines", xaxis_title="TFLOP/s")
+    _subtitle(fig, "Farbe = Serie (Legende) · Format = y-Achse · Rahmen = Primärformat")
+    fig.update_layout(barmode="group", bargap=0.3, bargroupgap=0.12,
+                      legend=dict(orientation="h", yanchor="top", y=-0.18, x=0),
+                      margin=dict(l=12, r=16, t=56, b=66))
+    fig.update_xaxes(rangemode="tozero")
+    fig.update_yaxes(automargin=True)
+    return fig
+
+
+def _by_format(pts: list[dict]) -> list[dict]:
+    """Punkte je Format (dtype,acc) bündeln → ohne/mit-Swizzle + Baseline-Werte.
+
+    Baselines sind swizzle-unabhängig → aus dem Punkt übernommen, der sie trägt.
+    Reihenfolge: aufsteigend nach dem größeren der beiden Swizzle-Werte (h-Balken
+    → schnellstes Format oben)."""
+    fmt: dict = {}
+    for p in pts:
+        e = fmt.setdefault(p["key"], {"key": p["key"], "label": p["label"],
+                                      "color": p["color"], "noswz": None, "swz": None,
+                                      "cublas": None, "naive": None})
+        e["swz" if p["swizzle"] else "noswz"] = p["tflops"]
+        if p["cublas"] is not None:
+            e["cublas"] = p["cublas"]
+        if p["naive"] is not None:
+            e["naive"] = p["naive"]
+    return sorted(fmt.values(),
+                  key=lambda e: max(v for v in (e["noswz"], e["swz"], 0.0) if v is not None))
+
+
+def _figure_throughput_swizzle(pts: list[dict], prim: Optional[str]) -> go.Figure:
+    """A/B-Vergleich ohne↔mit Swizzle je Format (gruppierte h-Balken).
+
+    Serie = Farbe/Muster (ohne Swizzle = blau solid, mit Swizzle = blau schraffiert),
+    Format steht auf der y-Achse → ehrliche Legende; optionale Baselines als neutrale
+    Serien. Alle Balken beschriftet; primäres Format mit Ink-Umrandung."""
+    rows = _by_format(pts)
+    labels = [e["label"] for e in rows]
+    prim_line = dict(color=_INK, width=[2 if e["key"] == prim else 0 for e in rows])
+    noswz = [e["noswz"] for e in rows]
+    swz = [e["swz"] for e in rows]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="ohne Swizzle", y=labels, x=noswz, orientation="h",
+        marker=dict(color=_SERIES_CUTILE, line=prim_line, cornerradius=3),
+        text=[f"{v:.1f}" if v is not None else "" for v in noswz],
+        textposition="outside", textfont=dict(color=_INK, size=10), cliponaxis=False,
+        hovertemplate="ohne Swizzle · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="mit Swizzle", y=labels, x=swz, orientation="h",
+        marker=dict(color=_SERIES_CUTILE, line=prim_line, cornerradius=3,
+                    pattern=dict(shape="/", fgcolor="#ffffff", size=6)),
+        text=[f"{v:.1f}" if v is not None else "" for v in swz],
+        textposition="outside", textfont=dict(color=_INK, size=10), cliponaxis=False,
+        hovertemplate="mit Swizzle · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>",
+    ))
+    if any(e["cublas"] is not None for e in rows):
+        fig.add_trace(_base_bar("cuBLAS (Obergrenze)", labels, [e["cublas"] for e in rows],
+                                _BASE_CUBLAS, "cuBLAS"))
+    if any(e["naive"] is not None for e in rows):
+        fig.add_trace(_base_bar("naive-cuTile (Untergrenze)", labels, [e["naive"] for e in rows],
+                                _BASE_NAIVE, "naiv", pattern="x"))
+    _style(fig, title="Durchsatz — L2-Swizzle-Vergleich (ohne ↔ mit)", xaxis_title="TFLOP/s")
+    _subtitle(fig, "Serie = ohne/mit Swizzle (Muster) · Format = y-Achse · Rahmen = Primärformat")
+    fig.update_layout(barmode="group", bargap=0.3, bargroupgap=0.12,
+                      legend=dict(orientation="h", yanchor="top", y=-0.18, x=0),
+                      margin=dict(l=12, r=16, t=56, b=66))
     fig.update_xaxes(rangemode="tozero")
     fig.update_yaxes(automargin=True)
     return fig
@@ -167,9 +324,10 @@ def figure_accuracy_throughput(results, primary_key: Optional[str] = None) -> go
     fig = go.Figure()
     for p in pts:
         is_prim = p["key"] == prim
+        name = p["label"] + (" · sw" if p["swizzle"] else "")
         fig.add_trace(go.Scatter(
             x=[p["tflops"]], y=[max(p["rel_err"], _REL_FLOOR)],
-            mode="markers", name=p["label"],
+            mode="markers", name=name,
             marker=dict(
                 color=p["color"], size=17 if is_prim else 11,
                 line=dict(color=_INK if is_prim else "#ffffff", width=2 if is_prim else 1.5),

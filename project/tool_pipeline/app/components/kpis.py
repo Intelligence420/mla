@@ -43,8 +43,26 @@ def render_status(result: RunResult):
     return dbc.Alert(children, color=color, className="mb-3")
 
 
+def _gpu_state_str(gs: dict) -> str | None:
+    """GPU-Zustand (Takt/Temp/Power/Last) zu einer kompakten Zeichenkette; None wenn
+    kein Feld gesetzt ist (nvidia-smi fehlte oder lieferte [N/A])."""
+    if not isinstance(gs, dict):
+        return None
+    bits = []
+    if isinstance(gs.get("sm_clock_mhz"), (int, float)):
+        bits.append(f"{gs['sm_clock_mhz']:.0f} MHz")
+    if isinstance(gs.get("temp_c"), (int, float)):
+        bits.append(f"{gs['temp_c']:.0f} °C")
+    if isinstance(gs.get("power_w"), (int, float)):
+        bits.append(f"{gs['power_w']:.1f} W")
+    if isinstance(gs.get("util_pct"), (int, float)):
+        bits.append(f"{gs['util_pct']:.0f} % Last")
+    return "GPU-Zustand: " + " · ".join(bits) if bits else None
+
+
 def render_context(result: RunResult):
-    """Dezente Provenienz-Zeile (Größen · Format · GPU · Zeitstempel); None wenn leer."""
+    """Dezente Provenienz-Zeile (Größen · Format · GPU · GPU-Zustand · Zeitstempel);
+    None wenn leer."""
     p = result.provenance or {}
     s = p.get("sizes") or {}
     parts = []
@@ -54,6 +72,9 @@ def render_context(result: RunResult):
         parts.append(f"{p.get('dtype')} → {p.get('acc_dtype')}")
     if p.get("gpu"):
         parts.append(str(p["gpu"]))
+    gpu_state = _gpu_state_str(p.get("gpu_state") or {})
+    if gpu_state:
+        parts.append(gpu_state)
     if p.get("timestamp"):
         parts.append(str(p["timestamp"]))
     if not parts:
@@ -73,19 +94,59 @@ def _kpi_card(label: str, value: str, unit: str | None = None, sub: str | None =
     return dbc.Card(dbc.CardBody(body), style={"height": "100%"})
 
 
+def _pct_sub(pct) -> str | None:
+    """„X.X % vom Peak" oder None (fp32/fp64 ohne Tensor-Core-Peak → kein Wert)."""
+    return (f"{pct:.1f} % vom Peak"
+            if isinstance(pct, (int, float)) and not isinstance(pct, bool) else None)
+
+
+def _dist_sub(tim: dict) -> str | None:
+    """Verteilungs-Zeile der Median-Karte: min/p90/σ (falls da) + Iterationszahl."""
+    parts = []
+    if all(isinstance(tim.get(k), (int, float)) for k in ("min_ms", "p90_ms", "sigma_ms")):
+        parts.append(f"min {tim['min_ms']:.4f} · p90 {tim['p90_ms']:.4f} · σ {tim['sigma_ms']:.4f} ms")
+    it = tim.get("bench_iters")
+    if isinstance(it, int):
+        parts.append(f"{it} Iterationen")
+    return " · ".join(parts) or None
+
+
+def _baseline_cards(met: dict) -> list:
+    """Optionale Vergleichs-Karten: Anteil an cuBLAS (Obergrenze) + Tuning-Speedup
+    vs naive-cuTile (Untergrenze). Nur wenn die jeweilige Baseline verfügbar ist."""
+    bl = met.get("baselines")
+    tf = met.get("tflops")
+    if not isinstance(bl, dict) or not isinstance(tf, (int, float)):
+        return []
+    cards = []
+    cub = bl.get("cublas") or {}
+    if cub.get("available") and isinstance(cub.get("tflops"), (int, float)) and cub["tflops"] > 0:
+        cards.append(_kpi_card("Anteil an cuBLAS", f"{tf / cub['tflops'] * 100:.0f}", "%",
+                               sub=f"cuBLAS {cub['tflops']:.1f} TFLOP/s (Obergrenze)"))
+    nai = bl.get("naive") or {}
+    if nai.get("available") and isinstance(nai.get("tflops"), (int, float)) and nai["tflops"] > 0:
+        cards.append(_kpi_card("Tuning-Speedup", f"{tf / nai['tflops']:.1f}", "×",
+                               sub=f"vs naive-cuTile {nai['tflops']:.1f} TFLOP/s"))
+    return cards
+
+
 def render_kpis(result: RunResult):
-    """Drei KPI-Karten: Durchsatz (TFLOP/s), Laufzeit-Median (ms), Compile (ms)."""
+    """KPI-Karten (wrappen responsiv): Durchsatz (+%-Peak) · Laufzeit-Median
+    (+min/p90/σ) · Compile · Bandbreite (+%-Peak-BW) · arithm. Intensität · optional
+    Baseline-Vergleiche. Fehlende Werte → „—" (nie ein Crash)."""
     met, tim = result.metrics or {}, result.timing or {}
-    iters = tim.get("bench_iters")
-    return dbc.Row(
-        [
-            dbc.Col(_kpi_card("Durchsatz", _fmt(met.get("tflops"), ".2f"), "TFLOP/s"), md=4),
-            dbc.Col(_kpi_card("Laufzeit (Median)", _fmt(tim.get("run_ms"), ".4f"), "ms",
-                              sub=(f"{iters} Iterationen" if isinstance(iters, int) else None)), md=4),
-            dbc.Col(_kpi_card("Compile (Kalt-Lauf)", _fmt(tim.get("compile_ms"), ".1f"), "ms"), md=4),
-        ],
-        className="g-3 mb-3",
-    )
+    cards = [
+        _kpi_card("Durchsatz", _fmt(met.get("tflops"), ".2f"), "TFLOP/s",
+                  sub=_pct_sub(met.get("percent_peak_flops"))),
+        _kpi_card("Laufzeit (Median)", _fmt(tim.get("run_ms"), ".4f"), "ms",
+                  sub=_dist_sub(tim)),
+        _kpi_card("Compile (Kalt-Lauf)", _fmt(tim.get("compile_ms"), ".1f"), "ms"),
+        _kpi_card("Bandbreite", _fmt(met.get("gbps"), ".1f"), "GB/s",
+                  sub=_pct_sub(met.get("percent_peak_bw"))),
+        _kpi_card("Arithm. Intensität", _fmt(met.get("arithmetic_intensity"), ".1f"), "FLOP/Byte"),
+    ]
+    cards += _baseline_cards(met)
+    return dbc.Row([dbc.Col(c, md=4) for c in cards], className="g-3 mb-3")
 
 
 def render_verify(result: RunResult):
