@@ -89,8 +89,15 @@ def benchmark(launch: Callable, A: torch.Tensor, B: torch.Tensor, C: torch.Tenso
 
     # Flush-Puffer EINMAL allozieren, dann je Iteration nullen (die Allokation
     # selbst würde sonst mitzählen). int8 → 1 Byte/Element, Größe = _L2_FLUSH_BYTES.
-    flush_buf = (torch.empty(_L2_FLUSH_BYTES, dtype=torch.int8, device=C.device)
-                 if flush_l2 else None)
+    # Scheitert die Allokation (GPU fast voll auf der geteilten Maschine), messen
+    # wir OHNE Flush weiter — besser als einen bereits verifizierten Kernel über
+    # eine OOM-Exception zu einem run_error zu degradieren.
+    flush_buf = None
+    if flush_l2:
+        try:
+            flush_buf = torch.empty(_L2_FLUSH_BYTES, dtype=torch.int8, device=C.device)
+        except RuntimeError:      # torch.cuda.OutOfMemoryError ist eine RuntimeError-Unterklasse
+            flush_buf = None
 
     starts = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
     ends = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]

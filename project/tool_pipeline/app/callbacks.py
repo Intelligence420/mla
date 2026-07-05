@@ -78,7 +78,7 @@ _SECTION = {"fontSize": "11px", "letterSpacing": "0.08em", "textTransform": "upp
 def _format_label(result) -> str:
     cfg = result.config or {}
     base = f"{cfg.get('dtype')} → {cfg.get('acc_dtype')}"
-    return base + " · Swizzle" if cfg.get("swizzle") else base
+    return base + " · sw" if cfg.get("swizzle") else base   # einheitlich '· sw' (Tab/Badge/Legende)
 
 
 def _tab_content(result) -> html.Div:

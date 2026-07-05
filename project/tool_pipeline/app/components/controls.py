@@ -375,7 +375,7 @@ def _tile_select() -> html.Div:
             ],
         ),
         html.Div([
-            html.Label("L2-Swizzle (grouped-M)", style=_LABEL),
+            html.Label("L2-Swizzle", style=_LABEL),
             dbc.RadioItems(id=ID_SWIZZLE, options=_SWIZZLE_OPTIONS, value="off",
                            inline=True, style={"fontSize": "13px"},
                            inputStyle={"marginRight": "5px"}, labelStyle={"marginRight": "14px"}),
@@ -424,11 +424,11 @@ def build_controls() -> html.Div:
         _size_input(ID_N, "N  (Spalten, Index j)"),
         _size_input(ID_K, "K  (Kontraktion, Index k)"),
 
-        *_tile_header(),
-        _tile_select(),
-
         *_dtype_header(),
         _dtype_select(),
+
+        *_tile_header(),
+        _tile_select(),
 
         *_baseline_header(),
         _baseline_select(),

@@ -122,7 +122,7 @@ def test_execute_swizzle_both_compares():
     types = _types(comps)
     assert types.count("Graph") == 2, "zwei Vergleichs-Charts erwartet"
     assert types.count("Tab") == 2, "zwei Tabs (ohne + mit Swizzle)"
-    assert "Swizzle" in _text(comps), "der '· Swizzle'-Tab fehlt"
+    assert "· sw" in _text(comps), "der '· sw'-Tab (swizzle-Variante) fehlt"
 
 
 def test_execute_invalid_tile_no_run():
