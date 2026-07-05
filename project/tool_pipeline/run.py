@@ -30,8 +30,10 @@ import torch
 from .codegen.compile import load_kernel
 from .intermediate_representation.parse import parse
 from .intermediate_representation.reshape import to_canonical
+from .measure.baselines import measure_baselines
 from .measure.bench import benchmark, time_first_launch
 from .measure.metrics import compute_metrics
+from .measure.provenance import gpu_state
 from .measure.verify import verify
 from .schema import (
     STATUS_COMPILE_ERROR,
@@ -107,7 +109,8 @@ def _build_inputs(config: RunConfig, M: int, N: int, K: int):
 
 
 def _provenance(config: RunConfig) -> dict:
-    """Leichte Provenienz (TZ 1). GPU-Takt/Temp/Power via nvidia-smi = TZ 4."""
+    """Statische Provenienz-Basis. `sizes` wird nach dem Parsen, `gpu_state`
+    (Takt/Temp/Power via nvidia-smi) nach der Messung ergänzt (TZ 4)."""
     return {
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
         "dtype": config.dtype,
@@ -201,13 +204,30 @@ def run(config: RunConfig) -> RunResult:
     # 6) Warme Messung (=run_ms) + Metriken (TFLOP/s)
     try:
         b = benchmark(comp.launch, A, B, C)
-        timing["run_ms"] = round(b["run_ms"], 5)
+        timing["run_ms"] = round(b["run_ms"], 5)      # Median (unveränderter Key)
+        timing["min_ms"] = round(b["min_ms"], 5)      # schnellste Iteration
+        timing["p90_ms"] = round(b["p90_ms"], 5)      # 90.-Perzentil (Ausreißer-Kopf)
+        timing["sigma_ms"] = round(b["sigma_ms"], 5)  # Streuung über die Iterationen
         timing["bench_iters"] = b["iters"]
-        # compute_metrics-dict weiterreichen (nicht neu bauen) → künftige Schlüssel
-        # (TZ 4: GB/s, %-Peak) überleben ohne weitere Edit-Stelle hier.
-        metrics = compute_metrics(M, N, K, b["run_ms"])
+        # compute_metrics-dict komplett übernehmen (nicht neu bauen) → die
+        # TZ-4-Keys (GB/s, arithm. Intensität, %-Peak) fließen automatisch mit;
+        # dtype/acc_dtype werden für Bytes/Peak gebraucht.
+        metrics = compute_metrics(M, N, K, b["run_ms"], config.dtype, config.acc_dtype)
         metrics["tflops"] = round(metrics["tflops"], 3)
     except Exception as e:
         return _result(STATUS_RUN_ERROR, error=f"bench: {type(e).__name__}: {str(e)[:400]}")
+
+    # GPU-Zustand direkt NACH der Messung (Takt/Temp/Power spiegeln die gemessene
+    # Last) — additiv in provenance, pro Lauf. Graceful (leer, falls nvidia-smi fehlt).
+    provenance["gpu_state"] = gpu_state()
+
+    # 7) Optionale Baselines (cuBLAS-Obergrenze / naive-cuTile-Untergrenze) —
+    #    additiv in metrics["baselines"]. Optional & sekundär → ein Fehler hier
+    #    kippt den bereits verifizierten+gemessenen ok-Lauf NICHT (graceful).
+    if config.baselines:
+        try:
+            metrics["baselines"] = measure_baselines(config.baselines, A, B, C, config)
+        except Exception as e:  # noqa: BLE001
+            metrics["baselines"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
     return _result(STATUS_OK)

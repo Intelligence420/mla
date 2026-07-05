@@ -38,6 +38,17 @@ _TORCH = {"fp16": torch.float16, "bf16": torch.bfloat16,
           "tf32": torch.float32, "fp32": torch.float32,
           "fp8e4m3": torch.float8_e4m3fn, "fp8e5m2": torch.float8_e5m2}
 
+# TZ-4-Tile-Matrix: verschiedene TM/TN/TK inkl. des winzigen 16³ (= Tile der
+# naive-cuTile-Baseline → muss ebenfalls verifizieren, sonst wären dessen
+# Baseline-TFLOP/s nicht vertrauenswürdig) und eines großen 256er-Tiles.
+_TZ4_TILES = [
+    {"TM": 16, "TN": 16, "TK": 16},     # = naive-Baseline-Tile
+    {"TM": 64, "TN": 64, "TK": 32},
+    {"TM": 256, "TN": 128, "TK": 64},
+]
+# glatt (Tile-Vielfache) + ragged (nicht-teilbar → ZERO-Padding-Pfad je Tile).
+_TZ4_SIZES = [(512, 512, 512), (130, 100, 70), (129, 127, 65)]
+
 
 def _rand_operand(rows: int, cols: int, dtype: str):
     """Zufalls-Operand im Compute-`dtype`. fp8 via fp16→.to() (randn kann kein
@@ -48,13 +59,19 @@ def _rand_operand(rows: int, cols: int, dtype: str):
     return torch.randn(rows, cols, dtype=t, device="cuda")
 
 
-def _run_gemm(M: int, N: int, K: int, dtype: str = "fp16", acc: str = "fp32"):
+def _run_gemm(M: int, N: int, K: int, dtype: str = "fp16", acc: str = "fp32",
+              tile: dict | None = None, swizzle: bool = False):
     """Echten Codegen-Pfad fahren: emit → load → launch. Gibt (A, B, C).
 
     `dtype`/`acc` steuern Compute- bzw. Akku-/Output-dtype (Default fp16→fp32 =
-    der TZ-1-Anker, unverändert).
+    der TZ-1-Anker). `tile`/`swizzle` steuern die TZ-4-Kachel/Swizzle-Achse
+    (Default = die TZ-1-Kachel 128/128/64 ohne Swizzle).
     """
-    cfg = RunConfig(dim_sizes={"i": M, "k": K, "j": N}, dtype=dtype, acc_dtype=acc)
+    kwargs = {"dim_sizes": {"i": M, "k": K, "j": N}, "dtype": dtype,
+              "acc_dtype": acc, "swizzle": swizzle}
+    if tile is not None:
+        kwargs["tile"] = tile
+    cfg = RunConfig(**kwargs)
     launch = load_kernel(cfg, emit(cfg)).launch
     torch.manual_seed(0)
     A = _rand_operand(M, K, dtype)
@@ -65,12 +82,13 @@ def _run_gemm(M: int, N: int, K: int, dtype: str = "fp16", acc: str = "fp32"):
     return A, B, C
 
 
-def _assert_matches_fp32(M: int, N: int, K: int, dtype: str, acc: str):
+def _assert_matches_fp32(M: int, N: int, K: int, dtype: str, acc: str,
+                         tile: dict | None = None, swizzle: bool = False):
     """Generierter Kernel stimmt gegen die fp32-Referenz — mit der
     **Produktions-Toleranz** des Formats (Quelle: measure.verify._TOLERANCES,
-    keine Duplikat-Werte)."""
+    keine Duplikat-Werte). Optional über Tile/Swizzle parametrisiert (TZ 4)."""
     atol, rtol = _TOLERANCES[(dtype, acc)]
-    A, B, C = _run_gemm(M, N, K, dtype, acc)
+    A, B, C = _run_gemm(M, N, K, dtype, acc, tile=tile, swizzle=swizzle)
     ref = torch.einsum("ik,kj->ij", A.float(), B.float())
     assert C.shape == (M, N), f"{dtype}->{acc} {(M, N, K)}: Shape {tuple(C.shape)}"
     assert C.dtype == _TORCH[acc], f"{dtype}->{acc}: Output-dtype {C.dtype} != {acc}"
@@ -79,14 +97,16 @@ def _assert_matches_fp32(M: int, N: int, K: int, dtype: str, acc: str):
         f"{dtype}->{acc} {(M, N, K)} weicht ab: max_abs_err={err:.3e} (atol={atol}, rtol={rtol})"
 
 
-def _assert_orientation(dtype: str, acc: str):
+def _assert_orientation(dtype: str, acc: str,
+                        tile: dict | None = None, swizzle: bool = False):
     """Orientierungs-Wächter je Format: exakt A@B, kein transponierter Doppelgänger.
 
     Quadratische Inputs → alle Doppelgänger sind shape-legal, nur die Zahlen
     unterscheiden sie. err_AB < 1.0 passt für alle in-scope-Formate (auch die
-    fp16-/fp8-Akku-Pfade mit ~0.2 realem Fehler)."""
+    fp16-/fp8-Akku-Pfade mit ~0.2 realem Fehler). Optional über Tile/Swizzle
+    parametrisiert (TZ 4: neue Tiles/Swizzle = neue Orientierungs-Fehlerquelle)."""
     M = N = K = 256
-    A, B, C = _run_gemm(M, N, K, dtype, acc)
+    A, B, C = _run_gemm(M, N, K, dtype, acc, tile=tile, swizzle=swizzle)
     Af, Bf, Cf = A.float(), B.float(), C.float()
     err_AB = (Cf - Af @ Bf).abs().max().item()
     imposters = {
@@ -141,6 +161,80 @@ def test_gemm_computes_AB_not_transpose():
     assert err_AB < 1.0, f"A@B sollte passen, err={err_AB:.3e}"
     assert min(imposters.values()) > 10.0, \
         f"ein Doppelgänger liegt verdächtig nah: {imposters}"
+
+
+def test_swizzle_emit_structure():
+    """Headless: swizzle=False ist strukturell die TZ-1-Variante (kein GROUP_M,
+    plain bid); swizzle=True bringt die grouped-M-Rasterung — die mma-Orientierung
+    ist in BEIDEN identisch (Swizzle fasst NUR die Block→Kachel-Zuordnung an)."""
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    plain = build_gemm_module(tile, "fp16", "fp32", swizzle=False)
+    swz = build_gemm_module(tile, "fp16", "fp32", swizzle=True)
+    # Nicht-Swizzle: unverändert.
+    assert "GROUP_M" not in plain and "num_pid_n" not in plain, plain
+    assert "i = ct.bid(0)" in plain and "j = ct.bid(1)" in plain, plain
+    # Swizzle: grouped-M-Rasterung da.
+    assert "GROUP_M = 8" in swz and "num_pid_n = ct.cdiv(N, TN)" in swz, swz
+    assert "group_size_m = min(" in swz, swz
+    # Orientierung in BEIDEN gleich (der eine Beweis-Invariant, Risiko ①).
+    assert "acc = ct.mma(a, b, acc)" in plain and "acc = ct.mma(a, b, acc)" in swz
+
+
+def test_gemm_swizzle_correct_across_sizes():
+    """verify-before-trust für den Swizzle-Kernel: stimmt gegen fp32 — glatt UND
+    ragged (der Swizzle darf keine Kachel doppelt/gar nicht berechnen)."""
+    for (M, N, K) in [(512, 512, 512), (256, 384, 128),
+                      (130, 100, 70), (129, 127, 65), (1, 1, 1)]:
+        _assert_matches_fp32(M, N, K, "fp16", "fp32", swizzle=True)
+
+
+def test_gemm_swizzle_orientation():
+    """Orientierungs-Wächter MIT Swizzle: der Kernel rechnet weiter exakt A@B."""
+    _assert_orientation("fp16", "fp32", swizzle=True)
+
+
+def test_swizzle_equals_noswizzle():
+    """Der Swizzle ist eine reine Block-Umordnung → bei gleichen Eingaben
+    numerisch identisch zum Nicht-Swizzle. Größe 1152×256×256 triggert bewusst
+    eine partielle letzte Gruppe (num_pid_m=9 > GROUP_M=8 → min-Zweig)."""
+    M, N, K = 1152, 256, 256
+    _, _, Cn = _run_gemm(M, N, K, swizzle=False)
+    _, _, Cs = _run_gemm(M, N, K, swizzle=True)
+    d = (Cs.float() - Cn.float()).abs().max().item()
+    assert d < 1e-4, f"Swizzle weicht vom Nicht-Swizzle ab: max_diff={d:.3e}"
+
+
+def test_tile_matrix_correct_across_sizes_and_swizzle():
+    """verify-before-trust je Tile: jede TM/TN/TK-Kombi (inkl. 16³ + 256er) stimmt
+    gegen fp32 — über glatte UND ragged Größen, mit UND ohne Swizzle. Das ist die
+    zentrale Silent-wrong-answer-Abwehr der TZ-4-Kachel/Swizzle-Achse."""
+    for tile in _TZ4_TILES:
+        for sw in (False, True):
+            for (M, N, K) in _TZ4_SIZES:
+                _assert_matches_fp32(M, N, K, "fp16", "fp32", tile=tile, swizzle=sw)
+
+
+def test_tile_matrix_orientation():
+    """Orientierungs-Wächter je Tile × Swizzle: jede Kombi rechnet exakt A@B,
+    keinen transponierten Doppelgänger (Risiko ① je neuer Tile/Swizzle-Quelle)."""
+    for tile in _TZ4_TILES:
+        for sw in (False, True):
+            _assert_orientation("fp16", "fp32", tile=tile, swizzle=sw)
+
+
+def test_naive_baseline_tile_verifies():
+    """Explizit: das 16³-Tile der naive-cuTile-Baseline stimmt gegen fp32 + korrekte
+    Orientierung — sonst wären die als Untergrenze gezeigten TFLOP/s nicht ehrlich."""
+    _assert_matches_fp32(512, 512, 512, "fp16", "fp32", tile={"TM": 16, "TN": 16, "TK": 16})
+    _assert_orientation("fp16", "fp32", tile={"TM": 16, "TN": 16, "TK": 16})
+
+
+def test_tile_dtype_cross_check():
+    """Nicht-Default-Tile (64³) über mehrere dtypes × Swizzle: die Kachel-Achse ist
+    im Codegen dtype-unabhängig — hier einmal real über bf16/tf32/fp8 belegt."""
+    tile = {"TM": 64, "TN": 64, "TK": 32}
+    for dtype, acc in [("bf16", "fp32"), ("tf32", "fp32"), ("fp8e4m3", "fp16")]:
+        _assert_matches_fp32(256, 256, 256, dtype, acc, tile=tile, swizzle=True)
 
 
 def test_gemm_bf16_across_sizes():

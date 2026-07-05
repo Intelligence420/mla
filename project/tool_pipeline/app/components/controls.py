@@ -34,6 +34,11 @@ from ...schema import ALLOWED_ACC, RunConfig
 ID_M, ID_N, ID_K = "in-m", "in-n", "in-k"
 ID_DTYPES = "sel-dtypes"          # Multi-Select der zu vergleichenden Formate
 ID_DTYPE_INFO = "dtypes-info"     # Info-Marker (Tooltip: erklärt 'links → rechts')
+ID_TILE_TM, ID_TILE_TN, ID_TILE_TK = "sel-tm", "sel-tn", "sel-tk"  # Tile-Dropdowns
+ID_SWIZZLE = "chk-swizzle"        # L2-Swizzle-Toggle
+ID_TILE_INFO = "tile-info"        # Info-Marker (Tooltip: Tile/Swizzle erklärt)
+ID_BASELINES = "sel-baselines"    # Multi-Select der Vergleichs-Baselines
+ID_BASELINE_INFO = "baselines-info"
 ID_RUN, ID_CANCEL = "btn-run", "btn-cancel"
 ID_PROGRESS, ID_STATUS = "run-progress", "run-status"
 
@@ -46,6 +51,28 @@ _DEFAULT_SIZE = 512  # Startwert je Größe (= cli.py-Default; klein, determinis
 # Tensor-Cores) ist baubar/verifizierbar, aber bewusst NICHT in der GUI-Auswahl
 # (Diagnose-Format, nur programmatisch via RunConfig) → hier ausgelassen.
 _DTYPE_ORDER = ("fp16", "bf16", "tf32", "fp8e4m3", "fp8e5m2")
+
+# Wählbare Tile-Werte (Zweierpotenzen). TM/TN = Kantenlänge der Output-Kachel,
+# TK = K-Schrittweite. Aus dem RunConfig-Default (128/128/64) + kleineren/größeren
+# Zweierpotenzen — jede Kombi kompiliert + verifiziert (Tile-Matrix in test_codegen).
+_TILE_M_OPTIONS = (32, 64, 128, 256)
+_TILE_N_OPTIONS = (32, 64, 128, 256)
+_TILE_K_OPTIONS = (16, 32, 64, 128)
+
+# Vergleichs-Baselines (kanonische Namen = measure.baselines.KNOWN_BASELINES).
+_BASELINE_OPTIONS = [
+    {"label": "cuBLAS (Obergrenze)", "value": "cublas"},
+    {"label": "naive-cuTile (Untergrenze)", "value": "naive"},
+]
+_BASELINE_KEYS = {"cublas", "naive"}
+
+# L2-Swizzle-Modus: aus / an / beide (Vergleich ohne↔mit Swizzle nebeneinander).
+_SWIZZLE_OPTIONS = [
+    {"label": "aus", "value": "off"},
+    {"label": "an", "value": "on"},
+    {"label": "beide (Vergleich)", "value": "both"},
+]
+_SWIZZLE_KEYS = {"off", "on", "both"}
 
 
 def combo_key(dtype: str, acc: str) -> str:
@@ -137,34 +164,111 @@ def validate_selection(selection) -> Optional[str]:
     return None
 
 
-def configs_from_selection(m, n, k, selection) -> list[RunConfig]:
-    """M/N/K + Format-Auswahl → eine ``RunConfig`` je gewählter (dtype, acc)-Kombi.
+def validate_tile(tm, tn, tk) -> Optional[str]:
+    """Prüfe die Tile-Auswahl (TM/TN/TK) gegen die zulässigen Zweierpotenzen.
+
+    Zweite Verteidigungslinie: die Dropdowns bieten nur gültige Werte an, aber ein
+    unzulässiger (z. B. programmatischer) Wert soll einen sauberen Fehler geben
+    statt einen still nicht-baubaren Kernel. :returns: Fehlertext oder ``None``.
+    """
+    for name, v, allowed in (("TM", tm, _TILE_M_OPTIONS), ("TN", tn, _TILE_N_OPTIONS),
+                             ("TK", tk, _TILE_K_OPTIONS)):
+        if v is None or v == "":
+            return f"{name} fehlt — bitte einen Kachelwert wählen."
+        try:
+            iv = int(float(v))
+        except (TypeError, ValueError):
+            return f"{name} ist keine Zahl: {v!r}."
+        if iv not in allowed:
+            return f"{name}={iv} ist kein zulässiger Kachelwert (erlaubt: {list(allowed)})."
+    return None
+
+
+def validate_baselines(baselines) -> Optional[str]:
+    """Prüfe die Baseline-Auswahl (Teilmenge von ``cublas``/``naive``).
+
+    Keine Baseline ist zulässig (optional). :returns: Fehlertext oder ``None``.
+    """
+    if not baselines:
+        return None
+    unknown = [b for b in baselines if b not in _BASELINE_KEYS]
+    if unknown:
+        return f"Unbekannte Baseline-Auswahl: {unknown}."
+    return None
+
+
+def swizzles_from_value(v) -> list:
+    """Swizzle-Steuerwert → Liste der zu messenden Swizzle-Zustände.
+
+    Nimmt den Modus-String der GUI (``"off"``/``"on"``/``"both"``), einen ``bool``
+    (Rückwärtskompatibilität) oder eine Liste. ``"both"`` ⇒ ``[False, True]``
+    (jedes Format zweimal: ohne UND mit Swizzle → A/B-Vergleich).
+    """
+    if isinstance(v, str):
+        return {"off": [False], "on": [True], "both": [False, True]}.get(v, [False])
+    if isinstance(v, (list, tuple)):
+        return [bool(x) for x in v] or [False]
+    return [bool(v)]
+
+
+def validate_swizzle(v) -> Optional[str]:
+    """Prüfe den Swizzle-Steuerwert; unbekannter Modus-String → Fehlertext."""
+    if isinstance(v, str) and v not in _SWIZZLE_KEYS:
+        return f"Unbekannter Swizzle-Modus {v!r} (erlaubt: {sorted(_SWIZZLE_KEYS)})."
+    return None
+
+
+def tile_from_controls(tm, tn, tk) -> dict:
+    """TM/TN/TK (evtl. als Strings aus den Dropdowns) → Tile-dict für ``RunConfig``.
+
+    Tolerant über ``float`` (nimmt "128"/128.0). Erwartet vorher ``validate_tile``.
+    """
+    return {"TM": int(float(tm)), "TN": int(float(tn)), "TK": int(float(tk))}
+
+
+def configs_from_selection(m, n, k, selection,
+                           tile=None, swizzle=False, baselines=None) -> list[RunConfig]:
+    """M/N/K + Format-Auswahl (+ Tile/Swizzle/Baselines) → eine ``RunConfig`` je
+    gewählter (dtype, acc)-Kombi.
 
     Die Liste ist in kanonischer ``COMBOS``-Reihenfolge (unabhängig von der
-    Klick-Reihenfolge) — deterministisch, und das erste Element ist das
-    **primäre** Format für die KPI-Karten. Achsen-Zuordnung wie
-    ``config_from_controls`` (i=M, k=K, j=N). Erwartet vorher validierte Eingaben.
+    Klick-Reihenfolge) — deterministisch, das erste Element ist das **primäre**
+    Format für die KPI-Karten. Achsen-Zuordnung wie ``config_from_controls``
+    (i=M, k=K, j=N). **Ein festes Tile** gilt für die ganze Auswahl (Design-
+    Entscheidung TZ 4); ``tile=None`` ⇒ RunConfig-Default (128/128/64). ``swizzle``
+    ist ein Modus (``"off"``/``"on"``/``"both"``, bool erlaubt): ``"both"`` erzeugt
+    je Format **zwei** Configs (ohne + mit Swizzle) für den A/B-Vergleich.
+    Erwartet vorher validierte Eingaben.
     """
     sizes = {"i": int(float(m)), "k": int(float(k)), "j": int(float(n))}
+    bl = list(baselines) if baselines else []
+    sw_list = swizzles_from_value(swizzle)   # bool|str|Liste → [False]/[True]/[False,True]
     chosen = set(selection)
-    return [
-        RunConfig(dim_sizes=dict(sizes), dtype=d, acc_dtype=a)
-        for (d, a) in COMBOS
-        if combo_key(d, a) in chosen
-    ]
+    out: list[RunConfig] = []
+    for (d, a) in COMBOS:
+        if combo_key(d, a) not in chosen:
+            continue
+        for si, s in enumerate(sw_list):
+            # Baselines sind swizzle-unabhängig (cuBLAS/naive kennen unseren Swizzle
+            # nicht) → nur am ERSTEN Swizzle-Variant messen, kein Doppel-Aufwand.
+            kwargs = dict(dim_sizes=dict(sizes), dtype=d, acc_dtype=a, swizzle=s,
+                          baselines=list(bl) if si == 0 else [])
+            if tile is not None:
+                kwargs["tile"] = dict(tile)
+            out.append(RunConfig(**kwargs))
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Dash-Komponentenbaum
 # ---------------------------------------------------------------------------
 def _fixed_config() -> html.Div:
-    """Read-only Anzeige der (weiterhin) festen Konfiguration. dtype/acc sind ab
-    TZ 3 wählbar (siehe Format-Auswahl) und stehen daher NICHT mehr hier."""
-    c, t = _DEFAULT, _DEFAULT.tile
+    """Read-only Anzeige der (weiterhin) festen Konfiguration. dtype/acc (TZ 3)
+    sowie Tile/Swizzle (TZ 4) sind jetzt wählbar und stehen daher NICHT mehr hier
+    — fest bleibt nur der Ausdruck (allgemeine Kontraktion ist TZ 6)."""
+    c = _DEFAULT
     rows = [
         ("Ausdruck", c.expr),
-        ("Tile", f"TM={t['TM']} · TN={t['TN']} · TK={t['TK']}"),
-        ("Swizzle", "an" if c.swizzle else "aus"),
     ]
     line = {"display": "flex", "justifyContent": "space-between",
             "fontSize": "12.5px", "padding": "3px 0"}
@@ -223,9 +327,94 @@ def _dtype_select() -> html.Div:
     )
 
 
+def _tile_dropdown(id_: str, label: str, options: tuple, default: int) -> html.Div:
+    """Ein Tile-Dropdown (feste Zweierpotenzen; Wert als String)."""
+    return html.Div(
+        style={"flex": 1},
+        children=[
+            html.Label(label, style=_LABEL),
+            dbc.Select(id=id_, value=str(default),
+                       options=[{"label": str(o), "value": str(o)} for o in options]),
+        ],
+    )
+
+
+def _tile_header() -> list:
+    """Überschrift der Kachelung + Hover-Info-Tooltip (TM/TN/TK + Swizzle erklärt)."""
+    info = html.Span(" ⓘ", id=ID_TILE_INFO,
+                     style={"cursor": "help", "color": "#8b5cf6", "fontWeight": 700,
+                            "textTransform": "none"})
+    tip = dbc.Tooltip(
+        [
+            html.Div("Kachelung (Tiling)", style={"fontWeight": 600, "marginBottom": "5px"}),
+            html.Div("TM×TN: Kantenlängen der Ausgabe-Kachel, die ein GPU-Block berechnet. "
+                     "TK: Schrittweite entlang der Kontraktions-Dimension K."),
+            html.Div("Ein festes Tile gilt für alle gewählten Formate.",
+                     style={"marginTop": "5px", "opacity": 0.8}),
+            html.Div("L2-Swizzle: ordnet die Block→Kachel-Zuordnung L2-freundlicher um "
+                     "(gleiches Ergebnis, oft weniger Speicherverkehr). „beide“ misst "
+                     "jedes Format ohne UND mit Swizzle → direkter A/B-Vergleich im Chart.",
+                     style={"marginTop": "5px", "opacity": 0.8}),
+        ],
+        target=ID_TILE_INFO, placement="right",
+        style={"maxWidth": "330px", "textAlign": "left", "fontSize": "12px"},
+    )
+    return [html.H2(["Kachelung (Tile)", info], style=_H2), tip]
+
+
+def _tile_select() -> html.Div:
+    """TM/TN/TK-Dropdowns nebeneinander + Swizzle-Toggle darunter."""
+    t = _DEFAULT.tile
+    return html.Div([
+        html.Div(
+            style={"display": "flex", "gap": "8px"},
+            children=[
+                _tile_dropdown(ID_TILE_TM, "TM", _TILE_M_OPTIONS, t["TM"]),
+                _tile_dropdown(ID_TILE_TN, "TN", _TILE_N_OPTIONS, t["TN"]),
+                _tile_dropdown(ID_TILE_TK, "TK", _TILE_K_OPTIONS, t["TK"]),
+            ],
+        ),
+        html.Div([
+            html.Label("L2-Swizzle", style=_LABEL),
+            dbc.RadioItems(id=ID_SWIZZLE, options=_SWIZZLE_OPTIONS, value="off",
+                           inline=True, style={"fontSize": "13px"},
+                           inputStyle={"marginRight": "5px"}, labelStyle={"marginRight": "14px"}),
+        ], style={"marginTop": "10px"}),
+    ])
+
+
+def _baseline_header() -> list:
+    """Überschrift der Baselines + Hover-Info-Tooltip (Ober-/Untergrenze erklärt)."""
+    info = html.Span(" ⓘ", id=ID_BASELINE_INFO,
+                     style={"cursor": "help", "color": "#8b5cf6", "fontWeight": 700,
+                            "textTransform": "none"})
+    tip = dbc.Tooltip(
+        [
+            html.Div("Vergleichs-Baselines", style={"fontWeight": 600, "marginBottom": "5px"}),
+            html.Div("cuBLAS: hochoptimierte NVIDIA-Bibliothek (torch.matmul) = praktische "
+                     "Obergrenze — „wie nah sind wir dran?“."),
+            html.Div("naive-cuTile: derselbe Kernel mit winzigem Tile (ohne Tuning) = "
+                     "Untergrenze — „was bringt das Tuning?“.", style={"marginTop": "5px"}),
+            html.Div("Optional — jede zugeschaltete Baseline kostet je Format eine "
+                     "zusätzliche Messung.", style={"marginTop": "5px", "opacity": 0.8}),
+        ],
+        target=ID_BASELINE_INFO, placement="right",
+        style={"maxWidth": "330px", "textAlign": "left", "fontSize": "12px"},
+    )
+    return [html.H2(["Baselines (Vergleich)", info], style=_H2), tip]
+
+
+def _baseline_select() -> html.Div:
+    """Multi-Select der Vergleichs-Baselines (Default: keine → schneller Lauf)."""
+    return dbc.Checklist(
+        id=ID_BASELINES, options=_BASELINE_OPTIONS, value=[],
+        style={"fontSize": "13px"}, inputStyle={"marginRight": "6px"},
+    )
+
+
 def build_controls() -> html.Div:
-    """Sidebar-Inhalt: feste Config (read-only) + Größen + Format-Auswahl +
-    Run/Cancel + Progress."""
+    """Sidebar-Inhalt: feste Config (read-only) + Größen + Kachelung/Swizzle +
+    Format-Auswahl + Baselines + Run/Cancel + Progress."""
     return html.Div([
         html.H2("Operation (fest)", style={**_H2, "marginTop": 0}),
         _fixed_config(),
@@ -237,6 +426,12 @@ def build_controls() -> html.Div:
 
         *_dtype_header(),
         _dtype_select(),
+
+        *_tile_header(),
+        _tile_select(),
+
+        *_baseline_header(),
+        _baseline_select(),
 
         html.Div(
             style={"display": "flex", "gap": "8px", "marginTop": "18px"},
