@@ -201,7 +201,10 @@ def run(config: RunConfig) -> RunResult:
     # 6) Warme Messung (=run_ms) + Metriken (TFLOP/s)
     try:
         b = benchmark(comp.launch, A, B, C)
-        timing["run_ms"] = round(b["run_ms"], 5)
+        timing["run_ms"] = round(b["run_ms"], 5)      # Median (unveränderter Key)
+        timing["min_ms"] = round(b["min_ms"], 5)      # schnellste Iteration
+        timing["p90_ms"] = round(b["p90_ms"], 5)      # 90.-Perzentil (Ausreißer-Kopf)
+        timing["sigma_ms"] = round(b["sigma_ms"], 5)  # Streuung über die Iterationen
         timing["bench_iters"] = b["iters"]
         # compute_metrics-dict weiterreichen (nicht neu bauen) → künftige Schlüssel
         # (TZ 4: GB/s, %-Peak) überleben ohne weitere Edit-Stelle hier.
