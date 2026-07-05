@@ -38,6 +38,17 @@ _TORCH = {"fp16": torch.float16, "bf16": torch.bfloat16,
           "tf32": torch.float32, "fp32": torch.float32,
           "fp8e4m3": torch.float8_e4m3fn, "fp8e5m2": torch.float8_e5m2}
 
+# TZ-4-Tile-Matrix: verschiedene TM/TN/TK inkl. des winzigen 16³ (= Tile der
+# naive-cuTile-Baseline → muss ebenfalls verifizieren, sonst wären dessen
+# Baseline-TFLOP/s nicht vertrauenswürdig) und eines großen 256er-Tiles.
+_TZ4_TILES = [
+    {"TM": 16, "TN": 16, "TK": 16},     # = naive-Baseline-Tile
+    {"TM": 64, "TN": 64, "TK": 32},
+    {"TM": 256, "TN": 128, "TK": 64},
+]
+# glatt (Tile-Vielfache) + ragged (nicht-teilbar → ZERO-Padding-Pfad je Tile).
+_TZ4_SIZES = [(512, 512, 512), (130, 100, 70), (129, 127, 65)]
+
 
 def _rand_operand(rows: int, cols: int, dtype: str):
     """Zufalls-Operand im Compute-`dtype`. fp8 via fp16→.to() (randn kann kein
@@ -191,6 +202,39 @@ def test_swizzle_equals_noswizzle():
     _, _, Cs = _run_gemm(M, N, K, swizzle=True)
     d = (Cs.float() - Cn.float()).abs().max().item()
     assert d < 1e-4, f"Swizzle weicht vom Nicht-Swizzle ab: max_diff={d:.3e}"
+
+
+def test_tile_matrix_correct_across_sizes_and_swizzle():
+    """verify-before-trust je Tile: jede TM/TN/TK-Kombi (inkl. 16³ + 256er) stimmt
+    gegen fp32 — über glatte UND ragged Größen, mit UND ohne Swizzle. Das ist die
+    zentrale Silent-wrong-answer-Abwehr der TZ-4-Kachel/Swizzle-Achse."""
+    for tile in _TZ4_TILES:
+        for sw in (False, True):
+            for (M, N, K) in _TZ4_SIZES:
+                _assert_matches_fp32(M, N, K, "fp16", "fp32", tile=tile, swizzle=sw)
+
+
+def test_tile_matrix_orientation():
+    """Orientierungs-Wächter je Tile × Swizzle: jede Kombi rechnet exakt A@B,
+    keinen transponierten Doppelgänger (Risiko ① je neuer Tile/Swizzle-Quelle)."""
+    for tile in _TZ4_TILES:
+        for sw in (False, True):
+            _assert_orientation("fp16", "fp32", tile=tile, swizzle=sw)
+
+
+def test_naive_baseline_tile_verifies():
+    """Explizit: das 16³-Tile der naive-cuTile-Baseline stimmt gegen fp32 + korrekte
+    Orientierung — sonst wären die als Untergrenze gezeigten TFLOP/s nicht ehrlich."""
+    _assert_matches_fp32(512, 512, 512, "fp16", "fp32", tile={"TM": 16, "TN": 16, "TK": 16})
+    _assert_orientation("fp16", "fp32", tile={"TM": 16, "TN": 16, "TK": 16})
+
+
+def test_tile_dtype_cross_check():
+    """Nicht-Default-Tile (64³) über mehrere dtypes × Swizzle: die Kachel-Achse ist
+    im Codegen dtype-unabhängig — hier einmal real über bf16/tf32/fp8 belegt."""
+    tile = {"TM": 64, "TN": 64, "TK": 32}
+    for dtype, acc in [("bf16", "fp32"), ("tf32", "fp32"), ("fp8e4m3", "fp16")]:
+        _assert_matches_fp32(256, 256, 256, dtype, acc, tile=tile, swizzle=True)
 
 
 def test_gemm_bf16_across_sizes():

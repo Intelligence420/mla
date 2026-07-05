@@ -61,6 +61,8 @@ def _format_status_strip(results) -> html.Div:
     for r in results:
         cfg = r.config or {}
         lbl = f"{cfg.get('dtype')} → {cfg.get('acc_dtype')}"
+        if cfg.get("swizzle"):
+            lbl += " · sw"
         ok = r.status == "ok"
         badges.append(dbc.Badge(f"{lbl}: {'PASS' if ok else r.status}",
                                 color="success" if ok else "danger",
@@ -75,7 +77,8 @@ _SECTION = {"fontSize": "11px", "letterSpacing": "0.08em", "textTransform": "upp
 
 def _format_label(result) -> str:
     cfg = result.config or {}
-    return f"{cfg.get('dtype')} → {cfg.get('acc_dtype')}"
+    base = f"{cfg.get('dtype')} → {cfg.get('acc_dtype')}"
+    return base + " · Swizzle" if cfg.get("swizzle") else base
 
 
 def _tab_content(result) -> html.Div:
@@ -167,6 +170,9 @@ def execute_run(m, n, k, selection, tm=None, tn=None, tk=None,
     err = controls.validate_baselines(baselines)
     if err:
         return [_alert("Ungültige Baseline-Auswahl", err, "warning")]
+    err = controls.validate_swizzle(swizzle)
+    if err:
+        return [_alert("Ungültiger Swizzle-Modus", err, "warning")]
 
     # Tile: nur wenn ein Wert gesetzt ist (GUI liefert immer welche); sonst None →
     # RunConfig-Default. Bei gesetztem Tile hart validieren (sauberer Fehler statt

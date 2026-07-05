@@ -109,6 +109,22 @@ def test_execute_with_tile_swizzle_baselines():
     assert "erfolgreich" in txt and "PASS" in txt, f"kein ok/Verify: {txt[:300]}"
 
 
+def test_execute_swizzle_both_compares():
+    """Swizzle-Modus 'both' → je Format zwei Läufe (ohne + mit Swizzle): zwei
+    Detail-Tabs (einer mit '· Swizzle') und die beiden Vergleichs-Charts."""
+    restore = _redirect_store()
+    try:
+        comps = execute_run(256, 256, 128, [combo_key("fp16", "fp32")],
+                            tm=128, tn=128, tk=64, swizzle="both")
+    finally:
+        restore()
+    assert isinstance(comps, list) and comps
+    types = _types(comps)
+    assert types.count("Graph") == 2, "zwei Vergleichs-Charts erwartet"
+    assert types.count("Tab") == 2, "zwei Tabs (ohne + mit Swizzle)"
+    assert "Swizzle" in _text(comps), "der '· Swizzle'-Tab fehlt"
+
+
 def test_execute_invalid_tile_no_run():
     """Unzulässiger Tile-Wert → Warnung, KEIN GPU-Lauf."""
     comps = execute_run(128, 128, 64, [combo_key("fp16", "fp32")], tm=48, tn=128, tk=64)

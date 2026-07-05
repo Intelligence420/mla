@@ -66,6 +66,14 @@ _BASELINE_OPTIONS = [
 ]
 _BASELINE_KEYS = {"cublas", "naive"}
 
+# L2-Swizzle-Modus: aus / an / beide (Vergleich ohne↔mit Swizzle nebeneinander).
+_SWIZZLE_OPTIONS = [
+    {"label": "aus", "value": "off"},
+    {"label": "an", "value": "on"},
+    {"label": "beide (Vergleich)", "value": "both"},
+]
+_SWIZZLE_KEYS = {"off", "on", "both"}
+
 
 def combo_key(dtype: str, acc: str) -> str:
     """Kanonischer Checklist-Wert einer (dtype, acc)-Kombi."""
@@ -189,6 +197,27 @@ def validate_baselines(baselines) -> Optional[str]:
     return None
 
 
+def swizzles_from_value(v) -> list:
+    """Swizzle-Steuerwert → Liste der zu messenden Swizzle-Zustände.
+
+    Nimmt den Modus-String der GUI (``"off"``/``"on"``/``"both"``), einen ``bool``
+    (Rückwärtskompatibilität) oder eine Liste. ``"both"`` ⇒ ``[False, True]``
+    (jedes Format zweimal: ohne UND mit Swizzle → A/B-Vergleich).
+    """
+    if isinstance(v, str):
+        return {"off": [False], "on": [True], "both": [False, True]}.get(v, [False])
+    if isinstance(v, (list, tuple)):
+        return [bool(x) for x in v] or [False]
+    return [bool(v)]
+
+
+def validate_swizzle(v) -> Optional[str]:
+    """Prüfe den Swizzle-Steuerwert; unbekannter Modus-String → Fehlertext."""
+    if isinstance(v, str) and v not in _SWIZZLE_KEYS:
+        return f"Unbekannter Swizzle-Modus {v!r} (erlaubt: {sorted(_SWIZZLE_KEYS)})."
+    return None
+
+
 def tile_from_controls(tm, tn, tk) -> dict:
     """TM/TN/TK (evtl. als Strings aus den Dropdowns) → Tile-dict für ``RunConfig``.
 
@@ -205,22 +234,28 @@ def configs_from_selection(m, n, k, selection,
     Die Liste ist in kanonischer ``COMBOS``-Reihenfolge (unabhängig von der
     Klick-Reihenfolge) — deterministisch, das erste Element ist das **primäre**
     Format für die KPI-Karten. Achsen-Zuordnung wie ``config_from_controls``
-    (i=M, k=K, j=N). **Ein festes Tile/Swizzle** gilt für die ganze Auswahl
-    (Design-Entscheidung TZ 4); ``tile=None`` ⇒ RunConfig-Default (128/128/64).
+    (i=M, k=K, j=N). **Ein festes Tile** gilt für die ganze Auswahl (Design-
+    Entscheidung TZ 4); ``tile=None`` ⇒ RunConfig-Default (128/128/64). ``swizzle``
+    ist ein Modus (``"off"``/``"on"``/``"both"``, bool erlaubt): ``"both"`` erzeugt
+    je Format **zwei** Configs (ohne + mit Swizzle) für den A/B-Vergleich.
     Erwartet vorher validierte Eingaben.
     """
     sizes = {"i": int(float(m)), "k": int(float(k)), "j": int(float(n))}
     bl = list(baselines) if baselines else []
+    sw_list = swizzles_from_value(swizzle)   # bool|str|Liste → [False]/[True]/[False,True]
     chosen = set(selection)
     out: list[RunConfig] = []
     for (d, a) in COMBOS:
         if combo_key(d, a) not in chosen:
             continue
-        kwargs = dict(dim_sizes=dict(sizes), dtype=d, acc_dtype=a,
-                      swizzle=bool(swizzle), baselines=list(bl))
-        if tile is not None:
-            kwargs["tile"] = dict(tile)
-        out.append(RunConfig(**kwargs))
+        for si, s in enumerate(sw_list):
+            # Baselines sind swizzle-unabhängig (cuBLAS/naive kennen unseren Swizzle
+            # nicht) → nur am ERSTEN Swizzle-Variant messen, kein Doppel-Aufwand.
+            kwargs = dict(dim_sizes=dict(sizes), dtype=d, acc_dtype=a, swizzle=s,
+                          baselines=list(bl) if si == 0 else [])
+            if tile is not None:
+                kwargs["tile"] = dict(tile)
+            out.append(RunConfig(**kwargs))
     return out
 
 
@@ -317,7 +352,8 @@ def _tile_header() -> list:
             html.Div("Ein festes Tile gilt für alle gewählten Formate.",
                      style={"marginTop": "5px", "opacity": 0.8}),
             html.Div("L2-Swizzle: ordnet die Block→Kachel-Zuordnung L2-freundlicher um "
-                     "(gleiches Ergebnis, oft weniger Speicherverkehr).",
+                     "(gleiches Ergebnis, oft weniger Speicherverkehr). „beide“ misst "
+                     "jedes Format ohne UND mit Swizzle → direkter A/B-Vergleich im Chart.",
                      style={"marginTop": "5px", "opacity": 0.8}),
         ],
         target=ID_TILE_INFO, placement="right",
@@ -338,9 +374,12 @@ def _tile_select() -> html.Div:
                 _tile_dropdown(ID_TILE_TK, "TK", _TILE_K_OPTIONS, t["TK"]),
             ],
         ),
-        dbc.Switch(id=ID_SWIZZLE, label="L2-Swizzle (grouped-M)",
-                   value=_DEFAULT.swizzle,
-                   style={"marginTop": "10px", "fontSize": "13px"}),
+        html.Div([
+            html.Label("L2-Swizzle (grouped-M)", style=_LABEL),
+            dbc.RadioItems(id=ID_SWIZZLE, options=_SWIZZLE_OPTIONS, value="off",
+                           inline=True, style={"fontSize": "13px"},
+                           inputStyle={"marginRight": "5px"}, labelStyle={"marginRight": "14px"}),
+        ], style={"marginTop": "10px"}),
     ])
 
 

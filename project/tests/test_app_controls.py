@@ -35,10 +35,12 @@ from tool_pipeline.app.components.controls import (  # noqa: E402
     config_from_controls,
     configs_from_selection,
     parse_combo,
+    swizzles_from_value,
     tile_from_controls,
     validate_baselines,
     validate_selection,
     validate_sizes,
+    validate_swizzle,
     validate_tile,
 )
 from tool_pipeline.schema import ALLOWED_ACC, RunConfig, check_dtype_combo  # noqa: E402
@@ -192,6 +194,32 @@ def test_configs_from_selection_default_tile_when_none():
     assert c.swizzle is False and c.baselines == []
 
 
+def test_swizzles_from_value():
+    """Modus-String/bool/Liste → Liste der zu messenden Swizzle-Zustände."""
+    assert swizzles_from_value("off") == [False]
+    assert swizzles_from_value("on") == [True]
+    assert swizzles_from_value("both") == [False, True]
+    assert swizzles_from_value(True) == [True]           # bool rückwärtskompatibel
+    assert swizzles_from_value([False, True]) == [False, True]
+
+
+def test_validate_swizzle():
+    """Bekannte Modi/bools ok; unbekannter Modus-String → Fehler."""
+    for v in ("off", "on", "both", True, False):
+        assert validate_swizzle(v) is None
+    assert validate_swizzle("bogus") is not None
+
+
+def test_configs_from_selection_swizzle_both_expands():
+    """swizzle='both' → je Format ZWEI Configs (ohne + mit); Baselines nur am ersten
+    (swizzle-unabhängig, kein doppeltes Baseline-Messen)."""
+    sel = [combo_key("fp16", "fp32")]
+    cfgs = configs_from_selection(128, 128, 64, sel, swizzle="both", baselines=["cublas"])
+    assert len(cfgs) == 2
+    assert [c.swizzle for c in cfgs] == [False, True]
+    assert cfgs[0].baselines == ["cublas"] and cfgs[1].baselines == []
+
+
 def _walk(node):
     """Alle Dash-Komponenten (mit to_plotly_json) im Baum liefern (rekursiv)."""
     if hasattr(node, "to_plotly_json"):
@@ -224,6 +252,16 @@ def test_build_controls_has_tile_swizzle_baseline_ids():
            for c in _walk(build_controls())}
     for i in (ID_TILE_TM, ID_TILE_TN, ID_TILE_TK, ID_SWIZZLE, ID_BASELINES):
         assert i in ids, f"Control-ID {i!r} fehlt im Baum"
+
+
+def test_swizzle_control_is_radioitems_with_three_modes():
+    """Der Swizzle-Regler ist eine 3-fach-Auswahl (aus/an/beide)."""
+    sw = [c for c in _walk(build_controls())
+          if (c.to_plotly_json().get("props", {}) or {}).get("id") == ID_SWIZZLE]
+    assert sw, "Swizzle-Control fehlt"
+    j = sw[0].to_plotly_json()
+    assert j.get("type") == "RadioItems", j.get("type")
+    assert len(j.get("props", {}).get("options", [])) == 3
 
 
 def test_tile_and_baseline_tooltips_target_markers():

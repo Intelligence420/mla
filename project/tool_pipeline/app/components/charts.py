@@ -80,6 +80,7 @@ def _points(results) -> list[dict]:
 
         pts.append({
             "key": key, "label": combo_label(dt, ac),
+            "swizzle": bool(cfg.get("swizzle")),
             "tflops": float(tf), "rel_err": float(rel),
             "max_abs_err": acc.get("max_abs_err"),
             "gbps": met.get("gbps"),
@@ -148,6 +149,12 @@ def figure_throughput(results, primary_key: Optional[str] = None) -> go.Figure:
     if not pts:
         return _empty("Noch keine verifizierten Läufe.")
     prim = _resolve_primary(pts, primary_key)
+
+    # Swizzle-A/B: liegen für Formate BEIDE Zustände vor → gruppierter Vergleich.
+    swz_set = {p["swizzle"] for p in pts}
+    if True in swz_set and False in swz_set:
+        return _figure_throughput_swizzle(pts, prim)
+
     pts = sorted(pts, key=lambda p: p["tflops"])  # aufsteigend → größtes oben (h-Balken)
 
     has_baselines = any(p["cublas"] is not None or p["naive"] is not None for p in pts)
@@ -211,6 +218,72 @@ def _figure_throughput_grouped(pts: list[dict], prim: Optional[str]) -> go.Figur
     return fig
 
 
+def _by_format(pts: list[dict]) -> list[dict]:
+    """Punkte je Format (dtype,acc) bündeln → ohne/mit-Swizzle + Baseline-Werte.
+
+    Baselines sind swizzle-unabhängig → aus dem Punkt übernommen, der sie trägt.
+    Reihenfolge: aufsteigend nach dem größeren der beiden Swizzle-Werte (h-Balken
+    → schnellstes Format oben)."""
+    fmt: dict = {}
+    for p in pts:
+        e = fmt.setdefault(p["key"], {"key": p["key"], "label": p["label"],
+                                      "color": p["color"], "noswz": None, "swz": None,
+                                      "cublas": None, "naive": None})
+        e["swz" if p["swizzle"] else "noswz"] = p["tflops"]
+        if p["cublas"] is not None:
+            e["cublas"] = p["cublas"]
+        if p["naive"] is not None:
+            e["naive"] = p["naive"]
+    return sorted(fmt.values(),
+                  key=lambda e: max(v for v in (e["noswz"], e["swz"], 0.0) if v is not None))
+
+
+def _figure_throughput_swizzle(pts: list[dict], prim: Optional[str]) -> go.Figure:
+    """A/B-Vergleich ohne↔mit Swizzle je Format (gruppierte h-Balken).
+
+    Gleiche Format-Farbe für beide Zustände, „mit Swizzle" schraffiert (Muster,
+    keine neue Farbe); optionale Baselines als neutrale Serien. Das primäre Format
+    erhält eine Ink-Umrandung."""
+    rows = _by_format(pts)
+    labels = [e["label"] for e in rows]
+    colors = [e["color"] for e in rows]
+    line = dict(color=_INK, width=[2 if e["key"] == prim else 0 for e in rows])
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="ohne Swizzle", y=labels, x=[e["noswz"] for e in rows], orientation="h",
+        marker=dict(color=colors, line=line, cornerradius=3),
+        text=[f"{e['noswz']:.1f}" if e["noswz"] is not None else "" for e in rows],
+        textposition="outside", textfont=dict(color=_INK, size=10), cliponaxis=False,
+        hovertemplate="ohne Swizzle · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="mit Swizzle", y=labels, x=[e["swz"] for e in rows], orientation="h",
+        marker=dict(color=colors, line=line, cornerradius=3,
+                    pattern=dict(shape="/", fgcolor="#ffffff", size=6)),
+        text=[f"{e['swz']:.1f}" if e["swz"] is not None else "" for e in rows],
+        textposition="outside", textfont=dict(color=_INK, size=10), cliponaxis=False,
+        hovertemplate="mit Swizzle · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>",
+    ))
+    if any(e["cublas"] is not None for e in rows):
+        fig.add_trace(go.Bar(
+            name="cuBLAS (Obergrenze)", y=labels, x=[e["cublas"] for e in rows],
+            orientation="h", marker=dict(color=_BASE_CUBLAS, cornerradius=3),
+            hovertemplate="cuBLAS · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>"))
+    if any(e["naive"] is not None for e in rows):
+        fig.add_trace(go.Bar(
+            name="naive-cuTile (Untergrenze)", y=labels, x=[e["naive"] for e in rows],
+            orientation="h", marker=dict(color=_BASE_NAIVE, cornerradius=3,
+                                         pattern=dict(shape="x", fgcolor="#ffffff", size=6)),
+            hovertemplate="naiv · %{y}<br>%{x:.2f} TFLOP/s<extra></extra>"))
+    _style(fig, title="Durchsatz — L2-Swizzle-Vergleich (ohne ↔ mit)", xaxis_title="TFLOP/s")
+    fig.update_layout(barmode="group",
+                      legend=dict(orientation="h", yanchor="top", y=-0.18, x=0),
+                      margin=dict(l=12, r=16, t=44, b=66))
+    fig.update_xaxes(rangemode="tozero")
+    fig.update_yaxes(automargin=True)
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Chart 2: Genauigkeit ↔ Durchsatz (Scatter)
 # ---------------------------------------------------------------------------
@@ -230,9 +303,10 @@ def figure_accuracy_throughput(results, primary_key: Optional[str] = None) -> go
     fig = go.Figure()
     for p in pts:
         is_prim = p["key"] == prim
+        name = p["label"] + (" · sw" if p["swizzle"] else "")
         fig.add_trace(go.Scatter(
             x=[p["tflops"]], y=[max(p["rel_err"], _REL_FLOOR)],
-            mode="markers", name=p["label"],
+            mode="markers", name=name,
             marker=dict(
                 color=p["color"], size=17 if is_prim else 11,
                 line=dict(color=_INK if is_prim else "#ffffff", width=2 if is_prim else 1.5),
