@@ -139,16 +139,20 @@ def render_comparison(results) -> list:
     return [p for p in parts if p is not None]
 
 
-def execute_run(m, n, k, selection, progress=None) -> list:
+def execute_run(m, n, k, selection, tm=None, tn=None, tk=None,
+                swizzle=False, baselines=None, progress=None) -> list:
     """Reine Ablauflogik des Batch-Vergleichs (Dash-frei, headless testbar):
     validieren → RunConfig je Format → EIN GPU-Lock → ``run()`` je Format → rendern.
 
     Gibt **immer** eine Liste von Main-Komponenten zurück (nie eine Exception):
-    ungültige Größen/Auswahl → Warnung (kein GPU-Lauf); GPU belegt → freundliche
-    Meldung; sonst der gerenderte Vergleich (inkl. sauber angezeigter Fehler-Stati).
+    ungültige Größen/Tile/Auswahl → Warnung (kein GPU-Lauf); GPU belegt →
+    freundliche Meldung; sonst der gerenderte Vergleich (inkl. sauber angezeigter
+    Fehler-Stati).
 
-    ``progress`` ist der optionale Dash-``set_progress``-Callback → headless mit
-    ``None`` testbar.
+    ``tm/tn/tk`` (Tile, gelten für die ganze Auswahl) und ``swizzle`` steuern die
+    Kachelung; ``tm/tn/tk=None`` ⇒ RunConfig-Default-Tile. ``baselines`` ist die
+    (evtl. leere) Liste zuzuschaltender Vergleiche. ``progress`` ist der optionale
+    Dash-``set_progress``-Callback → headless mit ``None`` testbar.
     """
     def _set(pct: int, text: str) -> None:
         if progress is not None:
@@ -160,13 +164,27 @@ def execute_run(m, n, k, selection, progress=None) -> list:
     err = controls.validate_selection(selection)
     if err:
         return [_alert("Ungültige Auswahl", err, "warning")]
+    err = controls.validate_baselines(baselines)
+    if err:
+        return [_alert("Ungültige Baseline-Auswahl", err, "warning")]
+
+    # Tile: nur wenn ein Wert gesetzt ist (GUI liefert immer welche); sonst None →
+    # RunConfig-Default. Bei gesetztem Tile hart validieren (sauberer Fehler statt
+    # still nicht-baubarem Kernel).
+    tile = None
+    if tm is not None or tn is not None or tk is not None:
+        err = controls.validate_tile(tm, tn, tk)
+        if err:
+            return [_alert("Ungültige Kachelung", err, "warning")]
+        tile = controls.tile_from_controls(tm, tn, tk)
 
     # ALLES ab hier steht IM try — inkl. Config-Bau, Lazy-Import (kann ImportError
     # werfen), mkdir/Lock, die run()-Schleife und das Rendern —, damit execute_run
     # die Zusage „gibt immer eine Liste zurück, nie eine Exception" hält (Naht-
     # Vertrag; Fund A des Error-Audits). ``finally`` setzt Balken/Text zurück.
     try:
-        configs = controls.configs_from_selection(m, n, k, selection)
+        configs = controls.configs_from_selection(m, n, k, selection, tile=tile,
+                                                   swizzle=swizzle, baselines=baselines)
         from tool_pipeline.run import run  # lazy → Haupt-Prozess bleibt CUDA-frei
         _GPU_LOCK.parent.mkdir(parents=True, exist_ok=True)
         results = []
@@ -197,6 +215,11 @@ def register(app) -> None:
         State(controls.ID_N, "value"),
         State(controls.ID_K, "value"),
         State(controls.ID_DTYPES, "value"),
+        State(controls.ID_TILE_TM, "value"),
+        State(controls.ID_TILE_TN, "value"),
+        State(controls.ID_TILE_TK, "value"),
+        State(controls.ID_SWIZZLE, "value"),
+        State(controls.ID_BASELINES, "value"),
         background=True,
         running=[
             (Output(controls.ID_RUN, "disabled"), True, False),
@@ -207,5 +230,6 @@ def register(app) -> None:
         cancel=[Input(controls.ID_CANCEL, "n_clicks")],
         prevent_initial_call=True,
     )
-    def _on_run(set_progress, n_clicks, m, n, k, selection):
-        return execute_run(m, n, k, selection, progress=set_progress)
+    def _on_run(set_progress, n_clicks, m, n, k, selection, tm, tn, tk, swizzle, baselines):
+        return execute_run(m, n, k, selection, tm=tm, tn=tn, tk=tk,
+                           swizzle=swizzle, baselines=baselines, progress=set_progress)

@@ -19,7 +19,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tool_pipeline.app.components.controls import (  # noqa: E402
     COMBOS,
+    ID_BASELINE_INFO,
+    ID_BASELINES,
     ID_DTYPE_INFO,
+    ID_SWIZZLE,
+    ID_TILE_INFO,
+    ID_TILE_TK,
+    ID_TILE_TM,
+    ID_TILE_TN,
     _DEFAULT_SELECTION,
     _DTYPE_ORDER,
     build_controls,
@@ -28,8 +35,11 @@ from tool_pipeline.app.components.controls import (  # noqa: E402
     config_from_controls,
     configs_from_selection,
     parse_combo,
+    tile_from_controls,
+    validate_baselines,
     validate_selection,
     validate_sizes,
+    validate_tile,
 )
 from tool_pipeline.schema import ALLOWED_ACC, RunConfig, check_dtype_combo  # noqa: E402
 
@@ -134,6 +144,54 @@ def test_default_selection_is_valid():
     assert validate_selection(_DEFAULT_SELECTION) is None
 
 
+# --- Tile / Swizzle / Baselines (TZ 4) ---------------------------------------
+def test_validate_tile_accepts_and_rejects():
+    """Zulässige Zweierpotenzen → None; unbekannte/fehlende/nicht-numerische → Fehler."""
+    assert validate_tile(128, 128, 64) is None
+    assert validate_tile("64", "256", "16") is None      # Strings aus dem Dropdown ok
+    assert validate_tile(48, 128, 64) is not None          # 48 ∉ erlaubte TM-Werte
+    assert validate_tile(128, 128, 256) is not None        # 256 ∉ erlaubte TK-Werte
+    assert validate_tile(128, 128, None) is not None       # fehlend
+    assert validate_tile(128, 128, "x") is not None        # nicht numerisch
+
+
+def test_validate_baselines():
+    """Leer/None ok (optional); bekannte Namen ok; unbekannter → Fehler."""
+    assert validate_baselines([]) is None
+    assert validate_baselines(None) is None
+    assert validate_baselines(["cublas"]) is None
+    assert validate_baselines(["cublas", "naive"]) is None
+    assert validate_baselines(["bogus"]) is not None
+
+
+def test_tile_from_controls_coerces():
+    """Dropdown-Strings/Floats → int-Tile-dict."""
+    assert tile_from_controls("128", "64", "32") == {"TM": 128, "TN": 64, "TK": 32}
+    assert tile_from_controls(256.0, 128.0, 16.0) == {"TM": 256, "TN": 128, "TK": 16}
+
+
+def test_configs_from_selection_fills_tile_swizzle_baselines():
+    """Tile/Swizzle/Baselines werden auf JEDE erzeugte RunConfig gesetzt (ein festes
+    Tile für die ganze Auswahl)."""
+    sel = [combo_key("fp16", "fp32"), combo_key("bf16", "fp32")]
+    cfgs = configs_from_selection(128, 128, 64, sel, tile={"TM": 64, "TN": 64, "TK": 32},
+                                  swizzle=True, baselines=["cublas", "naive"])
+    assert len(cfgs) == 2
+    for c in cfgs:
+        assert c.tile == {"TM": 64, "TN": 64, "TK": 32}
+        assert c.swizzle is True
+        assert c.baselines == ["cublas", "naive"]
+    # eigene dicts je Config (keine geteilte Referenz)
+    assert cfgs[0].tile is not cfgs[1].tile and cfgs[0].baselines is not cfgs[1].baselines
+
+
+def test_configs_from_selection_default_tile_when_none():
+    """Ohne Tile-Argument bleibt das RunConfig-Default-Tile (Rückwärtskompatibilität)."""
+    c = configs_from_selection(128, 128, 64, [combo_key("fp16", "fp32")])[0]
+    assert c.tile == {"TM": 128, "TN": 128, "TK": 64}
+    assert c.swizzle is False and c.baselines == []
+
+
 def _walk(node):
     """Alle Dash-Komponenten (mit to_plotly_json) im Baum liefern (rekursiv)."""
     if hasattr(node, "to_plotly_json"):
@@ -157,6 +215,25 @@ def test_dtype_info_tooltip_targets_marker():
     assert tips, "kein dbc.Tooltip in den Controls gefunden"
     assert any((t.to_plotly_json().get("props", {}) or {}).get("target") == ID_DTYPE_INFO
                for t in tips), "Tooltip zielt nicht auf den Format-Info-Marker"
+
+
+def test_build_controls_has_tile_swizzle_baseline_ids():
+    """Die neuen Controls (TM/TN/TK-Dropdowns, Swizzle-Toggle, Baseline-Liste) sind
+    tatsächlich im Sidebar-Baum — sonst gingen die Callback-States ins Leere."""
+    ids = {(c.to_plotly_json().get("props", {}) or {}).get("id")
+           for c in _walk(build_controls())}
+    for i in (ID_TILE_TM, ID_TILE_TN, ID_TILE_TK, ID_SWIZZLE, ID_BASELINES):
+        assert i in ids, f"Control-ID {i!r} fehlt im Baum"
+
+
+def test_tile_and_baseline_tooltips_target_markers():
+    """Je ein Hover-Tooltip erklärt Kachelung bzw. Baselines und zielt auf den
+    jeweiligen Info-Marker."""
+    tips = [c for c in _walk(build_controls())
+            if c.to_plotly_json().get("type") == "Tooltip"]
+    targets = {(t.to_plotly_json().get("props", {}) or {}).get("target") for t in tips}
+    assert ID_TILE_INFO in targets, "Tile-Tooltip fehlt/zielt nicht auf den Marker"
+    assert ID_BASELINE_INFO in targets, "Baseline-Tooltip fehlt/zielt nicht auf den Marker"
 
 
 def _main() -> int:
