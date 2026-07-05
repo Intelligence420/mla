@@ -17,7 +17,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tool_pipeline.app.components.charts import (  # noqa: E402
+    _BASE_CUBLAS,
     _FORMAT_COLOR,
+    _SERIES_CUTILE,
     figure_accuracy_throughput,
     figure_throughput,
 )
@@ -80,9 +82,10 @@ def test_throughput_grouped_with_baselines():
     assert [t.name for t in fig.data] == \
         ["cuTile (getunt)", "cuBLAS (Obergrenze)", "naive-cuTile (Untergrenze)"], [t.name for t in fig.data]
     assert fig.layout.barmode == "group"
-    # cuTile-Serie trägt die Format-Farben; die Baseline-Serien NICHT (neutral).
-    assert set(fig.data[0].marker.color) <= set(_FORMAT_COLOR.values())
-    assert fig.data[1].marker.color not in _FORMAT_COLOR.values()
+    # In gruppierten Charts kodiert die Farbe die SERIE (Format = y-Achse):
+    # cuTile trägt die eine Serien-Farbe, cuBLAS die neutrale Baseline-Farbe.
+    assert fig.data[0].marker.color == _SERIES_CUTILE
+    assert fig.data[1].marker.color == _BASE_CUBLAS
 
 
 def test_throughput_grouped_only_available_baseline():
