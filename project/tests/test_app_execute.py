@@ -75,7 +75,7 @@ def _redirect_store():
 
 
 def test_execute_batch_renders_charts_kpis_verify_code():
-    """Gültiger 2-Format-Batch → echter GPU-Lauf: zwei Charts + Status ok + KPIs +
+    """Gültiger 2-Format-Batch → echter GPU-Lauf: drei Charts + Status ok + KPIs +
     Verify PASS + Code des primären Formats; beide Formate im Status-Strip."""
     restore = _redirect_store()
     try:
@@ -84,7 +84,7 @@ def test_execute_batch_renders_charts_kpis_verify_code():
         restore()
     assert isinstance(comps, list) and comps, "execute_run muss eine nicht-leere Liste liefern"
     types = _types(comps)
-    assert types.count("Graph") == 2, "es müssen zwei Vergleichs-Charts (dcc.Graph) da sein"
+    assert types.count("Graph") == 3, "es müssen drei Vergleichs-Charts (dcc.Graph) da sein"
     assert types.count("Tab") == 2, "je Format ein Detail-Tab (durchklickbar)"
     txt = _text(comps)
     assert "erfolgreich" in txt, f"kein ok-Status: {txt[:200]}"
@@ -95,7 +95,7 @@ def test_execute_batch_renders_charts_kpis_verify_code():
 
 def test_execute_with_tile_swizzle_baselines():
     """Nicht-Default-Tile (64/64/32) + Swizzle + beide Baselines fließen durch →
-    echter Lauf mit zwei Charts; der Lauf verifiziert (kein Crash)."""
+    echter Lauf mit drei Charts; der Lauf verifiziert (kein Crash)."""
     restore = _redirect_store()
     try:
         comps = execute_run(256, 256, 128, [combo_key("fp16", "fp32")],
@@ -104,14 +104,14 @@ def test_execute_with_tile_swizzle_baselines():
     finally:
         restore()
     assert isinstance(comps, list) and comps
-    assert _types(comps).count("Graph") == 2, "zwei Vergleichs-Charts erwartet"
+    assert _types(comps).count("Graph") == 3, "drei Vergleichs-Charts erwartet"
     txt = _text(comps)
     assert "erfolgreich" in txt and "PASS" in txt, f"kein ok/Verify: {txt[:300]}"
 
 
 def test_execute_swizzle_both_compares():
     """Swizzle-Modus 'both' → je Format zwei Läufe (ohne + mit Swizzle): zwei
-    Detail-Tabs (einer mit '· Swizzle') und die beiden Vergleichs-Charts."""
+    Detail-Tabs (einer mit '· Swizzle') und die drei Vergleichs-Charts."""
     restore = _redirect_store()
     try:
         comps = execute_run(256, 256, 128, [combo_key("fp16", "fp32")],
@@ -120,7 +120,7 @@ def test_execute_swizzle_both_compares():
         restore()
     assert isinstance(comps, list) and comps
     types = _types(comps)
-    assert types.count("Graph") == 2, "zwei Vergleichs-Charts erwartet"
+    assert types.count("Graph") == 3, "drei Vergleichs-Charts erwartet"
     assert types.count("Tab") == 2, "zwei Tabs (ohne + mit Swizzle)"
     assert "· sw" in _text(comps), "der '· sw'-Tab (swizzle-Variante) fehlt"
 

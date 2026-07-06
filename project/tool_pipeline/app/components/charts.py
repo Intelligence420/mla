@@ -1,5 +1,5 @@
-"""Plotly-Charts für den Format-Vergleich (TZ 3): **Durchsatz je Format** (Balken)
-und **Genauigkeit ↔ Durchsatz** (Scatter). Die log-log-Roofline kommt in TZ 5.
+"""Plotly-Charts für den Format-Vergleich: **Durchsatz je Format** (Balken, TZ 3),
+**Genauigkeit ↔ Durchsatz** (Scatter, TZ 3) und die **log-log-Roofline** (TZ 5).
 
 Reine Funktionen ``RunResult-Liste → plotly.Figure`` — Dash-frei, torch-/cuda-frei
 (Naht-/Fork-Regel), damit sie headless (``tests/test_app_charts.py``) prüfbar sind
@@ -9,7 +9,7 @@ Nur **verifizierte** Läufe (``status == "ok"``) werden zu Punkten — Zahlen la
 erst im Chart, nachdem sie gegen fp32 geprüft wurden (verify-before-trust).
 
 Farb-System (dataviz): eine feste kategoriale Palette (CVD-validiert), **eine Farbe
-je Format** stabil über beide Charts (aus ``COMBOS`` abgeleitet → kein Drift, nie
+je Format** stabil über alle Charts (aus ``COMBOS`` abgeleitet → kein Drift, nie
 zyklisch neu vergeben). Das **primäre/aktive Format** wird über die *Form*
 hervorgehoben (Balken-Umrandung, größerer Marker), nicht über die Farbe.
 """
@@ -21,7 +21,15 @@ from typing import Optional
 
 import plotly.graph_objects as go
 
-from .controls import COMBOS, combo_key, combo_label
+# hardware.py ist bewusst torch-/cuTile-frei (reine Daten) → in der fork-sicheren
+# GUI und headless ladbar; TZ 5 nutzt daraus die Roofline-Decken/Bandbreite/Ridge.
+from ...hardware import (
+    MEM_BANDWIDTH_GBPS,
+    MEM_BANDWIDTH_REAL_FRACTION,
+    peak_tflops,
+    ridge_point,
+)
+from .controls import COMBOS, combo_key, combo_label, parse_combo
 
 # --- Farb-/Ink-Tokens (dataviz-Referenzpalette, Light-Surface) ---------------
 _PALETTE = ["#2a78d6", "#1baf7a", "#eda100", "#008300",
@@ -85,6 +93,10 @@ def _points(results) -> list[dict]:
             "max_abs_err": acc.get("max_abs_err"),
             "gbps": met.get("gbps"),
             "percent_peak_flops": met.get("percent_peak_flops"),
+            # arithm. Intensität (FLOP/Byte) = x-Achse der Roofline (TZ 5). Additiv
+            # aus denselben verifizierten metrics — kein Zweit-Extraktor; fehlt sie
+            # (dtype-Größe unbekannt → None), lässt die Roofline den Punkt später aus.
+            "arithmetic_intensity": met.get("arithmetic_intensity"),
             "cublas": _bl_tflops("cublas"),
             "naive": _bl_tflops("naive"),
             "color": _FORMAT_COLOR.get(key, _FALLBACK),
@@ -348,6 +360,184 @@ def figure_accuracy_throughput(results, primary_key: Optional[str] = None) -> go
     # Pfeil. Feste Dekaden-Ticks (dtick=1) + 10^n-Format → ruhige, konsistente
     # log-Achse (kein 1µ/0.001-SI-Mix, keine nackten Minor-Mantissen).
     fig.update_yaxes(type="log", title="rel. Fehler vs fp32 · kleiner = genauer",
+                     dtick=1, exponentformat="power", showexponent="all")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Chart 3: Roofline (log-log arithm. Intensität ↔ erreichte TFLOP/s) — TZ 5
+# ---------------------------------------------------------------------------
+# Referenz-Geometrie in NEUTRALEM Ink (dataviz: Nicht-Daten sind recessive; die
+# Format-Palette bleibt den Messpunkten vorbehalten). Die Bandbreiten-Steigung
+# folgt EINZIG aus hardware.MEM_BANDWIDTH_GBPS (kein Magic-0.273 → kein Drift).
+_ROOF_LINE = _INK2                    # Peak-Decken + Bandbreiten-Schräge
+_ROOF_BAND = "rgba(82,81,78,0.10)"    # reales BW-Band (70–85 %), dezent gefüllt
+_ROOF_RIDGE = _MUTED                  # Ridge-Markierung (noch dezenter)
+# Decken werden über das STRICHMUSTER unterschieden (nicht über Farbe — neutrales
+# Ink bleibt, dataviz-konform); zusätzlich ein Label direkt an der Linie. Die
+# höchste Decke (Tensor-Core) bekommt das kräftigste Muster.
+_ROOF_DASH = ("dash", "dot", "dashdot")
+# Swizzle wird über die Marker-FORM kodiert (nie über eine neue Farbe): ohne
+# Swizzle = Kreis, mit = Raute (löst zugleich den offenen TZ-4-Befund V3).
+_SWZ_SYMBOL = {False: "circle", True: "diamond"}
+
+
+def _bw_slope() -> float:
+    """Steigung der Bandbreiten-Schräge: TFLOP/s je (FLOP/Byte). 273 GB/s ⇒ 0.273."""
+    return MEM_BANDWIDTH_GBPS / 1000.0
+
+
+def _roofline_ceilings(dtypes: set) -> list[dict]:
+    """Peak-Decken für die vorkommenden `dtypes` — nah beieinander liegende Peaks
+    **gebündelt** (fp16/bf16 = 213 & fp8 = 214 liegen auf log-Achse <0,5 %
+    auseinander → EINE Linie; tf32 = 53 separat).
+
+    Rückgabe je Decke: ``{"y": peak, "label": text, "dtypes": {…}}`` — aufsteigend
+    nach Peak. dtypes ohne Tensor-Core-Peak (fp32/fp64) haben keine Decke.
+    """
+    peaks = {d: peak_tflops(d) for d in dtypes if peak_tflops(d) is not None}
+    ceilings: list[dict] = []
+    for d, pk in sorted(peaks.items(), key=lambda kv: kv[1]):
+        merged = next((c for c in ceilings if abs(pk - c["y"]) / c["y"] <= 0.01), None)
+        if merged is not None:
+            merged["dtypes"].add(d)
+            merged["y"] = max(merged["y"], pk)
+        else:
+            ceilings.append({"y": pk, "dtypes": {d}})
+    for c in ceilings:
+        vals = sorted({round(peak_tflops(d)) for d in c["dtypes"]})
+        rng = f"{vals[0]}" if len(vals) == 1 else f"{vals[0]}–{vals[-1]}"
+        c["label"] = (f"tf32-Peak ≈ {rng} TFLOP/s" if c["dtypes"] == {"tf32"}
+                      else f"Tensor-Core-Peak ≈ {rng} TFLOP/s")
+    return ceilings
+
+
+def figure_roofline(results, primary_key: Optional[str] = None) -> go.Figure:
+    """Roofline (log-log): arithm. Intensität (x, FLOP/Byte) ↔ erreichte TFLOP/s (y).
+
+    Macht die zentrale Erkenntnis des Tools sichtbar: sitzt eine Operation **links**
+    vom Ridge-Point (memory-bound) oder rechts (compute-bound) — und wie weit ist
+    sie von der Hardware-Grenze weg. Referenzen (Peak-Decken der vorkommenden
+    dtypes, 273-GB/s-Bandbreiten-Schräge + reales 70–85 %-Band, Ridge des
+    Primärformats) in neutralem Ink; die **Messpunkte** tragen die Format-Farbe
+    (Swizzle = Marker-Symbol, Primärformat größer + umrandet). Nur verifizierte
+    Läufe mit bekannter arithmetischer Intensität (verify-before-trust).
+    """
+    pts = _points(results)
+    # Roofline braucht positive AI UND tflops (log-Achsen); Läufe ohne dtype-Byte-
+    # Größe (AI=None) fallen hier still raus — kein irreführender Punkt.
+    rpts = [p for p in pts
+            if p["arithmetic_intensity"] is not None
+            and math.isfinite(p["arithmetic_intensity"]) and p["arithmetic_intensity"] > 0
+            and math.isfinite(p["tflops"]) and p["tflops"] > 0]
+    if not rpts:
+        return _empty("Noch keine verifizierten Läufe mit arithmetischer Intensität.")
+    prim = _resolve_primary(rpts, primary_key)
+
+    ais = [p["arithmetic_intensity"] for p in rpts]
+    tfs = [p["tflops"] for p in rpts]
+    dtypes = {parse_combo(p["key"])[0] for p in rpts}
+    ceilings = _roofline_ceilings(dtypes)
+    k = _bw_slope()
+
+    # --- Achsenbereiche: Ridge sichtbar erzwingen (die memory-bound-Aussage) ----
+    ridges = [r for r in (ridge_point(d) for d in dtypes) if r is not None]
+    top_peak = max((c["y"] for c in ceilings), default=max(tfs))
+    ridge_top = max(ridges) if ridges else max(ais)
+    x_lo = min(ais) / 3.0
+    # rechter Rand hinter den größten Ridge → die compute-bound-Seite ist sichtbar
+    # (sonst sieht man nur die Datenwolke und nie, dass rechts Luft bleibt).
+    x_hi = max(max(ais), ridge_top) * 1.8
+    y_lo = min(min(tfs), k * x_lo) / 3.0
+    y_hi = max(top_peak, max(tfs)) * 1.5
+
+    fig = go.Figure()
+
+    # --- reales Bandbreiten-Band (70–85 %) als gefüllte Zone unter der Schräge ---
+    lo_f, hi_f = MEM_BANDWIDTH_REAL_FRACTION
+    xs_ref = [x_lo, ridge_top]
+    fig.add_trace(go.Scatter(x=xs_ref, y=[k * lo_f * x for x in xs_ref], mode="lines",
+                             line=dict(width=0), hoverinfo="skip", showlegend=False))
+    fig.add_trace(go.Scatter(
+        x=xs_ref, y=[k * hi_f * x for x in xs_ref], mode="lines",
+        line=dict(width=0), fill="tonexty", fillcolor=_ROOF_BAND,
+        name=f"real erreichbar ({int(lo_f * 100)}–{int(hi_f * 100)} %)", hoverinfo="skip",
+    ))
+
+    # --- Bandbreiten-Schräge y = k·x (273 GB/s), bis zum obersten Ridge (Elbow) --
+    fig.add_trace(go.Scatter(
+        x=xs_ref, y=[k * x for x in xs_ref], mode="lines",
+        line=dict(color=_ROOF_LINE, width=2), name=f"Bandbreite {MEM_BANDWIDTH_GBPS:.0f} GB/s",
+        hovertemplate="Bandbreiten-Dach<br>%{x:.0f} FLOP/B → %{y:.1f} TFLOP/s<extra></extra>",
+    ))
+
+    # --- Peak-Decken der vorkommenden dtypes: je Decke ein eigenes Strichmuster
+    #     + ein Label DIREKT an der Linie (so sind zwei Decken ohne Legende
+    #     unterscheidbar; höchste Decke = kräftigstes Muster). Nicht in der Legende.
+    for i, c in enumerate(ceilings):
+        dash = _ROOF_DASH[(len(ceilings) - 1 - i) % len(_ROOF_DASH)]
+        fig.add_trace(go.Scatter(
+            x=[x_lo, x_hi], y=[c["y"], c["y"]], mode="lines",
+            line=dict(color=_ROOF_LINE, width=2, dash=dash),
+            name=c["label"], showlegend=False,
+            hovertemplate=f"{c['label']}<extra></extra>",
+        ))
+        # Label links auf der Decke (log-Achse → Koordinaten als log10).
+        fig.add_annotation(x=math.log10(x_lo * 1.15), y=math.log10(c["y"] * 1.04),
+                           text=c["label"], showarrow=False,
+                           xanchor="left", yanchor="bottom",
+                           font=dict(color=_ROOF_LINE, size=10))
+
+    # --- Ridge-Markierung des Primärformats (dezente vertikale Punktlinie) ------
+    prim_dt = parse_combo(prim)[0] if prim else None
+    r_prim = ridge_point(prim_dt) if prim_dt else None
+    if r_prim is None and ridges:      # Primär ohne Decke (fp32) → größten Ridge zeigen
+        r_prim = ridge_top
+    if r_prim and ceilings:            # nur sinnvoll, wenn es eine Compute-Decke gibt
+        r_ceil = peak_tflops(prim_dt) if (prim_dt and peak_tflops(prim_dt)) else top_peak
+        fig.add_trace(go.Scatter(
+            x=[r_prim, r_prim], y=[y_lo, r_ceil], mode="lines",
+            line=dict(color=_ROOF_RIDGE, width=1.5, dash="dot"),
+            name="Ridge", showlegend=False, hoverinfo="skip",
+        ))
+        # Annotation auf log-Achse: Koordinaten als log10 des Werts angeben.
+        fig.add_annotation(x=math.log10(r_prim), y=math.log10(r_ceil),
+                           text=f"Ridge {prim_dt} ≈ {r_prim:.0f}", showarrow=False,
+                           xanchor="right", yanchor="bottom",
+                           font=dict(color=_ROOF_RIDGE, size=10))
+
+    # --- Messpunkte: Farbe = Format, Symbol = Swizzle, Primärformat hervorgehoben
+    for p in rpts:
+        is_prim = p["key"] == prim
+        name = p["label"] + (" · sw" if p["swizzle"] else "")
+        pct = p["percent_peak_flops"]
+        pct_str = f"{pct:.1f}" if isinstance(pct, (int, float)) else "—"
+        fig.add_trace(go.Scatter(
+            x=[p["arithmetic_intensity"]], y=[p["tflops"]], mode="markers", name=name,
+            marker=dict(
+                color=p["color"], size=17 if is_prim else 11,
+                symbol=_SWZ_SYMBOL[p["swizzle"]],
+                line=dict(color=_INK if is_prim else "#ffffff", width=2 if is_prim else 1.5),
+            ),
+            customdata=[[p["label"], p["arithmetic_intensity"], pct_str,
+                         "mit" if p["swizzle"] else "ohne"]],
+            hovertemplate=("%{customdata[0]} · %{customdata[3]} Swizzle<br>"
+                           "AI %{customdata[1]:.1f} FLOP/B<br>"
+                           "%{y:.2f} TFLOP/s  ·  %{customdata[2]} % vom Peak<extra></extra>"),
+        ))
+
+    _style(fig, title="Roofline — memory- vs compute-bound",
+           xaxis_title="Arithmetische Intensität (FLOP/Byte  →  mehr Rechnen je Byte)")
+    _subtitle(fig, "log-log · links vom Ridge = memory-bound, rechts = compute-bound · "
+                   "Punkte nur aus verifizierten Läufen")
+    # Mehr Kopfraum (wie die gruppierten Balken-Charts), sonst überlagern sich
+    # Titel und der über der Plotfläche sitzende Untertitel.
+    fig.update_layout(showlegend=True, margin=dict(l=12, r=16, t=64, b=44))
+    # Feste log-Dekaden-Ticks (wie der Scatter); Bereich als log10 (log-Achse).
+    fig.update_xaxes(type="log", range=[math.log10(x_lo), math.log10(x_hi)],
+                     dtick=1, exponentformat="power", showexponent="all")
+    fig.update_yaxes(type="log", range=[math.log10(y_lo), math.log10(y_hi)],
+                     title="Erreichte TFLOP/s  (→ schneller)",
                      dtick=1, exponentformat="power", showexponent="all")
     return fig
 
