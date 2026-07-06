@@ -29,7 +29,11 @@ import torch
 
 from .codegen.compile import load_kernel
 from .intermediate_representation.parse import parse
-from .intermediate_representation.reshape import to_canonical
+from .intermediate_representation.reshape import (
+    from_canonical_output,
+    to_canonical,
+    to_canonical_operands,
+)
 from .measure.baselines import measure_baselines
 from .measure.bench import benchmark, time_first_launch
 from .measure.metrics import compute_metrics
@@ -59,42 +63,48 @@ _TORCH_DTYPE = {
 }
 
 
-def _build_operands(dtype: str, M: int, N: int, K: int):
-    """Baue A=(M,K), B=(K,N) im Compute-`dtype` (deterministisch; Seed außen).
+def _build_natural_operands(dtype: str, shape_a: tuple, shape_b: tuple):
+    """Baue A, B in **natürlicher einsum-Shape** (aus dem Ausdruck) im Compute-
+    `dtype` (deterministisch; Seed außen). Der B1-View bringt sie danach auf die
+    kanonische (B,M,K)/(B,K,N)-Form.
 
-    Wächst pro TZ-3-dtype: fp16/bf16 sind native `torch.randn`-dtypes; tf32
-    (torch.float32 + Kernel-Cast) und fp8 (fp16→`.to(fp8)`) kommen als eigene
-    Zweige in den folgenden Teil-Schritten dazu.
+    Beliebige Rang-Shapes (nicht nur 2D) — der Ausdruck bestimmt die Achsen.
+    fp16/bf16 sind native `torch.randn`-dtypes; tf32 (torch.float32 + Kernel-Cast)
+    und fp8 (fp16→`.to(fp8)`) haben eigene Zweige.
     """
     if dtype in ("fp16", "bf16", "fp32"):
         # Native torch-dtypes (fp32 = Anker/Diagnose ohne Tensor-Core-Pfad).
         t = _TORCH_DTYPE[dtype]
-        return (torch.randn(M, K, dtype=t, device="cuda"),
-                torch.randn(K, N, dtype=t, device="cuda"))
+        return (torch.randn(*shape_a, dtype=t, device="cuda"),
+                torch.randn(*shape_b, dtype=t, device="cuda"))
     if dtype == "tf32":
         # tf32-Operanden sind normale fp32-Tensoren; die tf32-Reduktion macht
         # der Kernel-Cast (ct.astype .. ct.tfloat32), NICHT der Input-dtype.
-        return (torch.randn(M, K, dtype=torch.float32, device="cuda"),
-                torch.randn(K, N, dtype=torch.float32, device="cuda"))
+        return (torch.randn(*shape_a, dtype=torch.float32, device="cuda"),
+                torch.randn(*shape_b, dtype=torch.float32, device="cuda"))
     if dtype in ("fp8e4m3", "fp8e5m2"):
         # torch.randn kann fp8 NICHT direkt erzeugen -> fp16 bauen und host-seitig
         # casten (genau wie in analysis/dtype_analyse.py bewiesen). Der Kernel
         # rechnet die fp8-Tiles direkt (kein in-Kernel-Cast).
         fp8 = torch.float8_e4m3fn if dtype == "fp8e4m3" else torch.float8_e5m2
-        return (torch.randn(M, K, dtype=torch.float16, device="cuda").to(fp8),
-                torch.randn(K, N, dtype=torch.float16, device="cuda").to(fp8))
+        return (torch.randn(*shape_a, dtype=torch.float16, device="cuda").to(fp8),
+                torch.randn(*shape_b, dtype=torch.float16, device="cuda").to(fp8))
     raise NotImplementedError(
         f"input-dtype {dtype!r} noch nicht implementiert."
     )
 
 
-def _build_inputs(config: RunConfig, M: int, N: int, K: int):
-    """Deterministische Eingaben A=(M,K), B=(K,N) + Output C=(M,N).
+def _build_inputs(config: RunConfig, canonical):
+    """Natürliche Operanden A_nat, B_nat + kanonische Kernel-Tensoren
+    A_c=(B,M,K), B_c=(B,K,N), C_c=(B,M,N).
 
     Output-dtype = `acc_dtype` (ehrliches Ergebnis, bewahrt Akku-Präzision).
     Die Acc-Regeln werden HIER hart erzwungen (Stufe-2-Frühprüfung, erste
     Verteidigungslinie gegen still falsche Format-Kombis) — `measure.verify`
     prüft dieselben Kombis später ein zweites Mal über seine Toleranztabelle.
+    Der B1-View (`to_canonical_operands`) bringt die natürlichen Operanden auf
+    die kanonische Batched-GEMM-Form; `A_nat`/`B_nat` bleiben für die
+    `torch.einsum`-Verifikation erhalten.
     """
     err = check_dtype_combo(config.dtype, config.acc_dtype)
     if err:
@@ -102,10 +112,12 @@ def _build_inputs(config: RunConfig, M: int, N: int, K: int):
     if config.acc_dtype not in _TORCH_DTYPE:  # Sicherheitsnetz (Regeln decken das ab)
         raise NotImplementedError(f"acc-dtype {config.acc_dtype!r} nicht nach torch auflösbar.")
     torch.manual_seed(0)
-    A, B = _build_operands(config.dtype, M, N, K)
+    A_nat, B_nat = _build_natural_operands(config.dtype, canonical.a_natural_shape,
+                                           canonical.b_natural_shape)
+    A_c, B_c = to_canonical_operands(canonical, A_nat, B_nat)
     out_dt = _TORCH_DTYPE[config.acc_dtype]
-    C = torch.empty(M, N, dtype=out_dt, device="cuda")
-    return A, B, C
+    C_c = torch.empty(canonical.c_shape, dtype=out_dt, device="cuda")  # (B, M, N)
+    return A_nat, B_nat, A_c, B_c, C_c
 
 
 def _provenance(config: RunConfig) -> dict:
@@ -146,19 +158,20 @@ def run(config: RunConfig) -> RunResult:
             r.error = f"{r.error} | {note}" if r.error else note
         return r
 
-    # 1) IR → kanonische Größen
+    # 1) IR → kanonische Größen + B1-View-Spezifikation
     try:
         ir = parse(config)
         canonical = to_canonical(ir)
-        M, N, K = canonical.M, canonical.N, canonical.K
-        provenance["sizes"] = {"M": M, "N": N, "K": K}
+        M, N, K, B = canonical.M, canonical.N, canonical.K, canonical.B
+        provenance["sizes"] = {"M": M, "N": N, "K": K, "B": B}
     except Exception as e:
         return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")
 
-    # 2) Deterministische Eingaben — validiert dtype/Größen FRÜH, bevor ein
-    #    (evtl. irreführendes) Kernel-Artefakt geschrieben wird.
+    # 2) Deterministische Eingaben (natürliche Operanden) + kanonische Kernel-
+    #    Tensoren. Validiert dtype/Größen FRÜH, bevor ein (evtl. irreführendes)
+    #    Kernel-Artefakt geschrieben wird.
     try:
-        A, B, C = _build_inputs(config, M, N, K)
+        A_nat, B_nat, A_c, B_c, C_c = _build_inputs(config, canonical)
     except Exception as e:
         return _result(STATUS_COMPILE_ERROR, error=f"input build: {type(e).__name__}: {e}")
 
@@ -181,15 +194,17 @@ def run(config: RunConfig) -> RunResult:
 
     # 4) Kalt-Lauf = compile_ms (host-seitiger cuTile-JIT); füllt C für verify.
     try:
-        timing["compile_ms"] = round(time_first_launch(comp.launch, A, B, C), 3)
+        timing["compile_ms"] = round(time_first_launch(comp.launch, A_c, B_c, C_c), 3)
     except ct.TileError as e:
         return _result(STATUS_COMPILE_ERROR, error=f"cuTile-JIT: {type(e).__name__}: {str(e)[:400]}")
     except Exception as e:
         return _result(STATUS_RUN_ERROR, error=f"kalt-launch: {type(e).__name__}: {str(e)[:400]}")
 
-    # 5) verify-before-trust: gegen fp32-Referenz, bevor Zahlen getraut werden.
+    # 5) verify-before-trust: kanonischen Output in die natürliche einsum-Shape
+    #    zurückführen, dann gegen die fp32-`torch.einsum`-Referenz prüfen.
     try:
-        accuracy = verify(C, A, B, config)
+        C_nat = from_canonical_output(canonical, C_c)   # (1,M,N) → natürliche Output-Shape
+        accuracy = verify(C_nat, A_nat, B_nat, config)
     except NotImplementedError as e:
         return _result(STATUS_COMPILE_ERROR, error=f"verify: {type(e).__name__}: {e}")
     except Exception as e:
@@ -203,7 +218,7 @@ def run(config: RunConfig) -> RunResult:
 
     # 6) Warme Messung (=run_ms) + Metriken (TFLOP/s)
     try:
-        b = benchmark(comp.launch, A, B, C)
+        b = benchmark(comp.launch, A_c, B_c, C_c)
         timing["run_ms"] = round(b["run_ms"], 5)      # Median (unveränderter Key)
         timing["min_ms"] = round(b["min_ms"], 5)      # schnellste Iteration
         timing["p90_ms"] = round(b["p90_ms"], 5)      # 90.-Perzentil (Ausreißer-Kopf)
@@ -212,7 +227,7 @@ def run(config: RunConfig) -> RunResult:
         # compute_metrics-dict komplett übernehmen (nicht neu bauen) → die
         # TZ-4-Keys (GB/s, arithm. Intensität, %-Peak) fließen automatisch mit;
         # dtype/acc_dtype werden für Bytes/Peak gebraucht.
-        metrics = compute_metrics(M, N, K, b["run_ms"], config.dtype, config.acc_dtype)
+        metrics = compute_metrics(M, N, K, b["run_ms"], config.dtype, config.acc_dtype, B=B)
         metrics["tflops"] = round(metrics["tflops"], 3)
     except Exception as e:
         return _result(STATUS_RUN_ERROR, error=f"bench: {type(e).__name__}: {str(e)[:400]}")
@@ -226,7 +241,7 @@ def run(config: RunConfig) -> RunResult:
     #    kippt den bereits verifizierten+gemessenen ok-Lauf NICHT (graceful).
     if config.baselines:
         try:
-            metrics["baselines"] = measure_baselines(config.baselines, A, B, C, config)
+            metrics["baselines"] = measure_baselines(config.baselines, A_c, B_c, C_c, config)
         except Exception as e:  # noqa: BLE001
             metrics["baselines"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 

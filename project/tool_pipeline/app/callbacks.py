@@ -28,7 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import dash_bootstrap_components as dbc
-from dash import Input, Output, State, dcc, html
+from dash import ALL, Input, Output, State, dcc, html
 from filelock import FileLock, Timeout
 
 from .components import charts, code_panel, controls, kpis
@@ -147,28 +147,32 @@ def render_comparison(results) -> list:
     return [p for p in parts if p is not None]
 
 
-def execute_run(m, n, k, selection, tm=None, tn=None, tk=None,
+def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
                 swizzle=False, baselines=None, progress=None) -> list:
     """Reine Ablauflogik des Batch-Vergleichs (Dash-frei, headless testbar):
     validieren → RunConfig je Format → EIN GPU-Lock → ``run()`` je Format → rendern.
 
     Gibt **immer** eine Liste von Main-Komponenten zurück (nie eine Exception):
-    ungültige Größen/Tile/Auswahl → Warnung (kein GPU-Lauf); GPU belegt →
+    ungültiger Ausdruck/Größen/Tile/Auswahl → Warnung (kein GPU-Lauf); GPU belegt →
     freundliche Meldung; sonst der gerenderte Vergleich (inkl. sauber angezeigter
     Fehler-Stati).
 
-    ``tm/tn/tk`` (Tile, gelten für die ganze Auswahl) und ``swizzle`` steuern die
-    Kachelung; ``tm/tn/tk=None`` ⇒ RunConfig-Default-Tile. ``baselines`` ist die
-    (evtl. leere) Liste zuzuschaltender Vergleiche. ``progress`` ist der optionale
-    Dash-``set_progress``-Callback → headless mit ``None`` testbar.
+    ``expr`` ist der einsum-Ausdruck (Presets/Freitext), ``dim_sizes`` das Roh-dict
+    Index→Größe (aus den dynamischen Feldern). ``tm/tn/tk`` (Tile) + ``swizzle``
+    steuern die Kachelung; ``tm/tn/tk=None`` ⇒ RunConfig-Default-Tile. ``baselines``
+    ist die (evtl. leere) Liste zuzuschaltender Vergleiche. ``progress`` ist der
+    optionale Dash-``set_progress``-Callback → headless mit ``None`` testbar.
     """
     def _set(pct: int, text: str) -> None:
         if progress is not None:
             progress((pct, text))
 
-    err = controls.validate_sizes(m, n, k)
+    err = controls.validate_expr(expr)
     if err:
-        return [_alert("Ungültige Eingabe", err, "warning")]
+        return [_alert("Ungültiger Ausdruck", err, "warning")]
+    err = controls.validate_dim_sizes(expr, dim_sizes)
+    if err:
+        return [_alert("Ungültige Größe", err, "warning")]
     err = controls.validate_selection(selection)
     if err:
         return [_alert("Ungültige Auswahl", err, "warning")]
@@ -194,7 +198,7 @@ def execute_run(m, n, k, selection, tm=None, tn=None, tk=None,
     # die Zusage „gibt immer eine Liste zurück, nie eine Exception" hält (Naht-
     # Vertrag; Fund A des Error-Audits). ``finally`` setzt Balken/Text zurück.
     try:
-        configs = controls.configs_from_selection(m, n, k, selection, tile=tile,
+        configs = controls.configs_from_selection(expr, dim_sizes, selection, tile=tile,
                                                    swizzle=swizzle, baselines=baselines)
         from tool_pipeline.run import run  # lazy → Haupt-Prozess bleibt CUDA-frei
         _GPU_LOCK.parent.mkdir(parents=True, exist_ok=True)
@@ -216,15 +220,54 @@ def execute_run(m, n, k, selection, tm=None, tn=None, tk=None,
         _set(100, "")  # Balken/Statustext zurücksetzen, egal wie der Batch endete
 
 
-def register(app) -> None:
-    """Den Background-Vergleichs-Callback an der App registrieren (aus ``create_app``)."""
+def _expr_info(expr):
+    """Info-Zeile unter dem Ausdrucksfeld: aufgelöster (expliziter) Ausdruck +
+    Kategorie je Index (M/N/K/Batch) — macht die Klassifikation sichtbar."""
+    resolved = controls.resolve_expr(expr)
+    cats = controls.index_categories(expr)
+    parts = ", ".join(f"{d}:{c}" for d, c in cats.items())
+    children = [html.Span("→ ", style={"color": "#6b7280"}), html.Code(resolved)]
+    if parts:
+        children.append(html.Span(f"   ·   {parts}", style={"color": "#6b7280"}))
+    return html.Span(children)
 
+
+def register(app) -> None:
+    """Callbacks registrieren: Preset→Ausdruck, Ausdruck→Größenfelder, Background-Vergleich."""
+
+    # 1) Preset-Dropdown füllt den Ausdruck (der Freitext bleibt danach editierbar).
+    @app.callback(
+        Output(controls.ID_EXPR, "value"),
+        Input(controls.ID_PRESET, "value"),
+        prevent_initial_call=True,
+    )
+    def _apply_preset(preset_expr):
+        return preset_expr or controls._DEFAULT_EXPR
+
+    # 2) Ausdruck → dynamische Größenfelder (je Index) + Info/Fehler. Bereits
+    #    eingegebene Größen bleiben erhalten; ungültiger Ausdruck → nur Fehlertext,
+    #    keine Felder (der Run-Callback lehnt ihn dann ebenfalls sauber ab).
+    @app.callback(
+        Output(controls.ID_INDEX_SIZES, "children"),
+        Output(controls.ID_EXPR_INFO, "children"),
+        Input(controls.ID_EXPR, "value"),
+        State({"type": controls.INDEX_SIZE_TYPE, "index": ALL}, "id"),
+        State({"type": controls.INDEX_SIZE_TYPE, "index": ALL}, "value"),
+    )
+    def _rebuild_index_sizes(expr, cur_ids, cur_vals):
+        err = controls.validate_expr(expr)
+        prev = controls.dim_sizes_from_state(cur_ids, cur_vals)  # eingegebene Größen erhalten
+        if err:
+            return [], html.Span(err, style={"color": "#b91c1c"})
+        return controls.index_size_inputs(expr, values=prev), _expr_info(expr)
+
+    # 3) Haupt-Callback (Background): Ausdruck + Größen (Pattern-Matching) + Achsen.
     @app.callback(
         Output("main", "children"),
         Input(controls.ID_RUN, "n_clicks"),
-        State(controls.ID_M, "value"),
-        State(controls.ID_N, "value"),
-        State(controls.ID_K, "value"),
+        State(controls.ID_EXPR, "value"),
+        State({"type": controls.INDEX_SIZE_TYPE, "index": ALL}, "id"),
+        State({"type": controls.INDEX_SIZE_TYPE, "index": ALL}, "value"),
         State(controls.ID_DTYPES, "value"),
         State(controls.ID_TILE_TM, "value"),
         State(controls.ID_TILE_TN, "value"),
@@ -241,6 +284,8 @@ def register(app) -> None:
         cancel=[Input(controls.ID_CANCEL, "n_clicks")],
         prevent_initial_call=True,
     )
-    def _on_run(set_progress, n_clicks, m, n, k, selection, tm, tn, tk, swizzle, baselines):
-        return execute_run(m, n, k, selection, tm=tm, tn=tn, tk=tk,
+    def _on_run(set_progress, n_clicks, expr, size_ids, size_vals, selection,
+                tm, tn, tk, swizzle, baselines):
+        dim_sizes = controls.dim_sizes_from_state(size_ids, size_vals)
+        return execute_run(expr, dim_sizes, selection, tm=tm, tn=tn, tk=tk,
                            swizzle=swizzle, baselines=baselines, progress=set_progress)

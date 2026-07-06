@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tool_pipeline.hardware import peak_tflops  # noqa: E402
 from tool_pipeline.measure.bench import _summarize_times  # noqa: E402
-from tool_pipeline.measure.metrics import compute_metrics, gemm_bytes  # noqa: E402
+from tool_pipeline.measure.metrics import compute_metrics, gemm_bytes, gemm_flops  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +77,20 @@ def test_compute_metrics_known_values():
     assert abs(m["tflops"] - 0.268435456) < 1e-9, m
     assert m["percent_peak_flops"] == 0.1, m
     assert m["percent_peak_bw"] == 0.8, m
+
+
+def test_batched_metrics_scale_with_B():
+    """B (Batch) skaliert FLOPs UND Bytes gemeinsam linear: tflops/gbps ×B, die
+    arithmetische Intensität (FLOP/Byte) bleibt batch-unabhängig. Default B=1
+    lässt TZ 1–5 unverändert (die anderen Metrik-Tests belegen das)."""
+    assert gemm_flops(512, 512, 512, B=4) == 4 * gemm_flops(512, 512, 512)
+    assert (gemm_bytes(512, 512, 512, "fp16", "fp32", B=4)
+            == 4 * gemm_bytes(512, 512, 512, "fp16", "fp32"))
+    m1 = compute_metrics(512, 512, 512, 1.0, "fp16", "fp32")
+    m4 = compute_metrics(512, 512, 512, 1.0, "fp16", "fp32", B=4)
+    assert m4["arithmetic_intensity"] == m1["arithmetic_intensity"] == 128.0, (m1, m4)
+    assert abs(m4["tflops"] - 4 * m1["tflops"]) < 1e-9, (m1["tflops"], m4["tflops"])
+    assert m4["gbps"] == round(4 * 2.097152, 2), m4      # gbps ×B, danach gerundet (8.39)
 
 
 def test_compute_metrics_fp32_peak_none():
@@ -169,9 +183,9 @@ def test_benchmark_returns_distribution_keys():
     cfg = RunConfig(dim_sizes={"i": 256, "k": 256, "j": 256})
     comp = load_kernel(cfg, emit(cfg))
     torch.manual_seed(0)
-    A = torch.randn(256, 256, dtype=torch.float16, device="cuda")
-    B = torch.randn(256, 256, dtype=torch.float16, device="cuda")
-    C = torch.empty(256, 256, dtype=torch.float32, device="cuda")
+    A = torch.randn(1, 256, 256, dtype=torch.float16, device="cuda")   # kanonisch (B,M,K), B=1
+    B = torch.randn(1, 256, 256, dtype=torch.float16, device="cuda")
+    C = torch.empty(1, 256, 256, dtype=torch.float32, device="cuda")
     comp.launch(A, B, C)             # Kalt-Lauf (cuTile-JIT)
     torch.cuda.synchronize()
 
@@ -196,9 +210,9 @@ def test_benchmark_flush_toggle_runs():
     cfg = RunConfig(dim_sizes={"i": 128, "k": 128, "j": 128})
     comp = load_kernel(cfg, emit(cfg))
     torch.manual_seed(0)
-    A = torch.randn(128, 128, dtype=torch.float16, device="cuda")
-    B = torch.randn(128, 128, dtype=torch.float16, device="cuda")
-    C = torch.empty(128, 128, dtype=torch.float32, device="cuda")
+    A = torch.randn(1, 128, 128, dtype=torch.float16, device="cuda")   # kanonisch (B,M,K), B=1
+    B = torch.randn(1, 128, 128, dtype=torch.float16, device="cuda")
+    C = torch.empty(1, 128, 128, dtype=torch.float32, device="cuda")
     comp.launch(A, B, C)
     torch.cuda.synchronize()
     b = benchmark(comp.launch, A, B, C, warmup=2, iters=5, flush_l2=False)
