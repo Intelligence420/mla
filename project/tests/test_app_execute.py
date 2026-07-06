@@ -74,12 +74,16 @@ def _redirect_store():
     return lambda: setattr(S, "append_result", orig)
 
 
+_EXPR = "ik,kj->ij"                                    # Default-GEMM (i=M, k=K, j=N)
+_DS = {"i": 128, "k": 64, "j": 128}                    # glatte Tile-Vielfache
+
+
 def test_execute_batch_renders_charts_kpis_verify_code():
     """Gültiger 2-Format-Batch → echter GPU-Lauf: drei Charts + Status ok + KPIs +
     Verify PASS + Code des primären Formats; beide Formate im Status-Strip."""
     restore = _redirect_store()
     try:
-        comps = execute_run(128, 128, 64, _SEL)   # i=M, k=K, j=N (glatte Tile-Vielfache)
+        comps = execute_run(_EXPR, dict(_DS), _SEL)
     finally:
         restore()
     assert isinstance(comps, list) and comps, "execute_run muss eine nicht-leere Liste liefern"
@@ -93,14 +97,29 @@ def test_execute_batch_renders_charts_kpis_verify_code():
     assert "fp16 → fp32" in txt and "bf16 → fp32" in txt, "Status-Strip zeigt nicht beide Formate"
 
 
+def test_execute_batched_expression():
+    """Ein echter **Batched**-Ausdruck (bik,bkj->bij) läuft über die UI-Naht:
+    verifiziert und erscheint in den drei Charts (die Roofline bekommt einen batched
+    Punkt) — der TZ-6-Kern in der GUI."""
+    restore = _redirect_store()
+    try:
+        comps = execute_run("bik,bkj->bij", {"b": 2, "i": 128, "k": 128, "j": 128},
+                            [combo_key("fp16", "fp32")])
+    finally:
+        restore()
+    assert isinstance(comps, list) and comps
+    assert _types(comps).count("Graph") == 3, "drei Vergleichs-Charts erwartet"
+    txt = _text(comps)
+    assert "erfolgreich" in txt and "PASS" in txt, f"kein ok/Verify: {txt[:300]}"
+
+
 def test_execute_with_tile_swizzle_baselines():
     """Nicht-Default-Tile (64/64/32) + Swizzle + beide Baselines fließen durch →
     echter Lauf mit drei Charts; der Lauf verifiziert (kein Crash)."""
     restore = _redirect_store()
     try:
-        comps = execute_run(256, 256, 128, [combo_key("fp16", "fp32")],
-                            tm=64, tn=64, tk=32, swizzle=True,
-                            baselines=["cublas", "naive"])
+        comps = execute_run(_EXPR, {"i": 256, "k": 128, "j": 256}, [combo_key("fp16", "fp32")],
+                            tm=64, tn=64, tk=32, swizzle=True, baselines=["cublas", "naive"])
     finally:
         restore()
     assert isinstance(comps, list) and comps
@@ -111,10 +130,10 @@ def test_execute_with_tile_swizzle_baselines():
 
 def test_execute_swizzle_both_compares():
     """Swizzle-Modus 'both' → je Format zwei Läufe (ohne + mit Swizzle): zwei
-    Detail-Tabs (einer mit '· Swizzle') und die drei Vergleichs-Charts."""
+    Detail-Tabs (einer mit '· sw') und die drei Vergleichs-Charts."""
     restore = _redirect_store()
     try:
-        comps = execute_run(256, 256, 128, [combo_key("fp16", "fp32")],
+        comps = execute_run(_EXPR, {"i": 256, "k": 128, "j": 256}, [combo_key("fp16", "fp32")],
                             tm=128, tn=128, tk=64, swizzle="both")
     finally:
         restore()
@@ -127,7 +146,7 @@ def test_execute_swizzle_both_compares():
 
 def test_execute_invalid_tile_no_run():
     """Unzulässiger Tile-Wert → Warnung, KEIN GPU-Lauf."""
-    comps = execute_run(128, 128, 64, [combo_key("fp16", "fp32")], tm=48, tn=128, tk=64)
+    comps = execute_run(_EXPR, dict(_DS), [combo_key("fp16", "fp32")], tm=48, tn=128, tk=64)
     txt = _text(comps)
     assert "Ungültige Kachelung" in txt, txt[:200]
     assert _types(comps).count("Graph") == 0, "kein Lauf bei ungültigem Tile erwartet"
@@ -135,15 +154,23 @@ def test_execute_invalid_tile_no_run():
 
 def test_execute_invalid_sizes_no_run():
     """Ungültige Größe → Warnung, KEIN GPU-Lauf (keine Charts/KPIs/Code)."""
-    comps = execute_run(0, 128, 64, _SEL)
+    comps = execute_run(_EXPR, {"i": 0, "k": 64, "j": 128}, _SEL)
     txt = _text(comps)
-    assert "Ungültige Eingabe" in txt, txt[:200]
+    assert "Ungültige Größe" in txt, txt[:200]
     assert _types(comps).count("Graph") == 0 and "ct.mma" not in txt, "kein Lauf erwartet"
+
+
+def test_execute_invalid_expr_no_run():
+    """Ungültiger Ausdruck (Diagonale) → Warnung, KEIN GPU-Lauf."""
+    comps = execute_run("ii,ij->ij", {"i": 8, "j": 8}, _SEL)
+    txt = _text(comps)
+    assert "Ungültiger Ausdruck" in txt, txt[:200]
+    assert _types(comps).count("Graph") == 0, "kein Lauf bei ungültigem Ausdruck erwartet"
 
 
 def test_execute_empty_selection_no_run():
     """Leere Format-Auswahl → Warnung, KEIN GPU-Lauf."""
-    comps = execute_run(128, 128, 64, [])
+    comps = execute_run(_EXPR, dict(_DS), [])
     txt = _text(comps)
     assert "Ungültige Auswahl" in txt, txt[:200]
     assert _types(comps).count("Graph") == 0, "kein Lauf/Chart bei leerer Auswahl erwartet"
@@ -158,7 +185,7 @@ def test_execute_survives_run_import_failure():
     orig = sys.modules.get("tool_pipeline.run")
     sys.modules["tool_pipeline.run"] = stub
     try:
-        comps = execute_run(4, 4, 4, _SEL)         # gültig → Pfad erreicht den Import
+        comps = execute_run(_EXPR, {"i": 4, "k": 4, "j": 4}, _SEL)   # gültig → Pfad erreicht den Import
     finally:
         if orig is not None:
             sys.modules["tool_pipeline.run"] = orig
