@@ -1,12 +1,12 @@
-"""Headless-Tests der Dash-freien Controls-Logik (TZ 2 / TODO 3).
+"""Headless-Tests der Dash-freien Controls-Logik (TZ 6: allgemeiner Ausdruck).
 
 Die GUI ist schwer headless zu prüfen — deshalb ist die entscheidende Logik
-(Control-Werte → RunConfig, Eingabe-Validierung) bewusst aus dem Callback
-herausgezogen und hier ohne Dash-Server + ohne GPU geprüft. Der Rest der GUI
-(Layout-Mount, Live-Callback) wird durch das reale Starten der App abgedeckt.
+(Ausdruck→Indizes/Klassifikation, Größen→RunConfig, Validierung) bewusst aus dem
+Callback herausgezogen und hier ohne Dash-Server + ohne GPU geprüft. Der Rest der
+GUI (Layout-Mount, Live-Callback) wird durch das reale Starten der App abgedeckt.
 
 Lauffähig standalone (`python tests/test_app_controls.py`, aus `project/`) **und**
-via pytest. Braucht nur `dash`/`schema`, KEIN torch/cuTile/GPU.
+via pytest. Braucht nur `dash`/`schema`/`parse`, KEIN torch/cuTile/GPU.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import sys
 
-# project/ auf den Pfad, damit `tool_pipeline` importierbar ist (standalone-Lauf).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tool_pipeline.app.components.controls import (  # noqa: E402
@@ -22,11 +21,17 @@ from tool_pipeline.app.components.controls import (  # noqa: E402
     ID_BASELINE_INFO,
     ID_BASELINES,
     ID_DTYPE_INFO,
+    ID_EXPR,
+    ID_INDEX_SIZES,
+    ID_PRESET,
     ID_SWIZZLE,
     ID_TILE_INFO,
     ID_TILE_TK,
     ID_TILE_TM,
     ID_TILE_TN,
+    INDEX_SIZE_TYPE,
+    PRESETS,
+    _DEFAULT_EXPR,
     _DEFAULT_SELECTION,
     _DTYPE_ORDER,
     build_controls,
@@ -34,107 +39,165 @@ from tool_pipeline.app.components.controls import (  # noqa: E402
     combo_label,
     config_from_controls,
     configs_from_selection,
+    dim_sizes_from_state,
+    expr_indices,
+    index_categories,
+    index_size_inputs,
     parse_combo,
+    resolve_expr,
     swizzles_from_value,
     tile_from_controls,
     validate_baselines,
+    validate_dim_sizes,
+    validate_expr,
     validate_selection,
-    validate_sizes,
     validate_swizzle,
     validate_tile,
 )
 from tool_pipeline.schema import ALLOWED_ACC, RunConfig, check_dtype_combo  # noqa: E402
 
 
-def test_config_maps_sizes_to_correct_axes():
-    """i=M (Zeilen), k=K (Kontraktion), j=N (Spalten) — wie cli.build_config."""
-    cfg = config_from_controls(m=64, n=128, k=32)
-    assert cfg.dim_sizes == {"i": 64, "k": 32, "j": 128}, cfg.dim_sizes
+# --- Ausdruck: Indizes, Auflösung, Klassifikation ----------------------------
+def test_expr_indices_in_occurrence_order():
+    assert expr_indices("ik,kj->ij") == ["i", "k", "j"]
+    assert expr_indices("acspx,bspy->abcyx") == ["a", "c", "s", "p", "x", "b", "y"]
+    assert expr_indices("bik,bkj") == ["b", "i", "k", "j"]   # ohne '->' (impliziter Output)
 
 
-def test_config_keeps_tz1_defaults():
-    """Nur die Größen ändern sich; family/expr/dtype/acc/tile/swizzle = Default."""
-    d = RunConfig()
-    cfg = config_from_controls(10, 20, 30)
-    assert cfg.family == d.family == "contraction"
-    assert cfg.expr == d.expr == "ik,kj->ij"
-    assert (cfg.dtype, cfg.acc_dtype) == (d.dtype, d.acc_dtype) == ("fp16", "fp32")
-    assert cfg.tile == d.tile == {"TM": 128, "TN": 128, "TK": 64}
-    assert cfg.swizzle == d.swizzle is False
-    # expr treibt inputs/output (via __post_init__) unverändert
-    assert cfg.inputs == ["ik", "kj"] and cfg.output == "ij"
+def test_resolve_expr_adds_implicit_output():
+    assert resolve_expr("ik,kj->ij") == "ik,kj->ij"          # explizit unverändert
+    assert resolve_expr("ik,kj") == "ik,kj->ij"              # impliziter Output ergänzt
+    assert resolve_expr("bik,bkj") == "bik,bkj->ij"          # b kontrahiert (einsum-Konvention)
 
 
-def test_config_tolerates_float_and_string_inputs():
-    """Dash-Number-Input kann 512.0 oder "512" liefern → sauber zu int coercen."""
-    assert config_from_controls(512.0, 256.0, 128.0).dim_sizes == {"i": 512, "k": 128, "j": 256}
-    assert config_from_controls("64", "32", "16").dim_sizes == {"i": 64, "k": 16, "j": 32}
+def test_index_categories():
+    """Jeder Index bekommt seine Kategorie (M/N/K/Batch) — die Klassifikation sichtbar."""
+    cats = index_categories("bik,bkj->bij")
+    assert cats == {"b": "Batch", "i": "M", "k": "K", "j": "N"}, cats
+    cats2 = index_categories("acspx,bspy->abcyx")
+    assert cats2["s"] == "K" and cats2["p"] == "K"
+    assert cats2["a"] == cats2["c"] == cats2["x"] == "M"
+    assert cats2["b"] == cats2["y"] == "N"
 
 
-def test_validate_accepts_positive_ints():
-    """Gültige Größen → None (kein Fehler)."""
-    assert validate_sizes(512, 512, 512) is None
-    assert validate_sizes(1, 1, 1) is None
-    assert validate_sizes(512.0, 256, "128") is None  # float/str-Ganzzahlen ok
+def test_validate_expr():
+    """Gültige Ausdrücke → None; n-är/Diagonale/leer → deutscher Fehlertext."""
+    assert validate_expr("ik,kj->ij") is None
+    assert validate_expr("bik,bkj->bij") is None
+    assert validate_expr("ik,kj") is None                    # impliziter Output ok
+    assert validate_expr("") is not None
+    assert validate_expr("ij,jk,kl->il") is not None         # n-är
+    assert validate_expr("ii,ij->ij") is not None            # Diagonale
 
 
-def test_validate_rejects_bad_inputs():
-    """Leer/None/0/negativ/nicht-ganzzahlig/nicht-numerisch → deutscher Fehlertext."""
-    bad = [
-        (None, 8, 8), ("", 8, 8),          # fehlend
-        (0, 8, 8), (8, -3, 8),             # <= 0
-        (8, 8, 512.5),                     # nicht ganzzahlig
-        (8, "x", 8),                       # nicht numerisch
-        (float("inf"), 8, 8), (8, float("nan"), 8),  # N1: inf/nan (Float)
-        ("inf", 8, 8), (8, 8, "nan"),                # N1: inf/nan (String)
-    ]
-    for m, n, k in bad:
-        msg = validate_sizes(m, n, k)
-        assert isinstance(msg, str) and msg, f"erwartete Fehlermeldung für {(m, n, k)}, bekam {msg!r}"
+# --- Größen je Index ---------------------------------------------------------
+def test_dim_sizes_from_state():
+    ids = [{"type": INDEX_SIZE_TYPE, "index": "i"}, {"type": INDEX_SIZE_TYPE, "index": "k"}]
+    vals = [256, 64]
+    assert dim_sizes_from_state(ids, vals) == {"i": 256, "k": 64}
+    # None/leere Werte bleiben als Roh-Werte erhalten (Validierung fängt sie später).
+    assert dim_sizes_from_state([{"index": "i"}], [None]) == {"i": None}
 
 
-def test_validate_names_the_offending_dimension():
-    """Die Fehlermeldung nennt die betroffene Dimension (M/N/K)."""
-    assert validate_sizes(10, 0, 10).startswith("N")
-    assert validate_sizes(-1, 10, 10).startswith("M")
-    assert validate_sizes(10, 10, None).startswith("K")
+def test_validate_dim_sizes_ok_and_errors():
+    assert validate_dim_sizes("ik,kj->ij", {"i": 128, "k": 64, "j": 128}) is None
+    assert validate_dim_sizes("ik,kj->ij", {"i": 128, "k": 64}) is not None       # j fehlt
+    assert validate_dim_sizes("ik,kj->ij", {"i": 128, "k": 64, "j": 0}) is not None  # < 1
+    assert validate_dim_sizes("ik,kj->ij", {"i": 128, "k": 64, "j": 12.5}) is not None  # nicht ganz
+    assert validate_dim_sizes("ik,kj->ij", {"i": 128, "k": 64, "j": "x"}) is not None   # nicht Zahl
 
 
-# --- Format-Auswahl (TZ 3) ---------------------------------------------------
+def test_validate_dim_sizes_memory_guard():
+    """Zu große Größen → Fehler (OOM-Schutz), statt die geteilte Maschine zu killen."""
+    msg = validate_dim_sizes("ik,kj->ij", {"i": 50000, "k": 50000, "j": 50000})
+    assert msg is not None and "GiB" in msg, msg
+
+
+# --- RunConfig-Bau -----------------------------------------------------------
+def test_config_from_controls():
+    """Ausdruck + Größen → RunConfig (Ausdruck normalisiert, dim_sizes gesetzt)."""
+    cfg = config_from_controls("bik,bkj->bij", {"b": 2, "i": 64, "k": 32, "j": 48})
+    assert cfg.expr == "bik,bkj->bij"
+    assert cfg.dim_sizes == {"b": 2, "i": 64, "k": 32, "j": 48}
+    assert cfg.inputs == ["bik", "bkj"] and cfg.output == "bij"
+
+
+def test_config_from_controls_resolves_implicit_output():
+    """Impliziter Ausdruck → RunConfig mit expliziter Form (sauberer Slug/Echo)."""
+    cfg = config_from_controls("ik,kj", {"i": 8, "k": 4, "j": 6})
+    assert cfg.expr == "ik,kj->ij"
+
+
+def test_config_tolerates_float_and_string_sizes():
+    cfg = config_from_controls("ik,kj->ij", {"i": 512.0, "k": "128", "j": 256.0})
+    assert cfg.dim_sizes == {"i": 512, "k": 128, "j": 256}
+
+
+# --- Format-Auswahl → RunConfigs ---------------------------------------------
+def test_configs_from_selection_canonical_order():
+    """Auswahl → eine RunConfig je Kombi in kanonischer COMBOS-Reihenfolge."""
+    sel = [combo_key("fp8e4m3", "fp16"), combo_key("fp16", "fp32")]  # 'verkehrt' geklickt
+    cfgs = configs_from_selection("ik,kj->ij", {"i": 256, "k": 64, "j": 128}, sel)
+    assert [(c.dtype, c.acc_dtype) for c in cfgs] == [("fp16", "fp32"), ("fp8e4m3", "fp16")]
+    assert cfgs[0].dim_sizes == {"i": 256, "k": 64, "j": 128}
+    assert cfgs[0].expr == "ik,kj->ij"
+    assert cfgs[0].dim_sizes is not cfgs[1].dim_sizes
+
+
+def test_configs_from_selection_batched_expr():
+    """Batched-Ausdruck fließt in jede RunConfig (Kontraktions-Familie in der UI)."""
+    cfgs = configs_from_selection("bik,bkj->bij", {"b": 4, "i": 128, "k": 128, "j": 128},
+                                  [combo_key("fp16", "fp32")])
+    assert len(cfgs) == 1 and cfgs[0].expr == "bik,bkj->bij"
+    assert cfgs[0].dim_sizes == {"b": 4, "i": 128, "k": 128, "j": 128}
+
+
+def test_configs_from_selection_fills_tile_swizzle_baselines():
+    sel = [combo_key("fp16", "fp32"), combo_key("bf16", "fp32")]
+    cfgs = configs_from_selection("ik,kj->ij", {"i": 128, "k": 64, "j": 128}, sel,
+                                  tile={"TM": 64, "TN": 64, "TK": 32},
+                                  swizzle=True, baselines=["cublas", "naive"])
+    assert len(cfgs) == 2
+    for c in cfgs:
+        assert c.tile == {"TM": 64, "TN": 64, "TK": 32}
+        assert c.swizzle is True and c.baselines == ["cublas", "naive"]
+    assert cfgs[0].tile is not cfgs[1].tile and cfgs[0].baselines is not cfgs[1].baselines
+
+
+def test_configs_from_selection_default_tile_when_none():
+    c = configs_from_selection("ik,kj->ij", {"i": 128, "k": 64, "j": 128},
+                               [combo_key("fp16", "fp32")])[0]
+    assert c.tile == RunConfig().tile
+    assert c.swizzle is False and c.baselines == []
+
+
+def test_configs_from_selection_swizzle_both_expands():
+    cfgs = configs_from_selection("ik,kj->ij", {"i": 128, "k": 64, "j": 128},
+                                  [combo_key("fp16", "fp32")], swizzle="both", baselines=["cublas"])
+    assert len(cfgs) == 2
+    assert [c.swizzle for c in cfgs] == [False, True]
+    assert cfgs[0].baselines == ["cublas"] and cfgs[1].baselines == []
+
+
+# --- Format/Tile/Swizzle/Baseline (unverändert aus TZ 3/4) -------------------
 def test_combos_derive_from_schema_rules():
-    """COMBOS = genau die von ALLOWED_ACC erlaubten Kombis der wählbaren dtypes
-    (fp32-plain-Anker ausgelassen) — kein Drift zwischen UI und Acc-Regeln."""
     expected = {(d, a) for d in _DTYPE_ORDER for a in ALLOWED_ACC[d]}
     assert set(COMBOS) == expected, set(COMBOS) ^ expected
-    assert ("fp32", "fp32") not in COMBOS  # Anker bewusst nicht wählbar
+    assert ("fp32", "fp32") not in COMBOS
 
 
 def test_all_combos_are_acc_rule_valid():
-    """Jede angebotene Kombi ist nach den Acc-Regeln zulässig (durch Konstruktion)."""
     for (d, a) in COMBOS:
         assert check_dtype_combo(d, a) is None, (d, a)
 
 
 def test_combo_key_roundtrip():
-    """combo_key/parse_combo sind invers für alle Kombis."""
     for (d, a) in COMBOS:
         assert parse_combo(combo_key(d, a)) == (d, a)
     assert combo_label("fp8e4m3", "fp16") == "fp8e4m3 → fp16"
 
 
-def test_configs_from_selection_builds_one_config_per_combo_in_canonical_order():
-    """Auswahl → eine RunConfig je Kombi, IMMER in kanonischer COMBOS-Reihenfolge
-    (unabhängig von der Klick-Reihenfolge; erstes Element = primäres Format)."""
-    sel = [combo_key("fp8e4m3", "fp16"), combo_key("fp16", "fp32")]  # 'verkehrt' geklickt
-    cfgs = configs_from_selection(256, 128, 64, sel)
-    assert [(c.dtype, c.acc_dtype) for c in cfgs] == [("fp16", "fp32"), ("fp8e4m3", "fp16")]
-    # Achsen-Zuordnung i=M, k=K, j=N; jede Config hat ihr eigenes dim_sizes-dict.
-    assert cfgs[0].dim_sizes == {"i": 256, "k": 64, "j": 128}
-    assert cfgs[0].dim_sizes is not cfgs[1].dim_sizes
-
-
 def test_validate_selection():
-    """Leere Auswahl / unbekannter Schlüssel → Fehlertext; gültige Auswahl → None."""
     assert validate_selection([]) is not None
     assert validate_selection(None) is not None
     assert validate_selection(["fp16:fp32", "bogus:xx"]) is not None
@@ -142,23 +205,19 @@ def test_validate_selection():
 
 
 def test_default_selection_is_valid():
-    """Die Default-Auswahl ist nicht leer und vollständig regel-konform."""
     assert validate_selection(_DEFAULT_SELECTION) is None
 
 
-# --- Tile / Swizzle / Baselines (TZ 4) ---------------------------------------
 def test_validate_tile_accepts_and_rejects():
-    """Zulässige Zweierpotenzen → None; unbekannte/fehlende/nicht-numerische → Fehler."""
     assert validate_tile(128, 128, 64) is None
-    assert validate_tile("64", "256", "16") is None      # Strings aus dem Dropdown ok
-    assert validate_tile(48, 128, 64) is not None          # 48 ∉ erlaubte TM-Werte
-    assert validate_tile(128, 128, 256) is not None        # 256 ∉ erlaubte TK-Werte
-    assert validate_tile(128, 128, None) is not None       # fehlend
-    assert validate_tile(128, 128, "x") is not None        # nicht numerisch
+    assert validate_tile("64", "256", "16") is None
+    assert validate_tile(48, 128, 64) is not None
+    assert validate_tile(128, 128, 256) is not None
+    assert validate_tile(128, 128, None) is not None
+    assert validate_tile(128, 128, "x") is not None
 
 
 def test_validate_baselines():
-    """Leer/None ok (optional); bekannte Namen ok; unbekannter → Fehler."""
     assert validate_baselines([]) is None
     assert validate_baselines(None) is None
     assert validate_baselines(["cublas"]) is None
@@ -167,61 +226,47 @@ def test_validate_baselines():
 
 
 def test_tile_from_controls_coerces():
-    """Dropdown-Strings/Floats → int-Tile-dict."""
     assert tile_from_controls("128", "64", "32") == {"TM": 128, "TN": 64, "TK": 32}
     assert tile_from_controls(256.0, 128.0, 16.0) == {"TM": 256, "TN": 128, "TK": 16}
 
 
-def test_configs_from_selection_fills_tile_swizzle_baselines():
-    """Tile/Swizzle/Baselines werden auf JEDE erzeugte RunConfig gesetzt (ein festes
-    Tile für die ganze Auswahl)."""
-    sel = [combo_key("fp16", "fp32"), combo_key("bf16", "fp32")]
-    cfgs = configs_from_selection(128, 128, 64, sel, tile={"TM": 64, "TN": 64, "TK": 32},
-                                  swizzle=True, baselines=["cublas", "naive"])
-    assert len(cfgs) == 2
-    for c in cfgs:
-        assert c.tile == {"TM": 64, "TN": 64, "TK": 32}
-        assert c.swizzle is True
-        assert c.baselines == ["cublas", "naive"]
-    # eigene dicts je Config (keine geteilte Referenz)
-    assert cfgs[0].tile is not cfgs[1].tile and cfgs[0].baselines is not cfgs[1].baselines
-
-
-def test_configs_from_selection_default_tile_when_none():
-    """Ohne Tile-Argument bleibt das RunConfig-Default-Tile (Rückwärtskompatibilität)."""
-    c = configs_from_selection(128, 128, 64, [combo_key("fp16", "fp32")])[0]
-    assert c.tile == {"TM": 128, "TN": 128, "TK": 64}
-    assert c.swizzle is False and c.baselines == []
-
-
 def test_swizzles_from_value():
-    """Modus-String/bool/Liste → Liste der zu messenden Swizzle-Zustände."""
     assert swizzles_from_value("off") == [False]
     assert swizzles_from_value("on") == [True]
     assert swizzles_from_value("both") == [False, True]
-    assert swizzles_from_value(True) == [True]           # bool rückwärtskompatibel
+    assert swizzles_from_value(True) == [True]
     assert swizzles_from_value([False, True]) == [False, True]
 
 
 def test_validate_swizzle():
-    """Bekannte Modi/bools ok; unbekannter Modus-String → Fehler."""
     for v in ("off", "on", "both", True, False):
         assert validate_swizzle(v) is None
     assert validate_swizzle("bogus") is not None
 
 
-def test_configs_from_selection_swizzle_both_expands():
-    """swizzle='both' → je Format ZWEI Configs (ohne + mit); Baselines nur am ersten
-    (swizzle-unabhängig, kein doppeltes Baseline-Messen)."""
-    sel = [combo_key("fp16", "fp32")]
-    cfgs = configs_from_selection(128, 128, 64, sel, swizzle="both", baselines=["cublas"])
-    assert len(cfgs) == 2
-    assert [c.swizzle for c in cfgs] == [False, True]
-    assert cfgs[0].baselines == ["cublas"] and cfgs[1].baselines == []
+# --- Presets + Komponentenbaum -----------------------------------------------
+def test_presets_are_valid_expressions():
+    """Jedes Preset ist ein strukturell gültiger Ausdruck (sonst wäre der Knopf eine Falle)."""
+    assert PRESETS, "keine Presets definiert"
+    for label, expr in PRESETS:
+        assert isinstance(label, str) and label
+        assert validate_expr(expr) is None, (label, expr, validate_expr(expr))
+    assert _DEFAULT_EXPR in [e for _, e in PRESETS]
+
+
+def test_index_size_inputs_one_per_index():
+    """index_size_inputs baut ein Feld je Index mit Pattern-Matching-ID; Werte erhalten."""
+    fields = index_size_inputs("bik,bkj->bij", values={"b": 4})
+    ids = [(f.to_plotly_json()["props"]["children"][1].to_plotly_json()["props"]["id"])
+           for f in fields]
+    assert [i["index"] for i in ids] == ["b", "i", "k", "j"]
+    assert all(i["type"] == INDEX_SIZE_TYPE for i in ids)
+    # der erhaltene Wert für 'b' ist 4, der Rest der Default.
+    b_input = fields[0].to_plotly_json()["props"]["children"][1].to_plotly_json()["props"]
+    assert b_input["value"] == 4
 
 
 def _walk(node):
-    """Alle Dash-Komponenten (mit to_plotly_json) im Baum liefern (rekursiv)."""
     if hasattr(node, "to_plotly_json"):
         yield node
         ch = (node.to_plotly_json().get("props", {}) or {}).get("children")
@@ -235,43 +280,29 @@ def _walk(node):
             yield from _walk(c)
 
 
-def test_dtype_info_tooltip_targets_marker():
-    """Ein Hover-Tooltip erklärt 'links → rechts' und zielt auf den Info-Marker
-    neben der Format-Überschrift (sonst: stiller No-Op-Tooltip)."""
-    comps = list(_walk(build_controls()))
-    tips = [c for c in comps if c.to_plotly_json().get("type") == "Tooltip"]
-    assert tips, "kein dbc.Tooltip in den Controls gefunden"
-    assert any((t.to_plotly_json().get("props", {}) or {}).get("target") == ID_DTYPE_INFO
-               for t in tips), "Tooltip zielt nicht auf den Format-Info-Marker"
-
-
-def test_build_controls_has_tile_swizzle_baseline_ids():
-    """Die neuen Controls (TM/TN/TK-Dropdowns, Swizzle-Toggle, Baseline-Liste) sind
-    tatsächlich im Sidebar-Baum — sonst gingen die Callback-States ins Leere."""
-    ids = {(c.to_plotly_json().get("props", {}) or {}).get("id")
-           for c in _walk(build_controls())}
-    for i in (ID_TILE_TM, ID_TILE_TN, ID_TILE_TK, ID_SWIZZLE, ID_BASELINES):
+def test_build_controls_has_expr_and_axis_ids():
+    """Ausdrucks-/Preset-/Größen-Container + Tile/Swizzle/Baseline-IDs sind im Baum."""
+    # Liste (nicht set): Pattern-Matching-IDs sind dicts (nicht hashbar).
+    ids = [(c.to_plotly_json().get("props", {}) or {}).get("id")
+           for c in _walk(build_controls())]
+    for i in (ID_PRESET, ID_EXPR, ID_INDEX_SIZES, ID_TILE_TM, ID_TILE_TN, ID_TILE_TK,
+              ID_SWIZZLE, ID_BASELINES):
         assert i in ids, f"Control-ID {i!r} fehlt im Baum"
 
 
-def test_swizzle_control_is_radioitems_with_three_modes():
-    """Der Swizzle-Regler ist eine 3-fach-Auswahl (aus/an/beide)."""
-    sw = [c for c in _walk(build_controls())
-          if (c.to_plotly_json().get("props", {}) or {}).get("id") == ID_SWIZZLE]
-    assert sw, "Swizzle-Control fehlt"
-    j = sw[0].to_plotly_json()
-    assert j.get("type") == "RadioItems", j.get("type")
-    assert len(j.get("props", {}).get("options", [])) == 3
+def test_build_controls_default_index_fields():
+    """Der Größen-Container ist initial mit je einem Feld pro Default-Index (i,k,j) gefüllt."""
+    idx_dict_ids = [(c.to_plotly_json().get("props", {}) or {}).get("id")
+                    for c in _walk(build_controls())]
+    pm = [i for i in idx_dict_ids if isinstance(i, dict) and i.get("type") == INDEX_SIZE_TYPE]
+    assert sorted(i["index"] for i in pm) == ["i", "j", "k"], pm
 
 
-def test_tile_and_baseline_tooltips_target_markers():
-    """Je ein Hover-Tooltip erklärt Kachelung bzw. Baselines und zielt auf den
-    jeweiligen Info-Marker."""
-    tips = [c for c in _walk(build_controls())
-            if c.to_plotly_json().get("type") == "Tooltip"]
+def test_tooltips_target_markers():
+    tips = [c for c in _walk(build_controls()) if c.to_plotly_json().get("type") == "Tooltip"]
     targets = {(t.to_plotly_json().get("props", {}) or {}).get("target") for t in tips}
-    assert ID_TILE_INFO in targets, "Tile-Tooltip fehlt/zielt nicht auf den Marker"
-    assert ID_BASELINE_INFO in targets, "Baseline-Tooltip fehlt/zielt nicht auf den Marker"
+    for marker in (ID_DTYPE_INFO, ID_TILE_INFO, ID_BASELINE_INFO):
+        assert marker in targets, f"Tooltip für {marker!r} fehlt"
 
 
 def _main() -> int:
