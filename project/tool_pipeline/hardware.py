@@ -66,3 +66,24 @@ def dtype_bytes(dtype: str) -> int:
                       der Aufrufer `compute_metrics` fängt das graceful ab).
     """
     return DTYPE_BYTES[dtype]
+
+
+def ridge_point(dtype: str) -> Optional[float]:
+    """Ridge-Point des `dtype` in FLOP/Byte — die arithmetische Intensität, ab der
+    eine Operation vom Speicher- ins Rechen-Limit kippt (Schnittpunkt der
+    Bandbreiten-Schräge mit der Peak-Decke).
+
+    Die Bandbreiten-Schräge ist ``TFLOP/s = (MEM_BANDWIDTH_GBPS / 1000) · AI``
+    (273 GB/s ⇒ Steigung 0.273); Gleichsetzen mit dem Peak ergibt
+    ``ridge = peak_tflops(dtype) / (MEM_BANDWIDTH_GBPS / 1000)``. ``None``, wenn
+    der `dtype` keinen Tensor-Core-Peak hat (fp32/fp64) — dann gibt es keinen
+    Ridge (die Operation ist ohne Compute-Decke rein bandbreiten-beschränkt).
+
+    Auf der GB10 sind die Ridges sehr hoch (bf16 ≈ 780, fp8 ≈ 784, tf32 ≈ 194
+    FLOP/Byte); übliche GEMM-Größen (AI ≈ 128) liegen weit **links** davon ⇒
+    memory-bound — die zentrale Roofline-Aussage des Tools (TZ 5).
+    """
+    peak = peak_tflops(dtype)
+    if peak is None:
+        return None
+    return peak / (MEM_BANDWIDTH_GBPS / 1000.0)

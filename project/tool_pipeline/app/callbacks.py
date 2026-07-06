@@ -2,9 +2,9 @@
 
 Klick auf „Vergleichen" → Background-Callback (Worker-Prozess) → je gewähltem
 Format eine RunConfig → **ein** prozessübergreifender GPU-Lock über den ganzen
-Batch → die **eine Naht** ``run(config)`` je Format → zwei Vergleichs-Charts
-(Durchsatz + Genauigkeit↔Durchsatz) plus KPIs/Verify/Code des primären Formats
-in den Main-Bereich.
+Batch → die **eine Naht** ``run(config)`` je Format → drei Vergleichs-Charts
+(Durchsatz + Genauigkeit↔Durchsatz + Roofline) plus KPIs/Verify/Code des primären
+Formats in den Main-Bereich.
 
 Zwei Design-Punkte (PLAN §2/§8 + die TZ-2/TZ-3-Entscheidungen):
 
@@ -100,7 +100,8 @@ def render_comparison(results) -> list:
     """Batch-Ergebnisse → Main (von oben nach unten):
 
     1. Headline-Status des primären Formats,
-    2. beide Vergleichs-Charts **untereinander** (je volle Breite → größer),
+    2. die drei Vergleichs-Charts **untereinander** (je volle Breite → größer:
+       Durchsatz · Genauigkeit↔Durchsatz · Roofline),
     3. Status-Badges je Format,
     4. **Tabs je Format** — Durchsatz/Median/Verify/Kernel jedes Formats einzeln
        anschaubar und durchklickbar.
@@ -118,6 +119,10 @@ def render_comparison(results) -> list:
                       config=_GRAPH_CONFIG, style={"height": "420px", "width": "100%"}),
             dcc.Graph(figure=charts.figure_accuracy_throughput(results, primary_key),
                       config=_GRAPH_CONFIG, style={"height": "440px", "width": "100%"}),
+            # Dritter Chart (TZ 5): Roofline — macht die memory- vs compute-bound-
+            # Einordnung sichtbar (Punkte nur aus verifizierten Läufen).
+            dcc.Graph(figure=charts.figure_roofline(results, primary_key),
+                      config=_GRAPH_CONFIG, style={"height": "520px", "width": "100%"}),
         ],
         className="mb-2",
     )

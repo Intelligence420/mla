@@ -11,6 +11,7 @@ via pytest. Braucht ``plotly``/``dash``/``schema`` — KEIN torch/cuTile/GPU.
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -20,10 +21,13 @@ from tool_pipeline.app.components.charts import (  # noqa: E402
     _BASE_CUBLAS,
     _FORMAT_COLOR,
     _SERIES_CUTILE,
+    _bw_slope,
     figure_accuracy_throughput,
+    figure_roofline,
     figure_throughput,
 )
 from tool_pipeline.app.components.controls import combo_key, combo_label  # noqa: E402
+from tool_pipeline.hardware import ridge_point  # noqa: E402
 from tool_pipeline.schema import RunResult  # noqa: E402
 
 
@@ -241,6 +245,127 @@ def test_color_stable_across_different_selections():
     col_a = dict(zip(sel_a.data[0].y, sel_a.data[0].marker.color))[combo_label("fp8e4m3", "fp16")]
     col_b = dict(zip(sel_b.data[0].y, sel_b.data[0].marker.color))[combo_label("fp8e4m3", "fp16")]
     assert col_a == col_b == _FORMAT_COLOR[key]
+
+
+# --- Roofline (TZ 5) ---------------------------------------------------------
+def _roof(dtype, acc, tflops, ai, swz=False, rel=5e-7, pct=5.0) -> RunResult:
+    """ok-Lauf mit den Roofline-Zutaten in metrics (tflops + arithmetic_intensity)."""
+    return RunResult(
+        status="ok", config={"dtype": dtype, "acc_dtype": acc, "swizzle": swz},
+        metrics={"tflops": tflops, "arithmetic_intensity": ai,
+                 "percent_peak_flops": pct, "gbps": 85.0},
+        accuracy={"rel_err": rel, "max_abs_err": 1e-4, "passed": True})
+
+
+def _roof_set():
+    """Realistische GB10-Punkte: fp16 (AI 128, ohne+mit Swizzle), tf32 (AI ~85),
+    fp8e4m3 (AI 256) + ein verify_failed (darf NICHT im Chart landen)."""
+    return [_roof("fp16", "fp32", 19.0, 128.0),
+            _roof("fp16", "fp32", 20.0, 128.0, swz=True),
+            _roof("tf32", "fp32", 7.0, 85.33),
+            _roof("fp8e4m3", "fp16", 19.9, 256.0),
+            _failed("bf16", "fp32")]
+
+
+def _markers(fig):
+    return [t for t in fig.data if t.mode == "markers"]
+
+
+def _lines(fig):
+    return [t for t in fig.data if t.mode == "lines"]
+
+
+def test_roofline_only_verified_points():
+    """Nur ok-Läufe mit AI werden zu Punkten (verify_failed ausgelassen)."""
+    assert len(_markers(figure_roofline(_roof_set()))) == 4
+
+
+def test_roofline_points_at_ai_and_tflops():
+    """Ein Punkt liegt an (arithm. Intensität, erreichte TFLOP/s)."""
+    m = _markers(figure_roofline([_roof("tf32", "fp32", 7.0, 85.33)]))[0]
+    assert m.x[0] == 85.33 and m.y[0] == 7.0
+
+
+def test_roofline_ceilings_bundled_only_present():
+    """Decken nur für vorkommende dtypes; fp16(213)+fp8(214) gebündelt, tf32(53) separat."""
+    ceil = [t.name for t in _lines(figure_roofline(_roof_set())) if "Peak" in (t.name or "")]
+    assert any("213–214" in n for n in ceil), ceil
+    assert any("tf32-Peak ≈ 53" in n for n in ceil), ceil
+    assert len(ceil) == 2, ceil          # keine Decke für nicht vorkommende dtypes
+
+
+def test_roofline_bandwidth_slope_is_0273():
+    """Bandbreiten-Schräge y = 0.273·x (273 GB/s) — Steigung an beiden Enden gleich."""
+    slope = next(t for t in _lines(figure_roofline([_roof("fp16", "fp32", 19.0, 128.0)]))
+                 if "Bandbreite" in (t.name or ""))
+    for x, y in zip(slope.x, slope.y):
+        assert math.isclose(y / x, _bw_slope(), rel_tol=1e-9)
+
+
+def test_roofline_real_band_present():
+    """Dezentes reales Bandbreiten-Band (70–85 %) als gefüllte Zone."""
+    band = [t for t in figure_roofline([_roof("fp16", "fp32", 19.0, 128.0)]).data
+            if getattr(t, "fill", None) == "tonexty"]
+    assert band and "real erreichbar" in (band[0].name or ""), band
+
+
+def test_roofline_axes_are_log():
+    """AI und TFLOP/s spannen Größenordnungen → log-log-Achsen."""
+    fig = figure_roofline([_roof("fp16", "fp32", 19.0, 128.0)])
+    assert fig.layout.xaxis.type == "log" and fig.layout.yaxis.type == "log"
+
+
+def test_roofline_ridge_visible_and_marked():
+    """x-Bereich reicht bis zum Ridge (memory-bound-Aussage sichtbar); Ridge-Marker
+    + Annotation für das Primärformat."""
+    fig = figure_roofline([_roof("fp16", "fp32", 19.0, 128.0)],
+                          primary_key=combo_key("fp16", "fp32"))
+    assert 10 ** fig.layout.xaxis.range[1] >= ridge_point("fp16")   # Ridge im Sichtfeld
+    ridge = next(t for t in _lines(fig) if t.name == "Ridge")
+    assert math.isclose(ridge.x[0], ridge_point("fp16"), abs_tol=0.5)
+    assert any("Ridge fp16" in (a.text or "") for a in fig.layout.annotations)
+
+
+def test_roofline_swizzle_encoded_as_symbol():
+    """Swizzle über Marker-Form (Kreis = ohne, Raute = mit) — keine neue Farbe."""
+    fig = figure_roofline([_roof("fp16", "fp32", 19.0, 128.0, swz=False),
+                           _roof("fp16", "fp32", 20.0, 128.0, swz=True)])
+    syms = {t.name: t.marker.symbol for t in _markers(fig)}
+    assert syms["fp16 → fp32"] == "circle" and syms["fp16 → fp32 · sw"] == "diamond", syms
+
+
+def test_roofline_primary_marker_larger():
+    """Das primäre Format bekommt den größeren, umrandeten Marker (wie im Scatter)."""
+    sizes = {t.name: t.marker.size for t in
+             _markers(figure_roofline(_roof_set(), primary_key=combo_key("fp16", "fp32")))}
+    assert sizes["fp16 → fp32"] == 17
+    assert all(s == 11 for n, s in sizes.items() if not n.startswith("fp16 → fp32"))
+
+
+def test_roofline_color_follows_format():
+    """Punktfarbe folgt dem Format (geteilte Palette mit den anderen Charts)."""
+    fig = figure_roofline([_roof("fp8e4m3", "fp16", 19.9, 256.0)])
+    assert _markers(fig)[0].marker.color == _FORMAT_COLOR[combo_key("fp8e4m3", "fp16")]
+
+
+def test_roofline_empty_without_ai():
+    """ok-Läufe OHNE arithmetische Intensität → Platzhalter statt irreführender Punkt."""
+    fig = figure_roofline([_ok("fp16", "fp32", 18.5, 7e-7)])   # _ok setzt keine AI
+    assert fig.data == () and "keine verifizierten" in fig.layout.annotations[0].text
+
+
+def test_roofline_empty_when_no_verified_runs():
+    """Nur nicht-ok Läufe → Platzhalter, kein Crash."""
+    fig = figure_roofline([_failed("fp16", "fp32")])
+    assert fig.data == () and fig.layout.annotations
+
+
+def test_ridge_point_matches_known_numbers():
+    """Ridge-Rechnung gegen bekannte Zahlen (DoD): BF16-Peak 213 → Ridge ≈ 780."""
+    assert round(ridge_point("bf16")) == 780
+    assert round(ridge_point("fp8e4m3")) == 784
+    assert round(ridge_point("tf32")) == 194
+    assert ridge_point("fp32") is None and ridge_point("fp64") is None
 
 
 def _main() -> int:
