@@ -10,15 +10,17 @@ Schema in **M / N / K / Batch**-Dimensionen:
 
 Für `ik,kj->ij` ⇒ M=[i], N=[j], K=[k], Batch=[].
 
-Bewusst **minimal** (TZ 1): genau 2 Operanden, **expliziter** Output, keine
-Diagonalen/Wiederholungen. Die schwere Verallgemeinerung (n-äres einsum,
-impliziter Output, Familien-Routing, Optimizer-getriebenes fuse/split/permute)
-ist TZ 6/7 und wird hier **nicht** vorgebaut — die `M/N/K/Batch`-Klassifikation
-ist aber bereits die allgemeine, sodass TZ 6 nur darauf aufsetzt.
+Umfang: genau **2 Operanden**, Output **explizit** (`->…`) **oder implizit**
+(einsum-Konvention, TZ 6), keine Diagonalen/Wiederholungen je Operand. Bewusst
+draußen (später/optional): n-äres einsum (>2 Operanden), Diagonalen/Spuren. Die
+`M/N/K/Batch`-Klassifikation ist die allgemeine — der echte, view-/stride-basierte
+B1-Reshape (fuse/permute → kanonisches Batched-GEMM) setzt in `reshape.py`
+(config/optimizer-getrieben) darauf auf.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Union
 
@@ -100,9 +102,9 @@ class ContractionIR:
 def parse(config: Union[RunConfig, str], dim_sizes: dict[str, int] | None = None) -> ContractionIR:
     """`RunConfig` (oder roher Ausdruck + `dim_sizes`) → `ContractionIR`.
 
-    Validiert streng (loud-fail statt stilles Falschergebnis): expliziter
-    Output, genau 2 Operanden, keine wiederholten Indizes je Operand, jede
-    Größe bekannt, kein freier Output-Index.
+    Validiert streng (loud-fail statt stilles Falschergebnis): genau 2 Operanden,
+    Output explizit **oder** implizit (einsum-Konvention), keine wiederholten
+    Indizes je Operand, jede Größe bekannt, kein freier Output-Index.
     """
     if isinstance(config, RunConfig):
         if config.family != "contraction":
@@ -117,28 +119,49 @@ def parse(config: Union[RunConfig, str], dim_sizes: dict[str, int] | None = None
             raise ValueError("dim_sizes muss angegeben werden, wenn expr ein String ist.")
 
     expr = expr.replace(" ", "")
-    if "->" not in expr:
-        raise ValueError(f"TZ 1 braucht einen expliziten Output ('->') in '{expr}'.")
-    lhs, rhs = expr.split("->")
+
+    # Output explizit ('->…') übernehmen oder — fehlt der Pfeil — implizit ableiten
+    # (nach der Operanden-Validierung, s. u.).
+    if "->" in expr:
+        lhs, rhs = expr.split("->")
+        output = rhs
+    else:
+        lhs, output = expr, None
     inputs = [s for s in lhs.split(",") if s]
-    output = rhs
 
     if len(inputs) != 2:
         raise NotImplementedError(
-            f"TZ 1: genau 2 Operanden; '{expr}' hat {len(inputs)} "
-            f"(n-äres einsum = später)."
+            f"genau 2 Operanden; '{expr}' hat {len(inputs)} "
+            f"(n-äres einsum = später/optional)."
         )
 
     in0, in1 = inputs
-    set0, set1, set_out = set(in0), set(in1), set(output)
 
-    # Keine Diagonalen/Wiederholungen je Operand (TZ 1).
-    for name, idx in (("Operand 0", in0), ("Operand 1", in1), ("Output", output)):
+    # Keine Diagonalen/Wiederholungen je Operand.
+    for name, idx in (("Operand 0", in0), ("Operand 1", in1)):
         if len(set(idx)) != len(idx):
             raise NotImplementedError(
                 f"Wiederholter Index in {name} ('{idx}') — Diagonalen/Spuren "
-                f"sind in TZ 1 nicht unterstützt."
+                f"werden (bewusst) nicht unterstützt."
             )
+
+    # Impliziten Output nach einsum-Konvention ableiten: alle Indizes, die über
+    # beide Operanden GENAU EINMAL vorkommen, alphabetisch sortiert (mehrfach =
+    # kontrahiert). Ein in beiden Operanden stehender Index (Batch/K) ist daher
+    # NICHT im impliziten Output — Batched GEMM (Batch-Index behalten) braucht
+    # deshalb einen expliziten Output (z. B. `bik,bkj->bij`).
+    if output is None:
+        counts = Counter(in0 + in1)
+        output = "".join(sorted(i for i, c in counts.items() if c == 1))
+
+    # Wiederholter Index im (expliziten) Output ist unzulässig (Diagonale/Spur).
+    if len(set(output)) != len(output):
+        raise NotImplementedError(
+            f"Wiederholter Index im Output ('{output}') — Diagonalen/Spuren "
+            f"werden (bewusst) nicht unterstützt."
+        )
+
+    set0, set1, set_out = set(in0), set(in1), set(output)
 
     # Jeder Output-Index muss aus den Eingaben stammen.
     free = set_out - (set0 | set1)
