@@ -23,6 +23,7 @@ SETUP.md
 scripts/
 tar/README.md
 .claude/settings.local.json
+learning/
 
 # Assignment 6 Data
 assignments/06_assignment/data/
