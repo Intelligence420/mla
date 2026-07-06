@@ -1,18 +1,20 @@
 """GEMM-Template des Codegen (C1).
 
-Erzeugt vollstaendigen, self-contained cuTile-Modul-Quelltext fuer genau eine
-Kontraktion ``ik,kj->ij`` (Plain-GEMM). Der emittierte Modul enthaelt einen
-``@ct.kernel gemm(...)`` und eine Top-Level-Funktion ``launch(A, B, C)``.
+Erzeugt vollstaendigen, self-contained cuTile-Modul-Quelltext fuer das
+**kanonische Batched-GEMM** ``(B,M,K) x (B,K,N) -> (B,M,N)``. Jede
+2-Operanden-Kontraktion wird host-seitig (B1-Reshape, ``reshape.to_canonical``)
+auf genau diese Form gebracht -> der Codegen emittiert die EINE bewiesene
+Struktur. Der emittierte Modul enthaelt ``@ct.kernel gemm(...)`` + ``launch(A, B,
+C)``. ``B=1`` (Plain-GEMM) ist der Sonderfall Grid-Z=1 derselben Struktur.
 
 Vorlage/Orientierung gespiegelt aus:
-  * ``assignments/03_assignment/src/task_02.py`` (saubere Plain-GEMM-Vorlage)
-  * ``project/project-development/analysis/dtype_analyse.py`` (Batched-GEMM,
-    bewiesene Orientierung).
+  * ``assignments/05_assignment/src/kernel.py`` (kanonisches Batched-GEMM,
+    no-swap-Blaupause) + ``project/project-development/analysis/dtype_analyse.py``.
 
 Bewiesene Orientierung (drei unabhaengige GPU-Verifikationen, GB10 sm_121):
-pro k-Kachel ``a = load(A, (i, kk), (TM, TK))``, ``b = load(B, (kk, j),
-(TK, TN))``, ``acc = ct.mma(a, b, acc)`` -> ``(TM, TN)``. KEIN Operanden-Swap,
-KEIN Permute.
+je Batch ``bb`` + k-Kachel ``a = load(A, (bb, i, kk), (1, TM, TK))`` -> ``(TM,
+TK)``, ``b = load(B, (bb, kk, j), (1, TK, TN))`` -> ``(TK, TN)``, ``acc =
+ct.mma(a, b, acc)`` -> ``(TM, TN)``. KEIN Operanden-Swap, KEIN Permute.
 """
 
 # ---------------------------------------------------------------------------
@@ -54,7 +56,8 @@ _SWIZZLE_GROUP_M = 8
 
 def build_gemm_module(tile: dict, dtype: str, acc_dtype: str,
                       swizzle: bool = False) -> str:
-    """Baue den cuTile-Modul-Quelltext fuer ein Plain-GEMM ``ik,kj->ij``.
+    """Baue den cuTile-Modul-Quelltext fuer ein kanonisches Batched-GEMM
+    ``(B,M,K) x (B,K,N) -> (B,M,N)`` (B=1 = Plain-GEMM als Grid-Z=1).
 
     :param tile:      Tile-Literale ``{"TM": .., "TN": .., "TK": ..}``. Werden
                       als Zahlen-Literale fest in den Quelltext gebacken.
@@ -125,24 +128,29 @@ def build_gemm_module(tile: dict, dtype: str, acc_dtype: str,
             "    local = pid % num_pid_in_group\n"
             "    i = first_pid_m + (local % group_size_m)\n"
             "    j = local // group_size_m\n"
+            "    bb = ct.bid(2)   # Batch-Achse (Swizzle ordnet nur i/j um)\n"
         )
     else:
         swizzle_doc = ""
         group_const = ""
         bid_block = (
-            "    # 2D-Grid: i laeuft ueber M-Kacheln, j ueber N-Kacheln.\n"
+            "    # 3D-Grid: i ueber M-Kacheln, j ueber N-Kacheln, bb ueber den Batch.\n"
             "    i = ct.bid(0)\n"
             "    j = ct.bid(1)\n"
+            "    bb = ct.bid(2)\n"
         )
 
-    return f'''"""Generierter cuTile-GEMM (Codegen C1) — Kontraktion ik,kj->ij.
+    return f'''"""Generierter cuTile-GEMM (Codegen C1) — kanonisches Batched-GEMM (B,M,K)x(B,K,N)->(B,M,N).
 
+Jede 2-Operanden-Kontraktion wird host-seitig (B1-Reshape) auf diese Form
+gebracht; dieser Kernel emittiert die EINE bewiesene Struktur (B=1 = Plain-GEMM).
 {dtype_doc}
 Akkumulator: {acc_dtype} ({acc_ct}).
 Tile-Literale: TM={tm}, TN={tn}, TK={tk} (fest in den Quelltext gebacken).
 
 Bewiesene Orientierung: a=(TM,TK), b=(TK,TN), ct.mma(a,b,acc)->(TM,TN),
-KEIN Operanden-Swap, KEIN Permute. i=bid(0)=M-Kachel, j=bid(1)=N-Kachel.{swizzle_doc}
+KEIN Operanden-Swap, KEIN Permute. i=bid(0)=M-Kachel, j=bid(1)=N-Kachel,
+bb=bid(2)=Batch.{swizzle_doc}
 """
 
 import cuda.tile as ct
@@ -159,33 +167,40 @@ def gemm(A, B, C,
          M: ct.Constant[int],
          N: ct.Constant[int],
          K: ct.Constant[int]):
-    """Berechne eine (TM, TN)-Ausgabekachel von C = A @ B."""
+    """Berechne eine (TM, TN)-Ausgabekachel von C[bb] = A[bb] @ B[bb]."""
 {bid_block}
     # Akkumulator unabhaengig vom Input-dtype (Standardmuster aus cuTile).
     acc = ct.full((TM, TN), 0, dtype={acc_ct})
 
     # K-Schleife: ceil(K / TK) K-Kacheln; Padding-Zeros am Rand sind fuer den
     # MAC neutral (0 * x + acc == acc), daher kein explizites Masking noetig.
+    # Batch-Offset steckt im fuehrenden Index-Slot (bb) des 3D-Tensors; das
+    # (1, TM, TK)-Tile selektiert die Batch-Scheibe bb und wird auf 2D reshaped.
     for kk in range(ct.cdiv(K, TK)):
-        a = ct.load(A, index=(i, kk), shape=(TM, TK),
+        a = ct.load(A, index=(bb, i, kk), shape=(1, TM, TK),
                     padding_mode=ct.PaddingMode.ZERO)
-        b = ct.load(B, index=(kk, j), shape=(TK, TN),
+        a = ct.reshape(a, (TM, TK))
+        b = ct.load(B, index=(bb, kk, j), shape=(1, TK, TN),
                     padding_mode=ct.PaddingMode.ZERO)
+        b = ct.reshape(b, (TK, TN))
 {cast_block}        acc = ct.mma(a, b, acc)
 
-    # ct.store schneidet out-of-bounds Elemente am Rand automatisch ab.
-    ct.store(C, index=(i, j), tile=ct.astype(acc, C.dtype))
+    # (TM, TN)-Ergebnis in die (1, TM, TN)-Batch-Scheibe zurueckformen; ct.store
+    # schneidet out-of-bounds Elemente am M/N-Rand automatisch ab.
+    ct.store(C, index=(bb, i, j),
+             tile=ct.reshape(ct.astype(acc, C.dtype), (1, TM, TN)))
 
 
 def launch(A, B, C):
-    """Starte den GEMM-Kernel: C = A @ B (C ist vorab alloziert).
+    """Starte den batched GEMM-Kernel: C[bb] = A[bb] @ B[bb] (C vorab alloziert).
 
-    A=(M,K), B=(K,N), C=(M,N). Grid = (cdiv(M,TM), cdiv(N,TN)).
-    M/N/K sind ct.Constant[int]-Launch-Args; TM/TN/TK sind Quelltext-Literale.
+    A=(B,M,K), B=(B,K,N), C=(B,M,N). Grid = (cdiv(M,TM), cdiv(N,TN), B).
+    M/N/K sind ct.Constant[int]-Launch-Args; TM/TN/TK sind Quelltext-Literale;
+    die Batch-Groesse B kommt ueber die dritte Grid-Achse (bb=bid(2)).
     """
-    M, K = A.shape
-    _, N = B.shape
-    grid = (ct.cdiv(M, TM), ct.cdiv(N, TN))
+    Bb, M, K = A.shape
+    _, _, N = B.shape
+    grid = (ct.cdiv(M, TM), ct.cdiv(N, TN), Bb)
     ct.launch(torch.cuda.current_stream().cuda_stream,
               grid, gemm, (A, B, C, M, N, K))
     return C
@@ -224,22 +239,21 @@ if __name__ == "__main__":
         spec.loader.exec_module(mod)
         launch = mod.launch
 
-        M = N = K = 512
+        # Batched (B=2), um die neue Batch-Achse zu ueben; B=1 ist der Sonderfall.
+        Bb, M, N, K = 2, 512, 512, 512
         torch.manual_seed(0)
-        A = torch.randn(M, K, dtype=torch.float16, device="cuda")
-        B = torch.randn(K, N, dtype=torch.float16, device="cuda")
+        A = torch.randn(Bb, M, K, dtype=torch.float16, device="cuda")
+        B = torch.randn(Bb, K, N, dtype=torch.float16, device="cuda")
         # Konvention: Output-dtype = acc_dtype (hier fp32). So bleibt die
         # fp32-Akku-Praezision erhalten (ehrliches Ergebnis, max_err ~1e-4).
-        # Ein fp16-Output wuerde beim Store auf fp16 runden (~3e-2) und die
-        # Akku-Genauigkeit verschenken.
-        C = torch.empty(M, N, dtype=torch.float32, device="cuda")
+        C = torch.empty(Bb, M, N, dtype=torch.float32, device="cuda")
 
         launch(A, B, C)
         torch.cuda.synchronize()
 
-        ref = torch.einsum("ik,kj->ij", A.float(), B.float())
+        ref = torch.einsum("bik,bkj->bij", A.float(), B.float())
         max_abs_err = (C.float() - ref).abs().max().item()
         ok = torch.allclose(C.float(), ref, atol=2e-1, rtol=2e-2)
-        print(f"512^3 fp16->fp32: max_abs_err={max_abs_err:.3e} allclose={ok}")
-        assert ok, "generierter GEMM-Modul stimmt nicht gegen torch.einsum"
+        print(f"batched {Bb}x512^3 fp16->fp32: max_abs_err={max_abs_err:.3e} allclose={ok}")
+        assert ok, "generierter batched GEMM-Modul stimmt nicht gegen torch.einsum"
         print("OK: generierter Modul laeuft und stimmt.")

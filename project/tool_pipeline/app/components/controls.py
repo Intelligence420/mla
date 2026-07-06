@@ -1,23 +1,27 @@
-"""Controls-Sidebar: Größen M/N/K, die zu vergleichenden **Zahlenformate**,
-Run/Cancel + Progress, dazu die **read-only** Anzeige der festen Konfiguration.
+"""Controls-Sidebar: **einsum-Ausdruck** (Presets + Freitext + Größen je Index),
+die zu vergleichenden **Zahlenformate**, Kachelung/Swizzle, Baselines, Run/Cancel.
 
 Enthält die Dash-freie, **headless-testbare** Naht-Logik:
 
-* ``validate_sizes(m, n, k) -> str | None``               — Größen-Prüfung.
-* ``config_from_controls(m, n, k) -> RunConfig``          — Größen → eine
-  RunConfig (fp16→fp32-Default; von der Einzellauf-Naht weiterbenutzt).
-* ``configs_from_selection(m, n, k, sel) -> [RunConfig]`` — Größen + Format-
-  Auswahl → eine RunConfig je (dtype, acc)-Kombi (Batch-Vergleich, TZ 3).
-* ``validate_selection(sel) -> str | None``               — Auswahl-Prüfung.
+* ``expr_indices(expr) -> [str]``                          — eindeutige Indizes.
+* ``resolve_expr(expr) -> str``                            — expliziter Ausdruck (impliziter Output ergänzt).
+* ``validate_expr(expr) -> str | None``                    — Ausdruck strukturell prüfen.
+* ``index_size_inputs(expr, values=None) -> [Component]``  — Größenfeld je Index (dynamisch).
+* ``dim_sizes_from_state(ids, values) -> dict``            — Pattern-Matching-State → Roh-dict.
+* ``validate_dim_sizes(expr, dim_sizes) -> str | None``    — Größen + Speicher-Obergrenze prüfen.
+* ``config_from_controls(expr, dim_sizes) -> RunConfig``   — eine RunConfig.
+* ``configs_from_selection(expr, dim_sizes, sel, ...) -> [RunConfig]`` — je (dtype, acc) eine.
+* ``validate_selection/tile/baselines/swizzle``            — die übrigen Achsen.
 
 Die (dtype→acc)-Kombis (``COMBOS``) werden aus ``schema.ALLOWED_ACC`` abgeleitet
 (Single Source of Truth → kein Drift): unzulässige Acc-Kombis existieren dadurch
-gar nicht in der Auswahl — die **Acc-Regeln sind durch Konstruktion erzwungen**.
+gar nicht in der Auswahl.
 
-Naht-Regel (README): importiert NUR ``tool_pipeline.schema`` — **kein**
-run/torch/cuda, damit der Haupt-Prozess CUDA-frei (fork-sicher) bleibt. Die IDs
-sind als Konstanten exportiert, damit ``callbacks.py`` sie importiert statt
-Strings zu duplizieren.
+Naht-Regel: importiert nur ``schema`` und den **torch-freien** IR-Helfer
+``intermediate_representation.parse`` (für Klassifikation/Validierung des
+Ausdrucks — **kein** run/torch/cuda), damit der Haupt-Prozess CUDA-frei
+(fork-sicher) bleibt. Die IDs sind als Konstanten exportiert, damit
+``callbacks.py`` sie importiert statt Strings zu duplizieren.
 """
 
 from __future__ import annotations
@@ -28,10 +32,15 @@ from typing import Optional
 import dash_bootstrap_components as dbc
 from dash import html
 
+from ...intermediate_representation.parse import parse
 from ...schema import ALLOWED_ACC, RunConfig
 
 # --- Komponenten-IDs (von callbacks.py importiert) ---------------------------
-ID_M, ID_N, ID_K = "in-m", "in-n", "in-k"
+ID_PRESET = "sel-preset"          # Preset-Dropdown (füllt den Ausdruck)
+ID_EXPR = "in-expr"               # einsum-Ausdruck (Freitext, Source of Truth)
+ID_EXPR_INFO = "expr-info"        # aufgelöster Output / Klassifikation / Fehler
+ID_INDEX_SIZES = "index-sizes"    # Container der dynamischen Größenfelder je Index
+INDEX_SIZE_TYPE = "index-size"    # Pattern-Matching-Typ der Größenfelder
 ID_DTYPES = "sel-dtypes"          # Multi-Select der zu vergleichenden Formate
 ID_DTYPE_INFO = "dtypes-info"     # Info-Marker (Tooltip: erklärt 'links → rechts')
 ID_TILE_TM, ID_TILE_TN, ID_TILE_TK = "sel-tm", "sel-tn", "sel-tk"  # Tile-Dropdowns
@@ -42,19 +51,27 @@ ID_BASELINE_INFO = "baselines-info"
 ID_RUN, ID_CANCEL = "btn-run", "btn-cancel"
 ID_PROGRESS, ID_STATUS = "run-progress", "run-status"
 
-# Feste (nicht wählbare) Werte = die RunConfig-Defaults selbst (Single Source of
-# Truth). dtype/acc sind ab TZ 3 wählbar (siehe COMBOS) und daher NICHT mehr hier.
-_DEFAULT = RunConfig()
-_DEFAULT_SIZE = 512  # Startwert je Größe (= cli.py-Default; klein, deterministisch)
+# --- Ausdruck: Presets + Defaults --------------------------------------------
+_DEFAULT_EXPR = "ik,kj->ij"        # Plain-GEMM (= RunConfig-Default)
+_DEFAULT_INDEX_SIZE = 64           # Startwert je Index (klein/deterministisch; geteilte Maschine)
+# Speicher-Obergrenze (geschätzter Peak-Traffic) — schützt die geteilte Maschine vor OOM.
+_MAX_TENSOR_BYTES = 8 * 2**30      # 8 GiB
+
+# Kuratierte Presets (Label → Ausdruck). Deckt die Kontraktions-Familie ab:
+# Plain-GEMM, Batched, transponiert, mehrdim. M, allgemeine Tensor-Kontraktion.
+PRESETS = [
+    ("GEMM   ik,kj->ij", "ik,kj->ij"),
+    ("Batched GEMM   bik,bkj->bij", "bik,bkj->bij"),
+    ("A transponiert   ki,kj->ij", "ki,kj->ij"),
+    ("Mehrdim. M   ijk,kl->ijl", "ijk,kl->ijl"),
+    ("Tensor-Kontraktion   acspx,bspy->abcyx", "acspx,bspy->abcyx"),
+]
 
 # Anzeige-Reihenfolge der wählbaren Compute-dtypes. fp32-plain (Anker ohne
-# Tensor-Cores) ist baubar/verifizierbar, aber bewusst NICHT in der GUI-Auswahl
-# (Diagnose-Format, nur programmatisch via RunConfig) → hier ausgelassen.
+# Tensor-Cores) ist baubar/verifizierbar, aber bewusst NICHT in der GUI-Auswahl.
 _DTYPE_ORDER = ("fp16", "bf16", "tf32", "fp8e4m3", "fp8e5m2")
 
-# Wählbare Tile-Werte (Zweierpotenzen). TM/TN = Kantenlänge der Output-Kachel,
-# TK = K-Schrittweite. Aus dem RunConfig-Default (128/128/64) + kleineren/größeren
-# Zweierpotenzen — jede Kombi kompiliert + verifiziert (Tile-Matrix in test_codegen).
+# Wählbare Tile-Werte (Zweierpotenzen).
 _TILE_M_OPTIONS = (32, 64, 128, 256)
 _TILE_N_OPTIONS = (32, 64, 128, 256)
 _TILE_K_OPTIONS = (16, 32, 64, 128)
@@ -66,7 +83,7 @@ _BASELINE_OPTIONS = [
 ]
 _BASELINE_KEYS = {"cublas", "naive"}
 
-# L2-Swizzle-Modus: aus / an / beide (Vergleich ohne↔mit Swizzle nebeneinander).
+# L2-Swizzle-Modus: aus / an / beide.
 _SWIZZLE_OPTIONS = [
     {"label": "aus", "value": "off"},
     {"label": "an", "value": "on"},
@@ -91,9 +108,7 @@ def combo_label(dtype: str, acc: str) -> str:
     return f"{dtype} → {acc}"
 
 
-# Wählbare (dtype, acc)-Kombis: aus ALLOWED_ACC abgeleitet (kein Drift), pro
-# dtype fp32 (genau/Anker) vor fp16 (schneller). Das ist die vollständige, durch
-# Konstruktion regel-konforme Vergleichs-Auswahl.
+# Wählbare (dtype, acc)-Kombis: aus ALLOWED_ACC abgeleitet (kein Drift).
 COMBOS = [
     (d, a)
     for d in _DTYPE_ORDER
@@ -112,50 +127,124 @@ _LABEL = {"display": "block", "fontSize": "12.5px", "color": "#6b7280", "margin"
 
 
 # ---------------------------------------------------------------------------
-# Reine, testbare Naht-Logik (Dash-frei)
+# Reine, testbare Naht-Logik (Dash-frei) — Ausdruck
 # ---------------------------------------------------------------------------
-def validate_sizes(m, n, k) -> Optional[str]:
-    """Prüfe M/N/K; gib einen deutschen Fehlertext zurück oder ``None`` (ok).
+def expr_indices(expr: str) -> list[str]:
+    """Eindeutige Indizes eines einsum-Ausdrucks (in Auftritts-Reihenfolge über
+    die Operanden). Reine String-Logik (keine Validierung)."""
+    e = (expr or "").replace(" ", "")
+    lhs = e.split("->", 1)[0] if "->" in e else e
+    seen: list[str] = []
+    for ch in lhs.replace(",", ""):
+        if ch not in seen:
+            seen.append(ch)
+    return seen
 
-    Akzeptiert nur **positive ganze Zahlen**. Robust gegen das, was ein
-    Dash-Number-Input liefern kann: ``None``/"" (leer), Float (512.0) und
-    Zahlen-Strings ("512"). Ganzzahligkeit wird echt geprüft (512.5 → Fehler).
-    """
-    for name, v in (("M", m), ("N", n), ("K", k)):
-        if v is None or v == "":
-            return f"{name} fehlt — bitte eine positive ganze Zahl eingeben."
-        try:
-            fv = float(v)
-        except (TypeError, ValueError):
-            return f"{name} ist keine Zahl: {v!r}."
-        # inf/nan bestehen float(), würden aber int() zum Werfen bringen (N1) →
-        # früh abfangen, damit validate_sizes NIE eine Exception wirft.
-        if not math.isfinite(fv):
-            return f"{name} muss eine endliche Zahl sein (bekommen: {v!r})."
-        if fv != int(fv):
-            return f"{name} muss ganzzahlig sein (bekommen: {v!r})."
-        if int(fv) < 1:
-            return f"{name} muss ≥ 1 sein (bekommen: {int(fv)})."
+
+def resolve_expr(expr: str) -> str:
+    """Ausdruck in **explizite** Form bringen (impliziten Output nach einsum-
+    Konvention ergänzen). Erwartet einen strukturell gültigen Ausdruck."""
+    e = (expr or "").replace(" ", "")
+    if "->" in e:
+        return e
+    ir = parse(e, {d: 2 for d in expr_indices(e)})   # liefert den impliziten Output
+    return f"{','.join(ir.inputs)}->{ir.output}"
+
+
+def validate_expr(expr: str) -> Optional[str]:
+    """Prüfe den Ausdruck **strukturell** (genau 2 Operanden, keine Diagonalen,
+    gültiger Output) via `parse` mit Dummy-Größen. :returns: Fehlertext oder None."""
+    if not expr or not expr.strip():
+        return "Bitte einen einsum-Ausdruck eingeben (z. B. ik,kj->ij)."
+    idx = expr_indices(expr)
+    if not idx:
+        return "Der Ausdruck enthält keine Indizes."
+    try:
+        parse(expr, {d: 2 for d in idx})
+    except (ValueError, NotImplementedError) as e:
+        return str(e)
     return None
 
 
-def config_from_controls(m, n, k) -> RunConfig:
-    """M/N/K → ``RunConfig``. Nur die Größen werden gesetzt; alles andere bleibt
-    auf den TZ-2-Defaults (``ik,kj->ij``, fp16→fp32, Tile 128/128/64, kein Swizzle).
+def index_categories(expr: str) -> dict[str, str]:
+    """Index → Kategorie-Label (M/N/K/Batch) via `parse` (Dummy-Größen). Leeres
+    dict, wenn der Ausdruck (noch) nicht gültig ist."""
+    try:
+        ir = parse(expr, {d: 2 for d in expr_indices(expr)})
+    except (ValueError, NotImplementedError):
+        return {}
+    cat: dict[str, str] = {}
+    for d in ir.batch_dims:
+        cat[d] = "Batch"
+    for d in ir.m_dims:
+        cat[d] = "M"
+    for d in ir.n_dims:
+        cat[d] = "N"
+    for d in ir.k_dims:
+        cat[d] = "K"
+    return cat
 
-    Achsen-Zuordnung wie ``cli.build_config``: ``ik,kj->ij`` ⇒ i=M (Zeilen),
-    k=K (Kontraktion), j=N (Spalten). Erwartet gültige Eingaben (vorher
-    ``validate_sizes``); coerct tolerant über ``float`` (nimmt 512.0 / "512").
+
+def dim_sizes_from_state(ids, values) -> dict:
+    """Pattern-Matching-State (Liste von ``{'index': d}``-dicts + Werte) → Roh-dict
+    ``{d: value}`` (unkonvertiert — die Validierung/Coercion macht der Aufrufer)."""
+    out: dict = {}
+    for i, v in zip(ids or [], values or []):
+        d = i.get("index") if isinstance(i, dict) else None
+        if d is not None:
+            out[d] = v
+    return out
+
+
+def validate_dim_sizes(expr: str, dim_sizes: dict) -> Optional[str]:
+    """Prüfe die Größen je Index (positive ganze Zahl, alle vorhanden) und eine
+    **Speicher-Obergrenze** (OOM-Schutz auf der geteilten Maschine).
+
+    :returns: deutscher Fehlertext oder ``None`` (ok). Erwartet einen bereits
+              strukturell gültigen Ausdruck (sonst zuerst `validate_expr`).
     """
-    return RunConfig(dim_sizes={"i": int(float(m)), "k": int(float(k)), "j": int(float(n))})
+    idx = expr_indices(expr)
+    sizes: dict[str, int] = {}
+    for d in idx:
+        v = (dim_sizes or {}).get(d)
+        if v is None or v == "":
+            return f"Größe für Index '{d}' fehlt — bitte eine positive ganze Zahl eingeben."
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return f"Größe für Index '{d}' ist keine Zahl: {v!r}."
+        if not math.isfinite(fv):
+            return f"Größe für Index '{d}' muss endlich sein (bekommen: {v!r})."
+        if fv != int(fv):
+            return f"Größe für Index '{d}' muss ganzzahlig sein (bekommen: {v!r})."
+        if int(fv) < 1:
+            return f"Größe für Index '{d}' muss ≥ 1 sein (bekommen: {int(fv)})."
+        sizes[d] = int(fv)
+    # Struktur + fusionierte Größen (parse validiert erneut streng).
+    try:
+        ir = parse(expr, sizes)
+    except (ValueError, NotImplementedError) as e:
+        return str(e)
+    # Speicher-Obergrenze: grober Peak-Traffic (fp16-Inputs 2 B, fp32-Output 4 B).
+    est = 2 * ir.B * (ir.M * ir.K + ir.K * ir.N) + 4 * ir.B * ir.M * ir.N
+    if est > _MAX_TENSOR_BYTES:
+        return (f"Zu groß: ~{est / 2**30:.1f} GiB geschätzt (Grenze "
+                f"{_MAX_TENSOR_BYTES // 2**30} GiB) — OOM-Risiko auf der geteilten "
+                f"Maschine. Bitte kleinere Größen wählen.")
+    return None
+
+
+def config_from_controls(expr: str, dim_sizes: dict) -> RunConfig:
+    """Ausdruck + Größen → eine ``RunConfig`` (fp16→fp32-Default; von der
+    Einzellauf-Naht weiterbenutzt). Erwartet validierte Eingaben; coerct tolerant
+    über ``float`` und normalisiert den Ausdruck auf die explizite Form."""
+    idx = expr_indices(expr)
+    ds = {d: int(float(dim_sizes[d])) for d in idx}
+    return RunConfig(expr=resolve_expr(expr), dim_sizes=ds)
 
 
 def validate_selection(selection) -> Optional[str]:
-    """Prüfe die Format-Auswahl (Liste von ``combo_key``-Strings).
-
-    :returns: deutscher Fehlertext, oder ``None`` (ok). Leere Auswahl und
-              unbekannte Schlüssel werden abgelehnt.
-    """
+    """Prüfe die Format-Auswahl (Liste von ``combo_key``-Strings)."""
     if not selection:
         return "Bitte mindestens ein Zahlenformat für den Vergleich auswählen."
     unknown = [s for s in selection if s not in _VALID_KEYS]
@@ -165,12 +254,7 @@ def validate_selection(selection) -> Optional[str]:
 
 
 def validate_tile(tm, tn, tk) -> Optional[str]:
-    """Prüfe die Tile-Auswahl (TM/TN/TK) gegen die zulässigen Zweierpotenzen.
-
-    Zweite Verteidigungslinie: die Dropdowns bieten nur gültige Werte an, aber ein
-    unzulässiger (z. B. programmatischer) Wert soll einen sauberen Fehler geben
-    statt einen still nicht-baubaren Kernel. :returns: Fehlertext oder ``None``.
-    """
+    """Prüfe die Tile-Auswahl (TM/TN/TK) gegen die zulässigen Zweierpotenzen."""
     for name, v, allowed in (("TM", tm, _TILE_M_OPTIONS), ("TN", tn, _TILE_N_OPTIONS),
                              ("TK", tk, _TILE_K_OPTIONS)):
         if v is None or v == "":
@@ -185,10 +269,7 @@ def validate_tile(tm, tn, tk) -> Optional[str]:
 
 
 def validate_baselines(baselines) -> Optional[str]:
-    """Prüfe die Baseline-Auswahl (Teilmenge von ``cublas``/``naive``).
-
-    Keine Baseline ist zulässig (optional). :returns: Fehlertext oder ``None``.
-    """
+    """Prüfe die Baseline-Auswahl (Teilmenge von ``cublas``/``naive``)."""
     if not baselines:
         return None
     unknown = [b for b in baselines if b not in _BASELINE_KEYS]
@@ -198,12 +279,7 @@ def validate_baselines(baselines) -> Optional[str]:
 
 
 def swizzles_from_value(v) -> list:
-    """Swizzle-Steuerwert → Liste der zu messenden Swizzle-Zustände.
-
-    Nimmt den Modus-String der GUI (``"off"``/``"on"``/``"both"``), einen ``bool``
-    (Rückwärtskompatibilität) oder eine Liste. ``"both"`` ⇒ ``[False, True]``
-    (jedes Format zweimal: ohne UND mit Swizzle → A/B-Vergleich).
-    """
+    """Swizzle-Steuerwert → Liste der zu messenden Swizzle-Zustände."""
     if isinstance(v, str):
         return {"off": [False], "on": [True], "both": [False, True]}.get(v, [False])
     if isinstance(v, (list, tuple)):
@@ -219,40 +295,33 @@ def validate_swizzle(v) -> Optional[str]:
 
 
 def tile_from_controls(tm, tn, tk) -> dict:
-    """TM/TN/TK (evtl. als Strings aus den Dropdowns) → Tile-dict für ``RunConfig``.
-
-    Tolerant über ``float`` (nimmt "128"/128.0). Erwartet vorher ``validate_tile``.
-    """
+    """TM/TN/TK (evtl. als Strings aus den Dropdowns) → Tile-dict für ``RunConfig``."""
     return {"TM": int(float(tm)), "TN": int(float(tn)), "TK": int(float(tk))}
 
 
-def configs_from_selection(m, n, k, selection,
+def configs_from_selection(expr, dim_sizes, selection,
                            tile=None, swizzle=False, baselines=None) -> list[RunConfig]:
-    """M/N/K + Format-Auswahl (+ Tile/Swizzle/Baselines) → eine ``RunConfig`` je
-    gewählter (dtype, acc)-Kombi.
+    """Ausdruck + Größen + Format-Auswahl (+ Tile/Swizzle/Baselines) → eine
+    ``RunConfig`` je gewählter (dtype, acc)-Kombi.
 
-    Die Liste ist in kanonischer ``COMBOS``-Reihenfolge (unabhängig von der
-    Klick-Reihenfolge) — deterministisch, das erste Element ist das **primäre**
-    Format für die KPI-Karten. Achsen-Zuordnung wie ``config_from_controls``
-    (i=M, k=K, j=N). **Ein festes Tile** gilt für die ganze Auswahl (Design-
-    Entscheidung TZ 4); ``tile=None`` ⇒ RunConfig-Default (128/128/64). ``swizzle``
-    ist ein Modus (``"off"``/``"on"``/``"both"``, bool erlaubt): ``"both"`` erzeugt
-    je Format **zwei** Configs (ohne + mit Swizzle) für den A/B-Vergleich.
+    Die Liste ist in kanonischer ``COMBOS``-Reihenfolge (deterministisch, erstes
+    Element = primäres Format). **Ein festes Tile** gilt für die ganze Auswahl;
+    ``swizzle='both'`` erzeugt je Format zwei Configs (ohne + mit Swizzle).
     Erwartet vorher validierte Eingaben.
     """
-    sizes = {"i": int(float(m)), "k": int(float(k)), "j": int(float(n))}
+    norm_expr = resolve_expr(expr)
+    idx = expr_indices(expr)
+    sizes = {d: int(float(dim_sizes[d])) for d in idx}
     bl = list(baselines) if baselines else []
-    sw_list = swizzles_from_value(swizzle)   # bool|str|Liste → [False]/[True]/[False,True]
+    sw_list = swizzles_from_value(swizzle)
     chosen = set(selection)
     out: list[RunConfig] = []
     for (d, a) in COMBOS:
         if combo_key(d, a) not in chosen:
             continue
         for si, s in enumerate(sw_list):
-            # Baselines sind swizzle-unabhängig (cuBLAS/naive kennen unseren Swizzle
-            # nicht) → nur am ERSTEN Swizzle-Variant messen, kein Doppel-Aufwand.
-            kwargs = dict(dim_sizes=dict(sizes), dtype=d, acc_dtype=a, swizzle=s,
-                          baselines=list(bl) if si == 0 else [])
+            kwargs = dict(expr=norm_expr, dim_sizes=dict(sizes), dtype=d, acc_dtype=a,
+                          swizzle=s, baselines=list(bl) if si == 0 else [])
             if tile is not None:
                 kwargs["tile"] = dict(tile)
             out.append(RunConfig(**kwargs))
@@ -262,43 +331,48 @@ def configs_from_selection(m, n, k, selection,
 # ---------------------------------------------------------------------------
 # Dash-Komponentenbaum
 # ---------------------------------------------------------------------------
-def _fixed_config() -> html.Div:
-    """Read-only Anzeige der (weiterhin) festen Konfiguration. dtype/acc (TZ 3)
-    sowie Tile/Swizzle (TZ 4) sind jetzt wählbar und stehen daher NICHT mehr hier
-    — fest bleibt nur der Ausdruck (allgemeine Kontraktion ist TZ 6)."""
-    c = _DEFAULT
-    rows = [
-        ("Ausdruck", c.expr),
-    ]
-    line = {"display": "flex", "justifyContent": "space-between",
-            "fontSize": "12.5px", "padding": "3px 0"}
-    return html.Div(
-        style={"background": "#f6f4fe", "border": "1px dashed #c9b8f2",
-               "borderRadius": "7px", "padding": "8px 10px"},
-        children=[
-            html.Div([html.Span(key, style={"color": "#6b7280"}),
-                      html.Span(val, style={"fontWeight": 600, "fontFamily": "ui-monospace, monospace"})],
-                     style=line)
-            for key, val in rows
-        ],
-    )
-
-
-def _size_input(id_: str, label: str) -> html.Div:
+def _preset_select() -> html.Div:
+    """Preset-Dropdown: setzt den Ausdruck (Komfort; der Freitext bleibt maßgeblich)."""
     return html.Div([
-        html.Label(label, style=_LABEL),
-        dbc.Input(id=id_, type="number", value=_DEFAULT_SIZE, min=1, step=1, debounce=True),
+        html.Label("Preset", style=_LABEL),
+        dbc.Select(id=ID_PRESET, value=_DEFAULT_EXPR,
+                   options=[{"label": lbl, "value": e} for lbl, e in PRESETS]),
     ])
 
 
+def _expr_input() -> html.Div:
+    """Freitext-einsum-Ausdruck (Source of Truth). '->' optional (impliziter Output)."""
+    return html.Div([
+        html.Label("einsum-Ausdruck", style=_LABEL),
+        dbc.Input(id=ID_EXPR, type="text", value=_DEFAULT_EXPR, debounce=True,
+                  placeholder="z. B. bik,bkj->bij",
+                  style={"fontFamily": "ui-monospace, monospace"}),
+    ])
+
+
+def index_size_inputs(expr: str, values: Optional[dict] = None) -> list:
+    """Ein Größen-Eingabefeld je Index des Ausdrucks (Pattern-Matching-ID), mit
+    Kategorie-Label (M/N/K/Batch). ``values`` erhält bereits eingegebene Größen."""
+    values = values or {}
+    cats = index_categories(expr)
+    fields = []
+    for d in expr_indices(expr):
+        label = d + (f"  ({cats[d]})" if d in cats else "")
+        fields.append(html.Div(
+            style={"flex": "1 1 64px", "minWidth": "64px"},
+            children=[
+                html.Label(label, style={**_LABEL, "fontFamily": "ui-monospace, monospace"}),
+                dbc.Input(id={"type": INDEX_SIZE_TYPE, "index": d}, type="number",
+                          value=values.get(d, _DEFAULT_INDEX_SIZE), min=1, step=1, debounce=True),
+            ],
+        ))
+    return fields
+
+
 def _dtype_header() -> list:
-    """Abschnitts-Überschrift der Format-Auswahl + Hover-Info-Tooltip, der die
-    Schreibweise ``Compute-dtype → Akkumulator/Output`` erklärt (das ``→`` ist
-    sonst nicht selbsterklärend)."""
     info = html.Span(
         " ⓘ", id=ID_DTYPE_INFO,
-        style={"cursor": "help", "color": "#8b5cf6", "fontWeight": 700,
-               "textTransform": "none"},
+        style={"cursor": "help", "color": "#8b5cf6", "fontWeight": 700, "textTransform": "none"},
     )
     tip = dbc.Tooltip(
         [
@@ -318,8 +392,6 @@ def _dtype_header() -> list:
 
 
 def _dtype_select() -> html.Div:
-    """Multi-Select der zu vergleichenden (dtype→acc)-Formate. Die Acc-Regeln
-    sind durch die Kombi-Liste erzwungen — unzulässige Kombis existieren nicht."""
     options = [{"label": combo_label(d, a), "value": combo_key(d, a)} for (d, a) in COMBOS]
     return dbc.Checklist(
         id=ID_DTYPES, options=options, value=list(_DEFAULT_SELECTION),
@@ -328,7 +400,6 @@ def _dtype_select() -> html.Div:
 
 
 def _tile_dropdown(id_: str, label: str, options: tuple, default: int) -> html.Div:
-    """Ein Tile-Dropdown (feste Zweierpotenzen; Wert als String)."""
     return html.Div(
         style={"flex": 1},
         children=[
@@ -340,7 +411,6 @@ def _tile_dropdown(id_: str, label: str, options: tuple, default: int) -> html.D
 
 
 def _tile_header() -> list:
-    """Überschrift der Kachelung + Hover-Info-Tooltip (TM/TN/TK + Swizzle erklärt)."""
     info = html.Span(" ⓘ", id=ID_TILE_INFO,
                      style={"cursor": "help", "color": "#8b5cf6", "fontWeight": 700,
                             "textTransform": "none"})
@@ -363,8 +433,7 @@ def _tile_header() -> list:
 
 
 def _tile_select() -> html.Div:
-    """TM/TN/TK-Dropdowns nebeneinander + Swizzle-Toggle darunter."""
-    t = _DEFAULT.tile
+    t = RunConfig().tile
     return html.Div([
         html.Div(
             style={"display": "flex", "gap": "8px"},
@@ -384,7 +453,6 @@ def _tile_select() -> html.Div:
 
 
 def _baseline_header() -> list:
-    """Überschrift der Baselines + Hover-Info-Tooltip (Ober-/Untergrenze erklärt)."""
     info = html.Span(" ⓘ", id=ID_BASELINE_INFO,
                      style={"cursor": "help", "color": "#8b5cf6", "fontWeight": 700,
                             "textTransform": "none"})
@@ -405,7 +473,6 @@ def _baseline_header() -> list:
 
 
 def _baseline_select() -> html.Div:
-    """Multi-Select der Vergleichs-Baselines (Default: keine → schneller Lauf)."""
     return dbc.Checklist(
         id=ID_BASELINES, options=_BASELINE_OPTIONS, value=[],
         style={"fontSize": "13px"}, inputStyle={"marginRight": "6px"},
@@ -413,16 +480,20 @@ def _baseline_select() -> html.Div:
 
 
 def build_controls() -> html.Div:
-    """Sidebar-Inhalt: feste Config (read-only) + Größen + Kachelung/Swizzle +
-    Format-Auswahl + Baselines + Run/Cancel + Progress."""
+    """Sidebar-Inhalt: Ausdruck (Preset + Freitext + Größen je Index) + Format-
+    Auswahl + Kachelung/Swizzle + Baselines + Run/Cancel + Progress."""
     return html.Div([
-        html.H2("Operation (fest)", style={**_H2, "marginTop": 0}),
-        _fixed_config(),
+        html.H2("Operation", style={**_H2, "marginTop": 0}),
+        _preset_select(),
+        _expr_input(),
+        # Aufgelöster Output / Klassifikation / Fehler (vom Callback gefüllt).
+        html.Div(id=ID_EXPR_INFO, style={"fontSize": "12px", "margin": "6px 0 0",
+                                         "minHeight": "16px"}),
 
-        html.H2("Dimensionen", style=_H2),
-        _size_input(ID_M, "M  (Zeilen, Index i)"),
-        _size_input(ID_N, "N  (Spalten, Index j)"),
-        _size_input(ID_K, "K  (Kontraktion, Index k)"),
+        html.H2("Größen je Index", style=_H2),
+        html.Div(id=ID_INDEX_SIZES,
+                 style={"display": "flex", "flexWrap": "wrap", "gap": "8px"},
+                 children=index_size_inputs(_DEFAULT_EXPR)),
 
         *_dtype_header(),
         _dtype_select(),
@@ -443,8 +514,6 @@ def build_controls() -> html.Div:
             ],
         ),
 
-        # Determinater Fortschritt (Format i/N) + Statustext; Sichtbarkeit steuert
-        # der Background-Callback über running=, Wert/Text über progress=. Start: verborgen.
         dbc.Progress(id=ID_PROGRESS, value=0, striped=True, animated=True,
                      style={"display": "none", "marginTop": "12px", "height": "8px"}),
         html.Div(id=ID_STATUS, children="", style={"marginTop": "6px", "fontSize": "12px",

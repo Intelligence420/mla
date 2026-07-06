@@ -79,9 +79,14 @@ def measure_baselines(names, A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     :returns:      Dict je Baseline-Name; TFLOP/s über dieselbe FLOP-Zahl wie der
                    Haupt-Kernel → direkt vergleichbar.
     """
-    M, K = A.shape
-    _, N = B.shape
-    flops = gemm_flops(M, N, K)
+    # A/B sind kanonisch (B, M, K) / (B, K, N) (auch B=1). Batch aus der führenden
+    # Achse; gemm_flops rechnet B ein → TFLOP/s direkt mit dem Haupt-Kernel vergleichbar.
+    if A.dim() == 3:
+        Bb, M, K = A.shape
+        _, _, N = B.shape
+    else:  # Abwärtskompatibilität (2D-Operanden)
+        Bb, (M, K), (_, N) = 1, A.shape, B.shape
+    flops = gemm_flops(M, N, K, Bb)
     result: dict[str, Any] = {}
 
     for name in names:

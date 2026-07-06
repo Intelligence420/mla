@@ -29,7 +29,7 @@ def _topbar() -> html.Header:
 def _main_placeholder() -> html.Div:
     return html.Div(
         className="main-placeholder",
-        children=html.P("Noch kein Lauf. Größen wählen und „Run“ starten."),
+        children=html.P("Noch kein Lauf. Ausdruck & Größen wählen und „Vergleichen“ starten."),
     )
 
 

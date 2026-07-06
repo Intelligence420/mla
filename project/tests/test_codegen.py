@@ -33,7 +33,7 @@ ATOL, RTOL = 1e-2, 1e-3
 
 # Compute-/Akku-dtype-Label → torch-dtype für die Test-Operanden. tf32-Eingaben
 # sind normale float32-Tensoren (der tfloat32-Cast passiert im Kernel), genau
-# wie in run._build_operands.
+# wie in run._build_natural_operands.
 _TORCH = {"fp16": torch.float16, "bf16": torch.bfloat16,
           "tf32": torch.float32, "fp32": torch.float32,
           "fp8e4m3": torch.float8_e4m3fn, "fp8e5m2": torch.float8_e5m2}
@@ -52,7 +52,7 @@ _TZ4_SIZES = [(512, 512, 512), (130, 100, 70), (129, 127, 65)]
 
 def _rand_operand(rows: int, cols: int, dtype: str):
     """Zufalls-Operand im Compute-`dtype`. fp8 via fp16→.to() (randn kann kein
-    fp8), sonst direkt — spiegelt run._build_operands."""
+    fp8), sonst direkt — spiegelt run._build_natural_operands."""
     t = _TORCH[dtype]
     if dtype.startswith("fp8"):
         return torch.randn(rows, cols, dtype=torch.float16, device="cuda").to(t)
@@ -74,9 +74,41 @@ def _run_gemm(M: int, N: int, K: int, dtype: str = "fp16", acc: str = "fp32",
     cfg = RunConfig(**kwargs)
     launch = load_kernel(cfg, emit(cfg)).launch
     torch.manual_seed(0)
-    A = _rand_operand(M, K, dtype)
-    B = _rand_operand(K, N, dtype)
-    C = torch.empty(M, N, dtype=_TORCH[acc], device="cuda")   # Output = acc_dtype
+    # Das Template ist kanonisch batched (B,M,K); B=1 = Plain-GEMM. Operanden als
+    # (1,·,·) bauen (Seed-Reihenfolge unverändert → byte-gleiche Daten), aber 2D-
+    # Views zurückgeben — die Assertions unten arbeiten mit ik,kj->ij (2D-View
+    # teilt den Speicher mit dem 3D-Tensor, der Launch füllt beide).
+    A = _rand_operand(M, K, dtype).reshape(1, M, K)
+    B = _rand_operand(K, N, dtype).reshape(1, K, N)
+    C = torch.empty(1, M, N, dtype=_TORCH[acc], device="cuda")   # Output = acc_dtype
+    launch(A, B, C)
+    torch.cuda.synchronize()
+    return A.reshape(M, K), B.reshape(K, N), C.reshape(M, N)
+
+
+def _rand_operand3(b: int, rows: int, cols: int, dtype: str):
+    """Wie _rand_operand, aber 3D (b, rows, cols) für den batched Codegen-Test."""
+    t = _TORCH[dtype]
+    if dtype.startswith("fp8"):
+        return torch.randn(b, rows, cols, dtype=torch.float16, device="cuda").to(t)
+    return torch.randn(b, rows, cols, dtype=t, device="cuda")
+
+
+def _run_gemm_batched(Bb: int, M: int, N: int, K: int, dtype: str = "fp16",
+                      acc: str = "fp32", tile: dict | None = None, swizzle: bool = False):
+    """Echten Codegen-Pfad fahren mit einem batched Ausdruck (B>1) → gibt die
+    3D-Tensoren (Bb,M,K)/(Bb,K,N)/(Bb,M,N) zurück. Der Kernel-Körper ist
+    ausdrucks-unabhängig; der Batch kommt allein aus der Operanden-Form."""
+    kwargs = {"expr": "bik,bkj->bij", "dim_sizes": {"b": Bb, "i": M, "k": K, "j": N},
+              "dtype": dtype, "acc_dtype": acc, "swizzle": swizzle}
+    if tile is not None:
+        kwargs["tile"] = tile
+    cfg = RunConfig(**kwargs)
+    launch = load_kernel(cfg, emit(cfg)).launch
+    torch.manual_seed(0)
+    A = _rand_operand3(Bb, M, K, dtype)
+    B = _rand_operand3(Bb, K, N, dtype)
+    C = torch.empty(Bb, M, N, dtype=_TORCH[acc], device="cuda")
     launch(A, B, C)
     torch.cuda.synchronize()
     return A, B, C
@@ -161,6 +193,28 @@ def test_gemm_computes_AB_not_transpose():
     assert err_AB < 1.0, f"A@B sollte passen, err={err_AB:.3e}"
     assert min(imposters.values()) > 10.0, \
         f"ein Doppelgänger liegt verdächtig nah: {imposters}"
+
+
+def test_gemm_batched_verifies_and_orientation():
+    """Batched GEMM (B>1): jede Batch-Scheibe stimmt gegen fp32 (einsum) UND die
+    Orientierung ist A[b]@B[b] — kein transponierter Doppelgänger, kein Batch-Mix."""
+    Bb, M, N, K = 3, 128, 96, 64
+    A, B, C = _run_gemm_batched(Bb, M, N, K)          # (Bb,M,K),(Bb,K,N),(Bb,M,N)
+    ref = torch.einsum("bik,bkj->bij", A.float(), B.float())
+    assert tuple(C.shape) == (Bb, M, N), tuple(C.shape)
+    err = (C.float() - ref).abs().max().item()
+    assert torch.allclose(C.float(), ref, atol=1e-2, rtol=1e-3), f"batched weicht ab: {err:.3e}"
+
+    # Orientierungs-Wächter je Batch (quadratisch → alle Doppelgänger shape-legal).
+    A2, B2, C2 = _run_gemm_batched(3, 128, 128, 128)
+    A2f, B2f, C2f = A2.float(), B2.float(), C2.float()
+    err_AB = (C2f - torch.bmm(A2f, B2f)).abs().max().item()
+    imp_T = (C2f - torch.bmm(A2f, B2f.transpose(1, 2))).abs().max().item()
+    imp_rev = (C2f - torch.bmm(B2f, A2f)).abs().max().item()
+    imp_mix = (C2f[0] - (A2f[1] @ B2f[1])).abs().max().item()   # Batch-Verwechslung
+    assert err_AB < 1.0, f"A[b]@B[b] sollte passen: {err_AB:.3e}"
+    assert min(imp_T, imp_rev, imp_mix) > 10.0, \
+        f"Doppelgänger/Batch-Mix zu nah: T={imp_T:.3e} rev={imp_rev:.3e} mix={imp_mix:.3e}"
 
 
 def test_swizzle_emit_structure():
@@ -371,7 +425,7 @@ def test_run_returns_result_on_compile_error():
     st.append_result = lambda r, path=None: None
     try:
         for cfg in [
-            RunConfig(expr="ki,kj->ij"),                  # nicht-kanonisch → reshape lehnt ab
+            RunConfig(expr="ij,jk,kl->il"),               # n-är (>2 Operanden) → parse lehnt ab
             RunConfig(family="elementwise"),              # falsche Familie → parse lehnt ab
             RunConfig(dtype="bf16", acc_dtype="fp16"),    # unzulässige Acc-Kombi → check_dtype_combo
         ]:
