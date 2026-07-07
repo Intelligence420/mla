@@ -13,3 +13,5 @@ numpy
 matplotlib
 opt_einsum
 
+
+cuda

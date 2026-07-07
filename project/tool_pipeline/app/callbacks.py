@@ -308,3 +308,32 @@ def register(app) -> None:
         dim_sizes = controls.dim_sizes_from_state(size_ids, size_vals)
         return execute_run(expr, dim_sizes, selection, tm=tm, tn=tn, tk=tk,
                            swizzle=swizzle, baselines=baselines, progress=set_progress)
+
+    # 4) Nach jedem Lauf im Browser prüfen: ist die Kopfmeldung im Main eine Warnung
+    #    oder ein Fehler (dbc.Alert vom Typ warning/danger — also ein abgebrochener
+    #    Lauf: ungültige Eingabe, „GPU belegt", interner Fehler …), dann Main UND
+    #    Fenster nach ganz oben scrollen, damit die Meldung sofort sichtbar ist.
+    #    Bei Erfolg ist die Kopfmeldung ein 'alert-success' → kein Scroll.
+    #    Clientside, weil Scrollen nur im Browser (nicht serverseitig) geht; der
+    #    ``_scroll_dummy``-Store ist nur ein Pflicht-Output (bleibt via no_update leer).
+    app.clientside_callback(
+        """
+        function(children) {
+            setTimeout(function() {
+                var main = document.getElementById('main');
+                if (!main) return;
+                var head = main.firstElementChild;
+                if (head && head.classList &&
+                    (head.classList.contains('alert-warning') ||
+                     head.classList.contains('alert-danger'))) {
+                    main.scrollTo({top: 0, behavior: 'smooth'});
+                    window.scrollTo({top: 0, behavior: 'smooth'});
+                }
+            }, 0);
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("_scroll_dummy", "data"),
+        Input("main", "children"),
+        prevent_initial_call=True,
+    )
