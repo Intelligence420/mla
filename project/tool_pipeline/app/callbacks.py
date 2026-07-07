@@ -17,8 +17,10 @@ Zwei Design-Punkte (PLAN §2/§8 + die TZ-2/TZ-3-Entscheidungen):
   Aktion = eine GPU-Session). Bei Prozess-Tod (Cancel) gibt das OS den flock
   **automatisch** frei — kein verwaister Lock.
 
-Fortschritt ist **determinat je Format** (TZ 3): ``set_progress`` meldet
-„Format i/N …" (echte Sub-Schritte); ``running=`` blendet den Balken ein/aus und
+Fortschritt ist **determinat je Format** (TZ 3): ``set_progress`` meldet je Format
+„Format i/N …" und füllt den Balken **pro fertigem Schritt** (nach jedem ``run()``
+einen Schritt voller, am Ende 100 %). ``running=`` blendet den Balken zum Lauf ein
+und lässt ihn danach **voll stehen** (bis der nächste Lauf ihn zurücksetzt) und
 schaltet die Buttons. Die Kernlogik ``execute_run`` ist Dash-frei und wird headless
 (mit echtem GPU-Lauf) in ``tests/test_app_execute.py`` geprüft.
 """
@@ -38,9 +40,10 @@ _PROJECT_DIR = Path(__file__).resolve().parents[2]
 _GPU_LOCK = _PROJECT_DIR / ".cache" / "gpu.lock"
 _LOCK_TIMEOUT = 60  # s — danach freundliche „GPU belegt"-Meldung statt endlos zu warten
 
-# Progress-Balken sichtbar/verborgen (via running=)
-_PROG_SHOW = {"display": "block", "marginTop": "12px", "height": "8px"}
-_PROG_HIDE = {"display": "none", "marginTop": "12px", "height": "8px"}
+# Progress-Balken: der Track (Hülle) wird via running= eingeblendet und bleibt danach
+# sichtbar (voll) stehen — bewusst kein Ausblenden; der nächste Lauf setzt die Füllung
+# oben in execute_run auf 0 zurück. Die Füllbreite selbst läuft über progress= (Style
+# des inneren Balkens, siehe controls.prog_fill_style).
 
 # Plotly-Toolbar der Charts: PNG-Export (Kamera-Knopf) an, unnötige Werkzeuge weg.
 _GRAPH_CONFIG = {
@@ -164,8 +167,12 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
     optionale Dash-``set_progress``-Callback → headless mit ``None`` testbar.
     """
     def _set(pct: int, text: str) -> None:
+        # Füllbreite (Style des inneren Balkens) + Statustext in EINEM set_progress.
         if progress is not None:
-            progress((pct, text))
+            progress((controls.prog_fill_style(pct), text))
+
+    _set(0, "")  # neuer Lauf → Balken sofort leeren (löst den vollen Balken des
+                 # Vorlaufs ab; auch bei anschließendem Validierungsfehler ehrlich leer)
 
     err = controls.validate_expr(expr)
     if err:
@@ -196,7 +203,9 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
     # ALLES ab hier steht IM try — inkl. Config-Bau, Lazy-Import (kann ImportError
     # werfen), mkdir/Lock, die run()-Schleife und das Rendern —, damit execute_run
     # die Zusage „gibt immer eine Liste zurück, nie eine Exception" hält (Naht-
-    # Vertrag; Fund A des Error-Audits). ``finally`` setzt Balken/Text zurück.
+    # Vertrag; Fund A des Error-Audits). Der Balken füllt sich in der Schleife je
+    # fertigem Format; Fehlerpfade lassen ihn stehen (statt ihn irreführend auf
+    # 100 % zu setzen) — der Alert erklärt den Grund.
     try:
         configs = controls.configs_from_selection(expr, dim_sizes, selection, tile=tile,
                                                    swizzle=swizzle, baselines=baselines)
@@ -206,9 +215,16 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
         total = len(configs)
         with FileLock(str(_GPU_LOCK)).acquire(timeout=_LOCK_TIMEOUT):
             for i, cfg in enumerate(configs, 1):
+                # Vor dem Lauf: welches Format gerade rechnet; der Balken steht auf den
+                # bereits fertigen Schritten ((i-1)/total).
                 _set(int(100 * (i - 1) / total),
                      f"Format {i}/{total}: {cfg.dtype} → {cfg.acc_dtype} …")
                 results.append(run(cfg))
+                # Nach dem Lauf: Schritt erledigt → Balken einen Schritt voller (i/total).
+                # Nach dem letzten Format steht er auf 100 % und bleibt dort (running=
+                # blendet ihn NICHT mehr aus) bis der nächste Lauf ihn oben zurücksetzt.
+                _set(int(100 * i / total),
+                     f"Format {i}/{total}: {cfg.dtype} → {cfg.acc_dtype} ✓")
         return render_comparison(results)
     except Timeout:
         return [_alert("GPU belegt",
@@ -216,8 +232,6 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
                        f"Bitte erneut versuchen.", "warning")]
     except Exception as e:  # noqa: BLE001 — Import-/Lock-/Infra-Fehler dürfen die UI nicht crashen
         return [_alert("Interner Fehler", f"{type(e).__name__}: {e}", "danger")]
-    finally:
-        _set(100, "")  # Balken/Statustext zurücksetzen, egal wie der Batch endete
 
 
 def _expr_info(expr):
@@ -278,9 +292,14 @@ def register(app) -> None:
         running=[
             (Output(controls.ID_RUN, "disabled"), True, False),
             (Output(controls.ID_CANCEL, "disabled"), False, True),
-            (Output(controls.ID_PROGRESS, "style"), _PROG_SHOW, _PROG_HIDE),
+            # Track (Hülle) zum Lauf einblenden und danach sichtbar STEHEN lassen
+            # (voll bis zum nächsten Lauf) — bewusst kein Ausblenden. Der Füllbalken
+            # (ID_PROGRESS) steht NICHT in running=, sondern nur in progress= → seine
+            # Live-Updates werden nicht mehr verschluckt.
+            (Output(controls.ID_PROGRESS_WRAP, "style"),
+             controls.PROG_TRACK_SHOW, controls.PROG_TRACK_SHOW),
         ],
-        progress=[Output(controls.ID_PROGRESS, "value"), Output(controls.ID_STATUS, "children")],
+        progress=[Output(controls.ID_PROGRESS, "style"), Output(controls.ID_STATUS, "children")],
         cancel=[Input(controls.ID_CANCEL, "n_clicks")],
         prevent_initial_call=True,
     )
