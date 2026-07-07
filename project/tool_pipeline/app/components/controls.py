@@ -49,7 +49,26 @@ ID_TILE_INFO = "tile-info"        # Info-Marker (Tooltip: Tile/Swizzle erklärt)
 ID_BASELINES = "sel-baselines"    # Multi-Select der Vergleichs-Baselines
 ID_BASELINE_INFO = "baselines-info"
 ID_RUN, ID_CANCEL = "btn-run", "btn-cancel"
-ID_PROGRESS, ID_STATUS = "run-progress", "run-status"
+ID_PROGRESS_WRAP = "run-progress-wrap"   # Track (äußere Hülle) — Sichtbarkeit via running=
+ID_PROGRESS, ID_STATUS = "run-progress", "run-status"   # Füllbalken (innen) · Statuszeile
+
+# Progress-Balken als eigener Div-Balken (bewusst NICHT dbc.Progress): die Füllbreite
+# wird direkt per ``style`` gesetzt — genau wie der Statustext (ein Div, der zuverlässig
+# aktualisiert). Das rendert unabhängig von dbc/Bootstrap und vermeidet, dieselbe
+# Komponente gleichzeitig in ``running=`` (style) UND ``progress=`` (value) zu haben,
+# was die Live-Updates des Balkens verschluckte.
+_PROG_TRACK_BASE = {"marginTop": "12px", "height": "8px", "background": "#e4e7ec",
+                    "borderRadius": "4px", "overflow": "hidden"}
+PROG_TRACK_HIDE = {**_PROG_TRACK_BASE, "display": "none"}    # vor dem ersten Lauf
+PROG_TRACK_SHOW = {**_PROG_TRACK_BASE, "display": "block"}   # während + nach dem Lauf
+
+
+def prog_fill_style(pct) -> dict:
+    """Style des Füllbalkens für einen Fortschritt in Prozent (auf 0..100 geklemmt).
+    Sanfter Breiten-Übergang → der Balken *wächst* sichtbar statt zu springen."""
+    p = max(0, min(100, int(pct)))
+    return {"width": f"{p}%", "height": "100%", "background": "#5b21b6",
+            "borderRadius": "4px", "transition": "width .3s ease"}
 
 # --- Ausdruck: Presets + Defaults --------------------------------------------
 _DEFAULT_EXPR = "ik,kj->ij"        # Plain-GEMM (= RunConfig-Default)
@@ -514,8 +533,10 @@ def build_controls() -> html.Div:
             ],
         ),
 
-        dbc.Progress(id=ID_PROGRESS, value=0, striped=True, animated=True,
-                     style={"display": "none", "marginTop": "12px", "height": "8px"}),
+        # Track (Hülle) + Füllbalken. running= blendet den Track ein und lässt ihn
+        # stehen; progress= setzt die Füllbreite (prog_fill_style) live je Schritt.
+        html.Div(id=ID_PROGRESS_WRAP, style=PROG_TRACK_HIDE,
+                 children=html.Div(id=ID_PROGRESS, style=prog_fill_style(0))),
         html.Div(id=ID_STATUS, children="", style={"marginTop": "6px", "fontSize": "12px",
                                                     "color": "#6b7280", "minHeight": "16px"}),
     ])
