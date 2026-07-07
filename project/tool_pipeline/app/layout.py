@@ -8,7 +8,7 @@ den Main-Bereich (id='main') füllt der Callback mit ``components/kpis`` +
 
 from __future__ import annotations
 
-from dash import html
+from dash import dcc, html
 
 from .components import controls
 
@@ -46,5 +46,8 @@ def build_layout() -> html.Div:
                     html.Main(id="main", className="main", children=_main_placeholder()),
                 ],
             ),
+            # Wegwerf-Ziel für den Clientside-Scroll-Callback (siehe callbacks.register):
+            # bei einer Abbruch-Meldung im Main wird nach ganz oben gescrollt.
+            dcc.Store(id="_scroll_dummy"),
         ],
     )
