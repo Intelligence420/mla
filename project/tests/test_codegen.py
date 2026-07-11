@@ -555,7 +555,8 @@ def test_run_verify_failed_status():
 
     orig_store, orig_verify = st.append_result, R.verify
     st.append_result = lambda r, path=None: None
-    R.verify = lambda C, A, B, cfg: {"max_abs_err": 999.0, "passed": False, "atol": 0.2, "rtol": 0.02}
+    # verify ist seit TZ 7 variadisch: verify(output, operands: list, config).
+    R.verify = lambda out, ops, cfg: {"max_abs_err": 999.0, "passed": False, "atol": 0.2, "rtol": 0.02}
     try:
         res = R.run(RunConfig())
         assert res.status == "verify_failed", f"status={res.status}"
