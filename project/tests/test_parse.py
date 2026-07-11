@@ -18,7 +18,11 @@ import sys
 # project/ auf den Pfad, damit `tool_pipeline` importierbar ist (standalone-Lauf).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tool_pipeline.intermediate_representation.parse import parse  # noqa: E402
+from tool_pipeline.intermediate_representation.parse import (  # noqa: E402
+    ElementwiseIR,
+    ReductionIR,
+    parse,
+)
 from tool_pipeline.schema import RunConfig  # noqa: E402
 
 
@@ -146,9 +150,121 @@ def test_runconfig_default_classifies():
     assert (ir.M, ir.N, ir.K) == (512, 512, 512)  # RunConfig-Default-Größen
 
 
-def test_runconfig_nonzero_family_rejected():
-    """Nicht-'contraction'-Familien werden (noch) abgelehnt (elementwise/reduction = TZ 7)."""
-    assert _raises(lambda: parse(RunConfig(family="elementwise")), NotImplementedError)
+def test_runconfig_elementwise_family_parses():
+    """family='elementwise' + gültiger Ausdruck ⇒ ElementwiseIR (TZ 7)."""
+    ir = parse(RunConfig(family="elementwise", op="add", expr="ij,ij->ij",
+                         dim_sizes={"i": 4, "j": 5}))
+    assert isinstance(ir, ElementwiseIR)
+    assert ir.arity == 2 and ir.output == "ij"
+
+
+def test_runconfig_reduction_family_parses():
+    """family='reduction' + gültiger Ausdruck ⇒ ReductionIR (TZ 7)."""
+    ir = parse(RunConfig(family="reduction", op="sum", expr="ij->i",
+                         dim_sizes={"i": 4, "j": 5}))
+    assert isinstance(ir, ReductionIR)
+    assert ir.kept_dims == ["i"] and ir.reduced_dims == ["j"]
+
+
+def test_runconfig_unknown_family_rejected():
+    """Unbekannte Operations-Familie ⇒ ValueError (loud-fail)."""
+    assert _raises(lambda: parse(RunConfig(family="foo")), ValueError)
+
+
+# --- Elementwise-Familie (TZ 7) ----------------------------------------------
+def test_elementwise_binary():
+    """`ij,ij->ij`: 2 Operanden gleicher Form; axes=['i','j'], 2D-Sicht rows·cols."""
+    ir = parse("ij,ij->ij", {"i": 8, "j": 6}, family="elementwise")
+    assert isinstance(ir, ElementwiseIR)
+    assert ir.arity == 2 and ir.axes == ["i", "j"]
+    assert ir.shape == (8, 6) and ir.num_elements == 48
+    assert ir.rows == 8 and ir.cols == 6
+
+
+def test_elementwise_unary_copy():
+    """`ij->ij` (auch implizit `ij`): 1 Operand (copy)."""
+    ir = parse("ij->ij", {"i": 8, "j": 6}, family="elementwise")
+    assert ir.arity == 1 and ir.output == "ij"
+    ir2 = parse("ij", {"i": 8, "j": 6}, family="elementwise")   # impliziter Output = ij
+    assert ir2.arity == 1 and ir2.output == "ij"
+
+
+def test_elementwise_3d():
+    """`ijk,ijk->ijk`: 3D elementweise; rows=i·j, cols=k (kontiguierte Achse)."""
+    ir = parse("ijk,ijk->ijk", {"i": 2, "j": 3, "k": 5}, family="elementwise")
+    assert ir.rows == 6 and ir.cols == 5 and ir.num_elements == 30
+
+
+def test_elementwise_rejects_transposed_operand():
+    """`ij,ji->ij`: zweiter Operand transponiert ⇒ ValueError (keine reine Abbildung)."""
+    assert _raises(lambda: parse("ij,ji->ij", {"i": 4, "j": 4}, family="elementwise"),
+                   ValueError)
+
+
+def test_elementwise_rejects_three_operands():
+    """3 Operanden ⇒ NotImplementedError (n-är draußen)."""
+    assert _raises(lambda: parse("ij,ij,ij->ij", {"i": 4, "j": 4}, family="elementwise"),
+                   NotImplementedError)
+
+
+def test_elementwise_rejects_implicit_binary():
+    """Binär ohne expliziten Output (`ij,ij`) ⇒ leerer impliziter Output ⇒ ValueError."""
+    assert _raises(lambda: parse("ij,ij", {"i": 4, "j": 4}, family="elementwise"),
+                   ValueError)
+
+
+# --- Reduktions-Familie (TZ 7) -----------------------------------------------
+def test_reduction_row_sum():
+    """`ij->i` (= A02 task_02): kept=[i], reduced=[j]; kept_size·reduced_size = i·j."""
+    ir = parse("ij->i", {"i": 8, "j": 6}, family="reduction")
+    assert isinstance(ir, ReductionIR)
+    assert ir.kept_dims == ["i"] and ir.reduced_dims == ["j"]
+    assert ir.kept_size == 8 and ir.reduced_size == 6
+    assert ir.out_shape == (8,)
+
+
+def test_reduction_col_sum():
+    """`ij->j`: kept=[j], reduced=[i] (Achse 0 reduziert ⇒ host-seitiges permute)."""
+    ir = parse("ij->j", {"i": 8, "j": 6}, family="reduction")
+    assert ir.kept_dims == ["j"] and ir.reduced_dims == ["i"]
+    assert ir.kept_size == 6 and ir.reduced_size == 8
+    assert ir.out_shape == (6,)
+
+
+def test_reduction_full_sum():
+    """`ij->` (volle Summe): kept=[], reduced=[i,j]; kept_size=1, out_shape leer."""
+    ir = parse("ij->", {"i": 8, "j": 6}, family="reduction")
+    assert ir.kept_dims == [] and ir.reduced_dims == ["i", "j"]
+    assert ir.kept_size == 1 and ir.reduced_size == 48
+    assert ir.out_shape == ()
+
+
+def test_reduction_rejects_no_reduced_axis():
+    """`ij->ij` (Output = Eingabe) ist keine Reduktion ⇒ ValueError."""
+    assert _raises(lambda: parse("ij->ij", {"i": 4, "j": 4}, family="reduction"),
+                   ValueError)
+
+
+def test_reduction_rejects_two_operands():
+    """2 Operanden ⇒ NotImplementedError (Reduktion ist 1-Operand)."""
+    assert _raises(lambda: parse("ij,ij->i", {"i": 4, "j": 4}, family="reduction"),
+                   NotImplementedError)
+
+
+def test_reduction_rejects_free_output():
+    """Output-Index nicht im Operanden (`ij->ik`) ⇒ ValueError."""
+    assert _raises(lambda: parse("ij->ik", {"i": 4, "j": 4, "k": 4}, family="reduction"),
+                   ValueError)
+
+
+def test_family_via_string_param():
+    """Der family-Parameter routet auch den String-Pfad (für Controls-Helfer)."""
+    assert isinstance(parse("ij->i", {"i": 4, "j": 4}, family="reduction"), ReductionIR)
+    assert isinstance(parse("ij,ij->ij", {"i": 4, "j": 4}, family="elementwise"),
+                      ElementwiseIR)
+    # Default-Familie bleibt contraction (Controls-Validierung unverändert).
+    ir = parse("ik,kj->ij", {"i": 4, "k": 4, "j": 4})
+    assert ir.m_dims == ["i"]   # ContractionIR
 
 
 def _main() -> int:
