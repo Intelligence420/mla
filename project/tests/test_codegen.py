@@ -292,6 +292,59 @@ def test_elementwise_emit_rejects_bad_op():
     raise AssertionError("erwartete ValueError für op='relu'")
 
 
+def test_emit_routes_families():
+    """Headless: emit() routet auf das Template der Familie (Kopf + Body passend)."""
+    # Kontraktion → GEMM (ct.mma da).
+    gemm = emit(RunConfig())
+    assert "ct.mma(a, b, acc)" in gemm, gemm
+    # Elementwise → cdiv-Grid, kein mma; Header nennt Familie + op.
+    el = emit(RunConfig(family="elementwise", op="mul", expr="ij,ij->ij",
+                        dim_sizes={"i": 4, "j": 4}))
+    assert "ct.mma(" not in el and "ct.astype(a * b, C.dtype)" in el, el
+    assert "# Familie  : elementwise" in el and "op=mul" in el, el
+    # Reduktion → ct.sum, kein mma; Header nennt Familie + op=sum.
+    red = emit(RunConfig(family="reduction", op="sum", expr="ij->i",
+                         dim_sizes={"i": 4, "j": 4}))
+    assert "ct.mma(" not in red and "ct.sum(" in red, red
+    assert "# Familie  : reduction" in red and "op=sum" in red, red
+
+
+def test_emit_elementwise_requires_op():
+    """Elementwise ohne op ⇒ ValueError (loud-fail statt still falscher Kernel)."""
+    try:
+        emit(RunConfig(family="elementwise", op=None, expr="ij,ij->ij",
+                       dim_sizes={"i": 4, "j": 4}))
+    except ValueError:
+        return
+    raise AssertionError("erwartete ValueError für Elementwise ohne op")
+
+
+def test_emit_unknown_family_rejected():
+    """Unbekannte Familie ⇒ ValueError."""
+    try:
+        emit(RunConfig(family="foo"))
+    except ValueError:
+        return
+    raise AssertionError("erwartete ValueError für unbekannte Familie")
+
+
+def test_emit_contraction_header_byte_identical():
+    """Der Kontraktions-Header bleibt byte-identisch zu TZ 1-6 (keine Familie-Zeile)
+    → die git-getrackten results/kernels/*.py werden NICHT umgeschrieben."""
+    gemm = emit(RunConfig())
+    expected_head = (
+        "# " + "=" * 74 + "\n"
+        "# Auto-generiert vom cuTile Performance Lab (Codegen C1).\n"
+        "# Aus einer RunConfig erzeugt.\n"
+        "# Ausdruck : ik,kj->ij\n"
+        "# Format   : fp16 -> fp32 (Akku)\n"
+        "# Tile     : TM=128 TN=128 TK=64 | swizzle=False\n"
+        "# " + "=" * 74 + "\n"
+    )
+    assert gemm.startswith(expected_head), gemm[:400]
+    assert "# Familie" not in gemm.split('import cuda.tile')[0], "Kontraktion darf keine Familie-Zeile haben"
+
+
 def test_gemm_swizzle_correct_across_sizes():
     """verify-before-trust für den Swizzle-Kernel: stimmt gegen fp32 — glatt UND
     ragged (der Swizzle darf keine Kachel doppelt/gar nicht berechnen)."""
