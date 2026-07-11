@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tool_pipeline.codegen.compile import clear_cache, load_kernel  # noqa: E402
 from tool_pipeline.codegen.emit import emit  # noqa: E402
 from tool_pipeline.codegen.templates.contraction import build_gemm_module  # noqa: E402
+from tool_pipeline.codegen.templates.elementwise import build_elementwise_module  # noqa: E402
 from tool_pipeline.codegen.templates.reduction import build_reduction_module  # noqa: E402
 from tool_pipeline.measure.verify import _TOLERANCES  # noqa: E402
 from tool_pipeline.schema import RunConfig, RunResult  # noqa: E402
@@ -258,6 +259,37 @@ def test_reduction_emit_rejects_bad_acc():
     except ValueError:
         return
     raise AssertionError("erwartete ValueError für acc_dtype='bf16'")
+
+
+def test_elementwise_emit_structure():
+    """Headless: das Elementwise-Template ist memory-bound — cdiv-2D-Grid, KEIN
+    ct.mma/kein Akku; binaere Ops laden A+B (Arity 3), copy nur A (Arity 2); das
+    Op-Fragment wird korrekt substituiert (a+b / a*b / a)."""
+    tile = {"TM": 64, "TN": 128, "TK": 64}
+    add = build_elementwise_module(tile, "fp16", "fp32", "add")
+    mul = build_elementwise_module(tile, "fp16", "fp32", "mul")
+    cpy = build_elementwise_module(tile, "fp16", "fp32", "copy")
+    # memory-bound: kein Tensor-Core, kein Akku, cdiv-Grid.
+    for src in (add, mul, cpy):
+        assert "ct.mma(" not in src and "ct.full(" not in src, src
+        assert "ct.cdiv(M, TM)" in src and "ct.cdiv(N, TN)" in src, src
+        assert "TM = 64" in src and "TN = 128" in src, src
+    # Op-Fragment korrekt substituiert.
+    assert "ct.astype(a + b, C.dtype)" in add, add
+    assert "ct.astype(a * b, C.dtype)" in mul, mul
+    assert "ct.astype(a, C.dtype)" in cpy, cpy
+    # Arity: binaer laedt A+B und hat launch(A, B, C); copy nur A und launch(A, C).
+    assert "def launch(A, B, C):" in add and "ct.load(B," in add, add
+    assert "def launch(A, C):" in cpy and "ct.load(B," not in cpy, cpy
+
+
+def test_elementwise_emit_rejects_bad_op():
+    """Unbekannte Op ⇒ ValueError (loud-fail)."""
+    try:
+        build_elementwise_module({"TM": 128, "TN": 128, "TK": 64}, "fp16", "fp32", "relu")
+    except ValueError:
+        return
+    raise AssertionError("erwartete ValueError für op='relu'")
 
 
 def test_gemm_swizzle_correct_across_sizes():
