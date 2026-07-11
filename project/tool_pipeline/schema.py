@@ -101,6 +101,14 @@ class RunConfig:
     # --- Vergleichsbaselines (TZ 1: leer; cuBLAS/naive kommen in TZ 4) ---
     baselines: list[str] = field(default_factory=list)
 
+    # --- Messung (Benchmark-Iterationen) ---
+    # bench_iters = getaktete warme Läufe (→ Verteilung Median/min/p90/σ),
+    # bench_warmup = ungetaktete Aufwärm-Läufe (stabilisieren Takt/Caches).
+    # Defaults = die bewährten bench.py-Werte. Sie bestimmen NICHT den Kernel-Slug
+    # (reiner Messaufwand) → additiv ohne Cache-/Dateinamen-Drift.
+    bench_warmup: int = 10
+    bench_iters: int = 30
+
     def __post_init__(self) -> None:
         # inputs/output konsistent aus expr ableiten, wenn nicht vorgegeben.
         if self.inputs is None or self.output is None:

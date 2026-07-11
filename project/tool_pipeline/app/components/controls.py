@@ -48,6 +48,8 @@ ID_SWIZZLE = "chk-swizzle"        # L2-Swizzle-Toggle
 ID_TILE_INFO = "tile-info"        # Info-Marker (Tooltip: Tile/Swizzle erklärt)
 ID_BASELINES = "sel-baselines"    # Multi-Select der Vergleichs-Baselines
 ID_BASELINE_INFO = "baselines-info"
+ID_BENCH_WARMUP, ID_BENCH_ITERS = "sel-warmup", "sel-iters"  # Mess-Einstellungen (einstellbar)
+ID_BENCH_INFO = "bench-info"      # Info-Marker (Tooltip: Warmup/Iterationen erklärt)
 ID_RUN, ID_CANCEL = "btn-run", "btn-cancel"
 ID_PROGRESS_WRAP = "run-progress-wrap"   # Track (äußere Hülle) — Sichtbarkeit via running=
 ID_PROGRESS, ID_STATUS = "run-progress", "run-status"   # Füllbalken (innen) · Statuszeile
@@ -94,6 +96,12 @@ _DTYPE_ORDER = ("fp16", "bf16", "tf32", "fp8e4m3", "fp8e5m2")
 _TILE_M_OPTIONS = (32, 64, 128, 256)
 _TILE_N_OPTIONS = (32, 64, 128, 256)
 _TILE_K_OPTIONS = (16, 32, 64, 128)
+
+# Mess-Einstellungen: erlaubter Bereich (min, max). Iterationen ≥ 10 (unter 10 ist
+# die Verteilung/das p90 kaum aussagekräftig); Obergrenze 500 hält die Laufzeit auf
+# der geteilten Maschine im Rahmen. Warmup ab 0 (kein Aufwärmen zulassen).
+_BENCH_WARMUP_RANGE = (0, 500)
+_BENCH_ITERS_RANGE = (10, 500)
 
 # Vergleichs-Baselines (kanonische Namen = measure.baselines.KNOWN_BASELINES).
 _BASELINE_OPTIONS = [
@@ -287,6 +295,30 @@ def validate_tile(tm, tn, tk) -> Optional[str]:
     return None
 
 
+def validate_bench(warmup, iters) -> Optional[str]:
+    """Prüfe Warmup und getaktete Iterationen (ganze Zahlen im zulässigen Bereich)."""
+    for name, v, (lo, hi) in (("Warmup", warmup, _BENCH_WARMUP_RANGE),
+                              ("Iterationen", iters, _BENCH_ITERS_RANGE)):
+        if v is None or v == "":
+            return f"{name} fehlt — bitte einen Wert zwischen {lo} und {hi} eingeben."
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return f"{name} ist keine Zahl: {v!r}."
+        if fv != int(fv):
+            return f"{name} muss ganzzahlig sein (bekommen: {v!r})."
+        iv = int(fv)
+        if not (lo <= iv <= hi):
+            return f"{name}={iv} außerhalb des zulässigen Bereichs [{lo}, {hi}]."
+    return None
+
+
+def bench_from_controls(warmup, iters) -> dict:
+    """Warmup/Iterationen (evtl. als Strings aus den Feldern) → dict für ``RunConfig``.
+    Erwartet vorher via ``validate_bench`` geprüfte Werte."""
+    return {"bench_warmup": int(float(warmup)), "bench_iters": int(float(iters))}
+
+
 def validate_baselines(baselines) -> Optional[str]:
     """Prüfe die Baseline-Auswahl (Teilmenge von ``cublas``/``naive``)."""
     if not baselines:
@@ -318,14 +350,16 @@ def tile_from_controls(tm, tn, tk) -> dict:
     return {"TM": int(float(tm)), "TN": int(float(tn)), "TK": int(float(tk))}
 
 
-def configs_from_selection(expr, dim_sizes, selection,
-                           tile=None, swizzle=False, baselines=None) -> list[RunConfig]:
-    """Ausdruck + Größen + Format-Auswahl (+ Tile/Swizzle/Baselines) → eine
-    ``RunConfig`` je gewählter (dtype, acc)-Kombi.
+def configs_from_selection(expr, dim_sizes, selection, tile=None, swizzle=False,
+                           baselines=None, bench=None) -> list[RunConfig]:
+    """Ausdruck + Größen + Format-Auswahl (+ Tile/Swizzle/Baselines/Mess-Einstellungen)
+    → eine ``RunConfig`` je gewählter (dtype, acc)-Kombi.
 
     Die Liste ist in kanonischer ``COMBOS``-Reihenfolge (deterministisch, erstes
     Element = primäres Format). **Ein festes Tile** gilt für die ganze Auswahl;
-    ``swizzle='both'`` erzeugt je Format zwei Configs (ohne + mit Swizzle).
+    ``swizzle='both'`` erzeugt je Format zwei Configs (ohne + mit Swizzle). ``bench``
+    ist das optionale dict ``{"bench_warmup", "bench_iters"}`` (aus
+    ``bench_from_controls``); ``None`` ⇒ RunConfig-Defaults (10/30).
     Erwartet vorher validierte Eingaben.
     """
     norm_expr = resolve_expr(expr)
@@ -343,6 +377,8 @@ def configs_from_selection(expr, dim_sizes, selection,
                           swizzle=s, baselines=list(bl) if si == 0 else [])
             if tile is not None:
                 kwargs["tile"] = dict(tile)
+            if bench is not None:
+                kwargs.update(bench)   # bench_warmup / bench_iters
             out.append(RunConfig(**kwargs))
     return out
 
@@ -498,9 +534,54 @@ def _baseline_select() -> html.Div:
     )
 
 
+def _bench_header() -> list:
+    info = html.Span(" ⓘ", id=ID_BENCH_INFO,
+                     style={"cursor": "help", "color": "#8b5cf6", "fontWeight": 700,
+                            "textTransform": "none"})
+    tip = dbc.Tooltip(
+        [
+            html.Div("Mess-Einstellungen", style={"fontWeight": 600, "marginBottom": "5px"}),
+            html.Div("Iterationen: getaktete warme Läufe je Format → daraus die "
+                     "Verteilung (Median/min/p90/σ). Mehr Iterationen = stabiler, "
+                     "aber längere Messung."),
+            html.Div("Warmup: ungetaktete Vorläufe, die Takt/Caches stabilisieren "
+                     "(zählen nicht in die Messung).", style={"marginTop": "5px"}),
+            html.Div(f"Erlaubt: Warmup {_BENCH_WARMUP_RANGE[0]}–{_BENCH_WARMUP_RANGE[1]}, "
+                     f"Iterationen {_BENCH_ITERS_RANGE[0]}–{_BENCH_ITERS_RANGE[1]}. Der "
+                     f"Fortschritt zeigt live „Iteration k/N“.",
+                     style={"marginTop": "5px", "opacity": 0.8}),
+        ],
+        target=ID_BENCH_INFO, placement="right",
+        style={"maxWidth": "330px", "textAlign": "left", "fontSize": "12px"},
+    )
+    return [html.H2(["Messung", info], style=_H2), tip]
+
+
+def _bench_select() -> html.Div:
+    c = RunConfig()   # Defaults (10 Warmup / 30 getaktet) als Startwerte
+    return html.Div(
+        style={"display": "flex", "gap": "8px"},
+        children=[
+            html.Div(style={"flex": 1}, children=[
+                html.Label("Warmup", style=_LABEL),
+                dbc.Input(id=ID_BENCH_WARMUP, type="number", value=c.bench_warmup,
+                          min=_BENCH_WARMUP_RANGE[0], max=_BENCH_WARMUP_RANGE[1],
+                          step=1, debounce=True),
+            ]),
+            html.Div(style={"flex": 1}, children=[
+                html.Label("Iterationen", style=_LABEL),
+                dbc.Input(id=ID_BENCH_ITERS, type="number", value=c.bench_iters,
+                          min=_BENCH_ITERS_RANGE[0], max=_BENCH_ITERS_RANGE[1],
+                          step=1, debounce=True),
+            ]),
+        ],
+    )
+
+
 def build_controls() -> html.Div:
     """Sidebar-Inhalt: Ausdruck (Preset + Freitext + Größen je Index) + Format-
-    Auswahl + Kachelung/Swizzle + Baselines + Run/Cancel + Progress."""
+    Auswahl + Kachelung/Swizzle + Baselines + Messung (Warmup/Iterationen) +
+    Run/Cancel + Progress."""
     return html.Div([
         html.H2("Operation", style={**_H2, "marginTop": 0}),
         _preset_select(),
@@ -522,6 +603,9 @@ def build_controls() -> html.Div:
 
         *_baseline_header(),
         _baseline_select(),
+
+        *_bench_header(),
+        _bench_select(),
 
         html.Div(
             style={"display": "flex", "gap": "8px", "marginTop": "18px"},

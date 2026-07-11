@@ -72,7 +72,8 @@ def _summarize_times(times_ms: list[float]) -> dict[str, float]:
 
 
 def benchmark(launch: Callable, A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
-              warmup: int = 10, iters: int = 30, flush_l2: bool = True) -> dict[str, Any]:
+              warmup: int = 10, iters: int = 30, flush_l2: bool = True,
+              progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
     """Warme, CUDA-Event-getaktete Läufe → **Verteilung** der GPU-Kernel-Zeit.
 
     :param warmup:   ungetaktete Aufwärm-Läufe (stabilisieren Takt/Caches).
@@ -80,6 +81,13 @@ def benchmark(launch: Callable, A: torch.Tensor, B: torch.Tensor, C: torch.Tenso
     :param flush_l2: L2 zwischen den Iterationen leeren (cold-L2, PLAN §3
                      Default). Der Flush wird VOR dem Start-Event abgesetzt und
                      zählt daher NICHT in die gemessene Kernel-Zeit.
+    :param progress: optionaler Callback ``(done, iters)`` — wird nach JEDER
+                     getakteten Iteration aufgerufen (für die Live-Anzeige „k/N").
+                     Ist er gesetzt, wird pro Iteration synchronisiert, damit der
+                     Host mit der GPU taktet und die Zählung echte Läufe spiegelt;
+                     die Event-basierte Zeit je Iteration bleibt davon unberührt.
+                     Ohne Callback (CLI/Tests) läuft der unveränderte schnelle Pfad
+                     (alles enqueuen, EINMAL synchronisieren).
     :returns: ``{"run_ms"(Median), "min_ms", "p90_ms", "sigma_ms", "iters",
               "warmup"}`` — additiv zu TZ 1 (nur neue Schlüssel dazu).
     """
@@ -109,6 +117,12 @@ def benchmark(launch: Callable, A: torch.Tensor, B: torch.Tensor, C: torch.Tenso
         starts[i].record()
         launch(A, B, C)
         ends[i].record()
+        if progress is not None:
+            # Nur mit Live-Anzeige: Host mit GPU takten (die elapsed_time zwischen
+            # start[i]/end[i] ist GPU-seitig und bleibt unberührt) und „i+1/iters"
+            # melden — NACH ends[i].record(), also außerhalb des Messfensters.
+            torch.cuda.synchronize()
+            progress(i + 1, iters)
     torch.cuda.synchronize()
 
     times_ms = [s.elapsed_time(e) for s, e in zip(starts, ends)]
