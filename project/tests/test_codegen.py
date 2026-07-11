@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tool_pipeline.codegen.compile import clear_cache, load_kernel  # noqa: E402
 from tool_pipeline.codegen.emit import emit  # noqa: E402
 from tool_pipeline.codegen.templates.contraction import build_gemm_module  # noqa: E402
+from tool_pipeline.codegen.templates.reduction import build_reduction_module  # noqa: E402
 from tool_pipeline.measure.verify import _TOLERANCES  # noqa: E402
 from tool_pipeline.schema import RunConfig, RunResult  # noqa: E402
 
@@ -232,6 +233,31 @@ def test_swizzle_emit_structure():
     assert "group_size_m = min(" in swz, swz
     # Orientierung in BEIDEN gleich (der eine Beweis-Invariant, Risiko ①).
     assert "acc = ct.mma(a, b, acc)" in plain and "acc = ct.mma(a, b, acc)" in swz
+
+
+def test_reduction_emit_structure():
+    """Headless: das Reduktions-Template ist memory-bound — ct.sum-Idiom, KEIN
+    ct.mma/kein GEMM-K-Loop-Reshape; beide Pfade (single-shot + markierter
+    Fallback) da; launch-Arity 2 (launch(A, C)); TK steuert LOOP_TILE."""
+    src = build_reduction_module({"TM": 128, "TN": 128, "TK": 512}, "fp16", "fp32")
+    # memory-bound: ct.sum da, KEIN Tensor-Core.
+    assert "ct.sum(" in src and "ct.mma(" not in src, src
+    # Beide Pfade vorhanden.
+    assert "def row_sum_single(" in src and "def row_sum_loop(" in src, src
+    assert "single-shot" in src and "FALLBACK" in src, src
+    # launch-Arity 2 (1 Operand + Output) — NICHT die GEMM-Arity 3.
+    assert "def launch(A, C):" in src, src
+    # TK steuert die Fallback-Chunk-Breite (steht im Slug).
+    assert "LOOP_TILE = 512" in src, src
+
+
+def test_reduction_emit_rejects_bad_acc():
+    """Unbekannter acc_dtype ⇒ ValueError (loud-fail, wie beim GEMM-Template)."""
+    try:
+        build_reduction_module({"TM": 128, "TN": 128, "TK": 64}, "fp16", "bf16")
+    except ValueError:
+        return
+    raise AssertionError("erwartete ValueError für acc_dtype='bf16'")
 
 
 def test_gemm_swizzle_correct_across_sizes():
