@@ -151,7 +151,8 @@ def render_comparison(results) -> list:
 
 
 def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
-                swizzle=False, baselines=None, progress=None) -> list:
+                swizzle=False, baselines=None, warmup=None, iters=None,
+                progress=None) -> list:
     """Reine Ablauflogik des Batch-Vergleichs (Dash-frei, headless testbar):
     validieren → RunConfig je Format → EIN GPU-Lock → ``run()`` je Format → rendern.
 
@@ -163,7 +164,8 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
     ``expr`` ist der einsum-Ausdruck (Presets/Freitext), ``dim_sizes`` das Roh-dict
     Index→Größe (aus den dynamischen Feldern). ``tm/tn/tk`` (Tile) + ``swizzle``
     steuern die Kachelung; ``tm/tn/tk=None`` ⇒ RunConfig-Default-Tile. ``baselines``
-    ist die (evtl. leere) Liste zuzuschaltender Vergleiche. ``progress`` ist der
+    ist die (evtl. leere) Liste zuzuschaltender Vergleiche. ``warmup``/``iters`` sind
+    die Mess-Einstellungen (``None`` ⇒ RunConfig-Defaults 10/30). ``progress`` ist der
     optionale Dash-``set_progress``-Callback → headless mit ``None`` testbar.
     """
     def _set(pct: int, text: str) -> None:
@@ -200,6 +202,15 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
             return [_alert("Ungültige Kachelung", err, "warning")]
         tile = controls.tile_from_controls(tm, tn, tk)
 
+    # Mess-Einstellungen (Warmup/Iterationen): analog zum Tile nur wenn gesetzt (GUI
+    # liefert immer welche); sonst None ⇒ RunConfig-Default (10/30).
+    bench = None
+    if warmup is not None or iters is not None:
+        err = controls.validate_bench(warmup, iters)
+        if err:
+            return [_alert("Ungültige Mess-Einstellungen", err, "warning")]
+        bench = controls.bench_from_controls(warmup, iters)
+
     # ALLES ab hier steht IM try — inkl. Config-Bau, Lazy-Import (kann ImportError
     # werfen), mkdir/Lock, die run()-Schleife und das Rendern —, damit execute_run
     # die Zusage „gibt immer eine Liste zurück, nie eine Exception" hält (Naht-
@@ -208,23 +219,32 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
     # 100 % zu setzen) — der Alert erklärt den Grund.
     try:
         configs = controls.configs_from_selection(expr, dim_sizes, selection, tile=tile,
-                                                   swizzle=swizzle, baselines=baselines)
+                                                   swizzle=swizzle, baselines=baselines,
+                                                   bench=bench)
         from tool_pipeline.run import run  # lazy → Haupt-Prozess bleibt CUDA-frei
         _GPU_LOCK.parent.mkdir(parents=True, exist_ok=True)
         results = []
         total = len(configs)
         with FileLock(str(_GPU_LOCK)).acquire(timeout=_LOCK_TIMEOUT):
             for i, cfg in enumerate(configs, 1):
+                label = f"Format {i}/{total}: {cfg.dtype} → {cfg.acc_dtype}"
                 # Vor dem Lauf: welches Format gerade rechnet; der Balken steht auf den
-                # bereits fertigen Schritten ((i-1)/total).
-                _set(int(100 * (i - 1) / total),
-                     f"Format {i}/{total}: {cfg.dtype} → {cfg.acc_dtype} …")
-                results.append(run(cfg))
+                # bereits fertigen Schritten ((i-1)/total). Bis die Messung startet
+                # (Compile/Verify) bleibt er hier stehen.
+                _set(int(100 * (i - 1) / total), f"{label} · kompiliere/verifiziere …")
+
+                # Live-Fortschritt der Messung: run() ruft diesen Callback nach jeder
+                # getakteten Iteration mit (done, iters). Der Balken wächst innerhalb
+                # des Formats von (i-1)/total bis i/total; der Text zeigt „Iteration k/N".
+                def _bench_progress(done, n_iters, _label=label, _i=i):
+                    frac = (_i - 1 + done / n_iters) / total
+                    _set(int(100 * frac), f"{_label} · Iteration {done}/{n_iters}")
+
+                results.append(run(cfg, progress=_bench_progress))
                 # Nach dem Lauf: Schritt erledigt → Balken einen Schritt voller (i/total).
                 # Nach dem letzten Format steht er auf 100 % und bleibt dort (running=
                 # blendet ihn NICHT mehr aus) bis der nächste Lauf ihn oben zurücksetzt.
-                _set(int(100 * i / total),
-                     f"Format {i}/{total}: {cfg.dtype} → {cfg.acc_dtype} ✓")
+                _set(int(100 * i / total), f"{label} ✓")
         return render_comparison(results)
     except Timeout:
         return [_alert("GPU belegt",
@@ -288,6 +308,8 @@ def register(app) -> None:
         State(controls.ID_TILE_TK, "value"),
         State(controls.ID_SWIZZLE, "value"),
         State(controls.ID_BASELINES, "value"),
+        State(controls.ID_BENCH_WARMUP, "value"),
+        State(controls.ID_BENCH_ITERS, "value"),
         background=True,
         running=[
             (Output(controls.ID_RUN, "disabled"), True, False),
@@ -304,10 +326,11 @@ def register(app) -> None:
         prevent_initial_call=True,
     )
     def _on_run(set_progress, n_clicks, expr, size_ids, size_vals, selection,
-                tm, tn, tk, swizzle, baselines):
+                tm, tn, tk, swizzle, baselines, warmup, iters):
         dim_sizes = controls.dim_sizes_from_state(size_ids, size_vals)
         return execute_run(expr, dim_sizes, selection, tm=tm, tn=tn, tk=tk,
-                           swizzle=swizzle, baselines=baselines, progress=set_progress)
+                           swizzle=swizzle, baselines=baselines, warmup=warmup,
+                           iters=iters, progress=set_progress)
 
     # 4) Nach jedem Lauf im Browser prüfen: ist die Kopfmeldung im Main eine Warnung
     #    oder ein Fehler (dbc.Alert vom Typ warning/danger — also ein abgebrochener

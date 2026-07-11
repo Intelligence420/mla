@@ -132,8 +132,13 @@ def _provenance(config: RunConfig) -> dict:
     }
 
 
-def run(config: RunConfig) -> RunResult:
-    """Führe einen vollständigen Lauf aus und liefere ein `RunResult`."""
+def run(config: RunConfig, progress=None) -> RunResult:
+    """Führe einen vollständigen Lauf aus und liefere ein `RunResult`.
+
+    ``progress`` ist ein optionaler Callback ``(done, iters)``, der während der
+    warmen Messung nach jeder getakteten Iteration aufgerufen wird (Live-Anzeige
+    „k/N" in der GUI). Ohne Callback (CLI/Tests) unverändert.
+    """
     provenance = _provenance(config)
     accuracy: dict = {}
     timing: dict = {}
@@ -218,7 +223,9 @@ def run(config: RunConfig) -> RunResult:
 
     # 6) Warme Messung (=run_ms) + Metriken (TFLOP/s)
     try:
-        b = benchmark(comp.launch, A_c, B_c, C_c)
+        b = benchmark(comp.launch, A_c, B_c, C_c,
+                      warmup=config.bench_warmup, iters=config.bench_iters,
+                      progress=progress)
         timing["run_ms"] = round(b["run_ms"], 5)      # Median (unveränderter Key)
         timing["min_ms"] = round(b["min_ms"], 5)      # schnellste Iteration
         timing["p90_ms"] = round(b["p90_ms"], 5)      # 90.-Perzentil (Ausreißer-Kopf)
