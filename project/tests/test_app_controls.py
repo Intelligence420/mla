@@ -18,11 +18,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tool_pipeline.app.components.controls import (  # noqa: E402
     COMBOS,
+    FAMILIES,
+    FAMILY_PRESETS,
     ID_BASELINE_INFO,
     ID_BASELINES,
     ID_DTYPE_INFO,
     ID_EXPR,
+    ID_FAMILY,
     ID_INDEX_SIZES,
+    ID_OP,
     ID_PRESET,
     ID_SWIZZLE,
     ID_TILE_INFO,
@@ -37,13 +41,18 @@ from tool_pipeline.app.components.controls import (  # noqa: E402
     build_controls,
     combo_key,
     combo_label,
+    combos_for_family,
     config_from_controls,
     configs_from_selection,
+    default_selection_for_family,
     dim_sizes_from_state,
     expr_indices,
     index_categories,
     index_size_inputs,
     parse_combo,
+    parse_preset_value,
+    preset_options,
+    preset_value,
     resolve_expr,
     swizzles_from_value,
     tile_from_controls,
@@ -252,6 +261,113 @@ def test_presets_are_valid_expressions():
         assert isinstance(label, str) and label
         assert validate_expr(expr) is None, (label, expr, validate_expr(expr))
     assert _DEFAULT_EXPR in [e for _, e in PRESETS]
+
+
+# --- Familien (TZ 7): Auswahl, Presets, Op, family-abhängige Validierung -------
+def test_family_presets_are_valid():
+    """Jedes Familien-Preset ist ein für seine Familie gültiger Ausdruck."""
+    assert {k for _, k in FAMILIES} == set(FAMILY_PRESETS)
+    for family, presets in FAMILY_PRESETS.items():
+        assert presets, family
+        for lbl, expr, op in presets:
+            assert validate_expr(expr, family) is None, (family, lbl, expr,
+                                                         validate_expr(expr, family))
+
+
+def test_preset_value_roundtrip():
+    """preset_value/parse_preset_value sind invers; Op wird mitgeführt."""
+    assert parse_preset_value(preset_value("ij,ij->ij", "add")) == ("ij,ij->ij", "add")
+    assert parse_preset_value(preset_value("ik,kj->ij", None)) == ("ik,kj->ij", None)
+    # preset_options einer Familie tragen die Op im Value.
+    opts = preset_options("elementwise")
+    exprs_ops = [parse_preset_value(o["value"]) for o in opts]
+    assert ("ij,ij->ij", "add") in exprs_ops and ("ij->ij", "copy") in exprs_ops
+
+
+def test_validate_expr_family_specific():
+    """validate_expr ist family-abhängig (Elementwise/Reduktion vs Kontraktion)."""
+    assert validate_expr("ij,ij->ij", "elementwise") is None
+    assert validate_expr("ij->ij", "elementwise") is None            # copy (unär)
+    assert validate_expr("ij,ji->ij", "elementwise") is not None     # transponiert
+    assert validate_expr("ij->i", "reduction") is None
+    assert validate_expr("ij->", "reduction") is None                # volle Summe
+    assert validate_expr("ij->ij", "reduction") is not None          # keine Reduktion
+    assert validate_expr("ik,kj->i", "reduction") is not None        # 2 Operanden
+
+
+def test_index_categories_family_specific():
+    """Kategorien je Familie: Elementwise 'elem', Reduktion 'bleibt'/'Σ'."""
+    assert index_categories("ij,ij->ij", "elementwise") == {"i": "elem", "j": "elem"}
+    assert index_categories("ij->i", "reduction") == {"i": "bleibt", "j": "Σ"}
+    assert index_categories("ik,kj->ij")["k"] == "K"                 # Kontraktion default
+
+
+def test_combos_for_family_memory_bound():
+    """memory-bound: nur fp16/bf16/fp32 (inkl. fp32), KEIN fp8/tf32."""
+    mb = combos_for_family("elementwise")
+    dts = {d for d, _ in mb}
+    assert dts == {"fp16", "bf16", "fp32"}, dts
+    assert ("fp32", "fp32") in mb and not any(d.startswith("fp8") or d == "tf32" for d, _ in mb)
+    assert combos_for_family("contraction") == COMBOS
+
+
+def test_validate_selection_family():
+    """memory-bound lehnt fp8/tf32 mit klarer Meldung ab; fp16/fp32 sind ok."""
+    assert validate_selection([combo_key("fp16", "fp32")], "elementwise") is None
+    assert validate_selection([combo_key("fp32", "fp32")], "reduction") is None
+    assert validate_selection([combo_key("fp8e4m3", "fp16")], "elementwise") is not None
+    assert validate_selection([combo_key("tf32", "fp32")], "elementwise") is not None
+    # Kontraktion unverändert: fp8/tf32 weiter erlaubt.
+    assert validate_selection([combo_key("fp8e4m3", "fp16")], "contraction") is None
+
+
+def test_default_selection_for_family():
+    assert set(default_selection_for_family("elementwise")) == {
+        combo_key("fp16", "fp32"), combo_key("bf16", "fp32"), combo_key("fp32", "fp32")}
+    assert default_selection_for_family("contraction") == _DEFAULT_SELECTION
+
+
+def test_configs_from_selection_elementwise():
+    """Elementwise: family/op landen in der RunConfig; kein Swizzle/keine Baselines."""
+    cfgs = configs_from_selection("ij,ij->ij", {"i": 128, "j": 128},
+                                  [combo_key("fp16", "fp32"), combo_key("bf16", "fp32")],
+                                  swizzle="both", baselines=["cublas"],
+                                  family="elementwise", op="mul")
+    # swizzle='both' wird für memory-bound ignoriert → nur 1 Config je Format.
+    assert len(cfgs) == 2
+    for c in cfgs:
+        assert c.family == "elementwise" and c.op == "mul"
+        assert c.swizzle is False and c.baselines == []
+        assert c.expr == "ij,ij->ij"
+
+
+def test_configs_from_selection_reduction_forces_sum():
+    """Reduktion: op wird immer 'sum' (unabhängig vom übergebenen op)."""
+    cfgs = configs_from_selection("ij->i", {"i": 256, "j": 256},
+                                  [combo_key("fp16", "fp32")],
+                                  family="reduction", op=None)
+    assert len(cfgs) == 1 and cfgs[0].family == "reduction" and cfgs[0].op == "sum"
+
+
+def test_configs_from_selection_contraction_unchanged():
+    """Kontraktion: family='contraction', op=None (Regression: TZ 6 unverändert)."""
+    c = configs_from_selection("ik,kj->ij", {"i": 128, "k": 64, "j": 128},
+                               [combo_key("fp16", "fp32")])[0]
+    assert c.family == "contraction" and c.op is None
+
+
+def test_validate_dim_sizes_family_memory_guard():
+    """OOM-Schutz greift auch family-abhängig (Elementwise: riesige Elementzahl)."""
+    assert validate_dim_sizes("ij,ij->ij", {"i": 100, "j": 100}, "elementwise") is None
+    msg = validate_dim_sizes("ij,ij->ij", {"i": 100000, "j": 100000}, "elementwise")
+    assert msg is not None and "Zu groß" in msg
+
+
+def test_build_controls_has_family_and_op_ids():
+    """Familien- und Op-Auswahl sind im Komponentenbaum."""
+    ids = [(c.to_plotly_json().get("props", {}) or {}).get("id")
+           for c in _walk(build_controls())]
+    assert ID_FAMILY in ids and ID_OP in ids
 
 
 def test_index_size_inputs_one_per_index():

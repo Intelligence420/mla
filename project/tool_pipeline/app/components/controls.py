@@ -36,6 +36,9 @@ from ...intermediate_representation.parse import parse
 from ...schema import ALLOWED_ACC, RunConfig
 
 # --- Komponenten-IDs (von callbacks.py importiert) ---------------------------
+ID_FAMILY = "sel-family"          # Operations-Familie (contraction/elementwise/reduction)
+ID_OP = "sel-op"                  # Elementwise-Op (add/mul/copy) — nur für Elementwise
+ID_OP_WRAP = "op-wrap"            # Hülle der Op-Auswahl (Sichtbarkeit je Familie)
 ID_PRESET = "sel-preset"          # Preset-Dropdown (füllt den Ausdruck)
 ID_EXPR = "in-expr"               # einsum-Ausdruck (Freitext, Source of Truth)
 ID_EXPR_INFO = "expr-info"        # aufgelöster Output / Klassifikation / Fehler
@@ -80,6 +83,8 @@ _MAX_TENSOR_BYTES = 8 * 2**30      # 8 GiB
 
 # Kuratierte Presets (Label → Ausdruck). Deckt die Kontraktions-Familie ab:
 # Plain-GEMM, Batched, transponiert, mehrdim. M, allgemeine Tensor-Kontraktion.
+# (Bleibt als (Label, Ausdruck)-Liste — die Kontraktions-Presets; FAMILY_PRESETS
+# unten trägt zusätzlich die Op je Familie für die neuen memory-bound-Familien.)
 PRESETS = [
     ("GEMM   ik,kj->ij", "ik,kj->ij"),
     ("Batched GEMM   bik,bkj->bij", "bik,bkj->bij"),
@@ -87,6 +92,71 @@ PRESETS = [
     ("Mehrdim. M   ijk,kl->ijl", "ijk,kl->ijl"),
     ("Tensor-Kontraktion   acspx,bspy->abcyx", "acspx,bspy->abcyx"),
 ]
+
+# Die drei Operations-Familien (TZ 7). Label + Default-Ausdruck je Familie.
+FAMILIES = [
+    ("Kontraktion (GEMM, Tensor-Core)", "contraction"),
+    ("Elementwise (memory-bound)", "elementwise"),
+    ("Reduktion (memory-bound)", "reduction"),
+]
+_FAMILY_KEYS = {k for _, k in FAMILIES}
+_MEMORY_BOUND = {"elementwise", "reduction"}
+
+# Presets je Familie: (Label, Ausdruck, Op). Op=None für Kontraktion (steckt im
+# GEMM); "sum" für Reduktion; add/mul/copy für Elementwise. Elementwise add/mul
+# teilen den Ausdruck (ij,ij->ij) → die Op unterscheidet sie.
+FAMILY_PRESETS = {
+    "contraction": [(lbl, expr, None) for lbl, expr in PRESETS],
+    "elementwise": [
+        ("Add   ij,ij->ij", "ij,ij->ij", "add"),
+        ("Mul   ij,ij->ij", "ij,ij->ij", "mul"),
+        ("Copy   ij->ij", "ij->ij", "copy"),
+        ("Add 3D   ijk,ijk->ijk", "ijk,ijk->ijk", "add"),
+    ],
+    "reduction": [
+        ("Zeilensumme   ij->i", "ij->i", "sum"),
+        ("Spaltensumme   ij->j", "ij->j", "sum"),
+        ("Volle Summe   ij->", "ij->", "sum"),
+    ],
+}
+
+# Elementwise-Op-Auswahl (nur bei family=elementwise sichtbar).
+_OP_OPTIONS = [
+    {"label": "add  (A + B)", "value": "add"},
+    {"label": "mul  (A · B)", "value": "mul"},
+    {"label": "copy (A)", "value": "copy"},
+]
+_OP_KEYS = {"add", "mul", "copy"}
+
+# memory-bound-Familien rechnen ohne Tensor-Core → nur die arithmetisch nativen
+# Formate (fp8-Arithmetik compiliert nicht, tf32 ist ein reines TC-Konzept). fp32
+# ist hier ein vollwertiges Format (anders als bei der Kontraktion, wo fp32-plain
+# bewusst aus der GUI-Auswahl fällt).
+_MEMORY_BOUND_DTYPES = ("fp16", "bf16", "fp32")
+
+
+def preset_value(expr: str, op: Optional[str]) -> str:
+    """Preset-Dropdown-Wert = ``"<op>|<expr>"`` (op leer ⇒ Kontraktion). Trägt die
+    Op mit, weil Elementwise add/mul denselben Ausdruck haben."""
+    return f"{op or ''}|{expr}"
+
+
+def parse_preset_value(value: str) -> tuple[str, Optional[str]]:
+    """Umkehrung von ``preset_value`` → (expr, op|None)."""
+    op, _, expr = (value or "").partition("|")
+    return expr, (op or None)
+
+
+def preset_options(family: str) -> list[dict]:
+    """Preset-Optionen (label/value) für eine Familie."""
+    return [{"label": lbl, "value": preset_value(expr, op)}
+            for lbl, expr, op in FAMILY_PRESETS.get(family, [])]
+
+
+def family_default_preset(family: str) -> str:
+    """Preset-Default-Wert (erstes Preset) einer Familie."""
+    lbl, expr, op = FAMILY_PRESETS[family][0]
+    return preset_value(expr, op)
 
 # Anzeige-Reihenfolge der wählbaren Compute-dtypes. fp32-plain (Anker ohne
 # Tensor-Cores) ist baubar/verifizierbar, aber bewusst NICHT in der GUI-Auswahl.
@@ -148,6 +218,31 @@ _DEFAULT_SELECTION = [combo_key("fp16", "fp32"),
                       combo_key("tf32", "fp32"),
                       combo_key("fp8e4m3", "fp16")]
 
+# memory-bound-Auswahl: die drei nativen Formate (fp16/bf16/fp32 → fp32).
+_MEMORY_BOUND_SELECTION = [combo_key("fp16", "fp32"),
+                           combo_key("bf16", "fp32"),
+                           combo_key("fp32", "fp32")]
+
+
+def combos_for_family(family: str) -> list[tuple[str, str]]:
+    """Zulässige (dtype, acc)-Kombis je Familie. Kontraktion = alle COMBOS
+    (ohne fp32-plain); memory-bound = nur fp16/bf16/fp32 (inkl. fp32)."""
+    if family in _MEMORY_BOUND:
+        return [(d, a) for d in _MEMORY_BOUND_DTYPES
+                for a in sorted(ALLOWED_ACC[d], key=lambda x: x != "fp32")]
+    return COMBOS
+
+
+def dtype_options_for_family(family: str) -> list[dict]:
+    """Checklist-Optionen (label/value) der Formate je Familie."""
+    return [{"label": combo_label(d, a), "value": combo_key(d, a)}
+            for (d, a) in combos_for_family(family)]
+
+
+def default_selection_for_family(family: str) -> list[str]:
+    """Default-Format-Auswahl je Familie."""
+    return list(_MEMORY_BOUND_SELECTION if family in _MEMORY_BOUND else _DEFAULT_SELECTION)
+
 _H2 = {"fontSize": "11px", "letterSpacing": "0.08em", "textTransform": "uppercase",
        "color": "#6b7280", "margin": "18px 0 8px"}
 _LABEL = {"display": "block", "fontSize": "12.5px", "color": "#6b7280", "margin": "10px 0 4px"}
@@ -168,47 +263,58 @@ def expr_indices(expr: str) -> list[str]:
     return seen
 
 
-def resolve_expr(expr: str) -> str:
+def resolve_expr(expr: str, family: str = "contraction") -> str:
     """Ausdruck in **explizite** Form bringen (impliziten Output nach einsum-
-    Konvention ergänzen). Erwartet einen strukturell gültigen Ausdruck."""
+    Konvention ergänzen). Erwartet einen strukturell gültigen Ausdruck der Familie."""
     e = (expr or "").replace(" ", "")
     if "->" in e:
         return e
-    ir = parse(e, {d: 2 for d in expr_indices(e)})   # liefert den impliziten Output
+    ir = parse(e, {d: 2 for d in expr_indices(e)}, family=family)  # impliziter Output
     return f"{','.join(ir.inputs)}->{ir.output}"
 
 
-def validate_expr(expr: str) -> Optional[str]:
-    """Prüfe den Ausdruck **strukturell** (genau 2 Operanden, keine Diagonalen,
-    gültiger Output) via `parse` mit Dummy-Größen. :returns: Fehlertext oder None."""
+def validate_expr(expr: str, family: str = "contraction") -> Optional[str]:
+    """Prüfe den Ausdruck **strukturell** für die Familie via `parse` mit
+    Dummy-Größen (Kontraktion: 2 Operanden/M-N-K; Elementwise: gleiche Form je
+    Operand; Reduktion: 1 Operand + reduzierte Achse). :returns: Fehlertext/None."""
     if not expr or not expr.strip():
         return "Bitte einen einsum-Ausdruck eingeben (z. B. ik,kj->ij)."
     idx = expr_indices(expr)
     if not idx:
         return "Der Ausdruck enthält keine Indizes."
     try:
-        parse(expr, {d: 2 for d in idx})
+        parse(expr, {d: 2 for d in idx}, family=family)
     except (ValueError, NotImplementedError) as e:
         return str(e)
     return None
 
 
-def index_categories(expr: str) -> dict[str, str]:
-    """Index → Kategorie-Label (M/N/K/Batch) via `parse` (Dummy-Größen). Leeres
+def index_categories(expr: str, family: str = "contraction") -> dict[str, str]:
+    """Index → Kategorie-Label via `parse` (Dummy-Größen), family-abhängig:
+    Kontraktion M/N/K/Batch, Elementwise „elem", Reduktion „bleibt"/„Σ". Leeres
     dict, wenn der Ausdruck (noch) nicht gültig ist."""
     try:
-        ir = parse(expr, {d: 2 for d in expr_indices(expr)})
+        ir = parse(expr, {d: 2 for d in expr_indices(expr)}, family=family)
     except (ValueError, NotImplementedError):
         return {}
     cat: dict[str, str] = {}
-    for d in ir.batch_dims:
-        cat[d] = "Batch"
-    for d in ir.m_dims:
-        cat[d] = "M"
-    for d in ir.n_dims:
-        cat[d] = "N"
-    for d in ir.k_dims:
-        cat[d] = "K"
+    if family == "elementwise":
+        for d in ir.axes:
+            cat[d] = "elem"
+    elif family == "reduction":
+        for d in ir.kept_dims:
+            cat[d] = "bleibt"
+        for d in ir.reduced_dims:
+            cat[d] = "Σ"
+    else:
+        for d in ir.batch_dims:
+            cat[d] = "Batch"
+        for d in ir.m_dims:
+            cat[d] = "M"
+        for d in ir.n_dims:
+            cat[d] = "N"
+        for d in ir.k_dims:
+            cat[d] = "K"
     return cat
 
 
@@ -223,9 +329,18 @@ def dim_sizes_from_state(ids, values) -> dict:
     return out
 
 
-def validate_dim_sizes(expr: str, dim_sizes: dict) -> Optional[str]:
+def _estimate_bytes(ir, family: str) -> int:
+    """Grober Peak-DRAM-Traffic für den OOM-Schutz (fp16-Inputs 2 B, fp32-Output 4 B)."""
+    if family == "elementwise":
+        return (ir.arity * 2 + 4) * ir.num_elements
+    if family == "reduction":
+        return 2 * (ir.kept_size * ir.reduced_size) + 4 * ir.kept_size
+    return 2 * ir.B * (ir.M * ir.K + ir.K * ir.N) + 4 * ir.B * ir.M * ir.N
+
+
+def validate_dim_sizes(expr: str, dim_sizes: dict, family: str = "contraction") -> Optional[str]:
     """Prüfe die Größen je Index (positive ganze Zahl, alle vorhanden) und eine
-    **Speicher-Obergrenze** (OOM-Schutz auf der geteilten Maschine).
+    **Speicher-Obergrenze** (OOM-Schutz auf der geteilten Maschine), family-abhängig.
 
     :returns: deutscher Fehlertext oder ``None`` (ok). Erwartet einen bereits
               strukturell gültigen Ausdruck (sonst zuerst `validate_expr`).
@@ -247,13 +362,12 @@ def validate_dim_sizes(expr: str, dim_sizes: dict) -> Optional[str]:
         if int(fv) < 1:
             return f"Größe für Index '{d}' muss ≥ 1 sein (bekommen: {int(fv)})."
         sizes[d] = int(fv)
-    # Struktur + fusionierte Größen (parse validiert erneut streng).
+    # Struktur + fusionierte Größen (parse validiert erneut streng, family-abhängig).
     try:
-        ir = parse(expr, sizes)
+        ir = parse(expr, sizes, family=family)
     except (ValueError, NotImplementedError) as e:
         return str(e)
-    # Speicher-Obergrenze: grober Peak-Traffic (fp16-Inputs 2 B, fp32-Output 4 B).
-    est = 2 * ir.B * (ir.M * ir.K + ir.K * ir.N) + 4 * ir.B * ir.M * ir.N
+    est = _estimate_bytes(ir, family)
     if est > _MAX_TENSOR_BYTES:
         return (f"Zu groß: ~{est / 2**30:.1f} GiB geschätzt (Grenze "
                 f"{_MAX_TENSOR_BYTES // 2**30} GiB) — OOM-Risiko auf der geteilten "
@@ -261,21 +375,39 @@ def validate_dim_sizes(expr: str, dim_sizes: dict) -> Optional[str]:
     return None
 
 
-def config_from_controls(expr: str, dim_sizes: dict) -> RunConfig:
-    """Ausdruck + Größen → eine ``RunConfig`` (fp16→fp32-Default; von der
-    Einzellauf-Naht weiterbenutzt). Erwartet validierte Eingaben; coerct tolerant
+def _resolve_op(family: str, op: Optional[str]) -> Optional[str]:
+    """Family-abhängige Op für die RunConfig: Reduktion=sum, Elementwise=gewählte
+    Op, Kontraktion=None (die Op steckt im GEMM)."""
+    if family == "reduction":
+        return "sum"
+    if family == "elementwise":
+        return op
+    return None
+
+
+def config_from_controls(expr: str, dim_sizes: dict, family: str = "contraction",
+                         op: Optional[str] = None) -> RunConfig:
+    """Ausdruck + Größen (+ Familie/Op) → eine ``RunConfig`` (fp16→fp32-Default; von
+    der Einzellauf-Naht weiterbenutzt). Erwartet validierte Eingaben; coerct tolerant
     über ``float`` und normalisiert den Ausdruck auf die explizite Form."""
     idx = expr_indices(expr)
     ds = {d: int(float(dim_sizes[d])) for d in idx}
-    return RunConfig(expr=resolve_expr(expr), dim_sizes=ds)
+    return RunConfig(family=family, op=_resolve_op(family, op),
+                     expr=resolve_expr(expr, family), dim_sizes=ds)
 
 
-def validate_selection(selection) -> Optional[str]:
-    """Prüfe die Format-Auswahl (Liste von ``combo_key``-Strings)."""
+def validate_selection(selection, family: str = "contraction") -> Optional[str]:
+    """Prüfe die Format-Auswahl (Liste von ``combo_key``-Strings) gegen die für die
+    Familie zulässigen Kombis (memory-bound: nur fp16/bf16/fp32)."""
     if not selection:
         return "Bitte mindestens ein Zahlenformat für den Vergleich auswählen."
-    unknown = [s for s in selection if s not in _VALID_KEYS]
+    valid = {combo_key(d, a) for (d, a) in combos_for_family(family)}
+    unknown = [s for s in selection if s not in valid]
     if unknown:
+        if family in _MEMORY_BOUND:
+            return (f"Für memory-bound ({family}) nicht unterstützte Format-Auswahl: "
+                    f"{unknown}. Erlaubt sind fp16/bf16/fp32 (fp8-Arithmetik "
+                    f"compiliert nicht, tf32 ist ein reines Tensor-Core-Format).")
         return f"Unbekannte Format-Auswahl: {unknown}."
     return None
 
@@ -351,30 +483,39 @@ def tile_from_controls(tm, tn, tk) -> dict:
 
 
 def configs_from_selection(expr, dim_sizes, selection, tile=None, swizzle=False,
-                           baselines=None, bench=None) -> list[RunConfig]:
-    """Ausdruck + Größen + Format-Auswahl (+ Tile/Swizzle/Baselines/Mess-Einstellungen)
-    → eine ``RunConfig`` je gewählter (dtype, acc)-Kombi.
+                           baselines=None, bench=None, family="contraction",
+                           op=None) -> list[RunConfig]:
+    """Ausdruck + Größen + Format-Auswahl (+ Familie/Op/Tile/Swizzle/Baselines/
+    Mess-Einstellungen) → eine ``RunConfig`` je gewählter (dtype, acc)-Kombi.
 
-    Die Liste ist in kanonischer ``COMBOS``-Reihenfolge (deterministisch, erstes
+    Die Liste ist in kanonischer Familien-Reihenfolge (deterministisch, erstes
     Element = primäres Format). **Ein festes Tile** gilt für die ganze Auswahl;
-    ``swizzle='both'`` erzeugt je Format zwei Configs (ohne + mit Swizzle). ``bench``
-    ist das optionale dict ``{"bench_warmup", "bench_iters"}`` (aus
-    ``bench_from_controls``); ``None`` ⇒ RunConfig-Defaults (10/30).
+    ``swizzle='both'`` erzeugt je Format zwei Configs (ohne + mit Swizzle).
+
+    memory-bound (Elementwise/Reduktion): **kein Swizzle** (die Templates kennen
+    keinen — Swizzle würde nur den Slug verunreinigen) und **keine GEMM-Baselines**
+    (torch.matmul/gemm_flops passen nicht). Die Op wird family-abhängig gesetzt
+    (Reduktion=sum, Elementwise=`op`, Kontraktion=None). ``bench`` ist das optionale
+    dict ``{"bench_warmup", "bench_iters"}``; ``None`` ⇒ RunConfig-Defaults (10/30).
     Erwartet vorher validierte Eingaben.
     """
-    norm_expr = resolve_expr(expr)
+    norm_expr = resolve_expr(expr, family)
+    the_op = _resolve_op(family, op)
     idx = expr_indices(expr)
     sizes = {d: int(float(dim_sizes[d])) for d in idx}
-    bl = list(baselines) if baselines else []
-    sw_list = swizzles_from_value(swizzle)
+    memory_bound = family in _MEMORY_BOUND
+    # memory-bound: Swizzle/Baselines sind Kontraktions-Konzepte → aus.
+    bl = [] if memory_bound else (list(baselines) if baselines else [])
+    sw_list = [False] if memory_bound else swizzles_from_value(swizzle)
     chosen = set(selection)
     out: list[RunConfig] = []
-    for (d, a) in COMBOS:
+    for (d, a) in combos_for_family(family):
         if combo_key(d, a) not in chosen:
             continue
         for si, s in enumerate(sw_list):
-            kwargs = dict(expr=norm_expr, dim_sizes=dict(sizes), dtype=d, acc_dtype=a,
-                          swizzle=s, baselines=list(bl) if si == 0 else [])
+            kwargs = dict(family=family, op=the_op, expr=norm_expr, dim_sizes=dict(sizes),
+                          dtype=d, acc_dtype=a, swizzle=s,
+                          baselines=list(bl) if si == 0 else [])
             if tile is not None:
                 kwargs["tile"] = dict(tile)
             if bench is not None:
@@ -386,13 +527,38 @@ def configs_from_selection(expr, dim_sizes, selection, tile=None, swizzle=False,
 # ---------------------------------------------------------------------------
 # Dash-Komponentenbaum
 # ---------------------------------------------------------------------------
+def _family_select() -> html.Div:
+    """Familien-Dropdown: contraction/elementwise/reduction. Steuert Presets,
+    Op-Sichtbarkeit und die zulässigen Formate (Callback in callbacks.py)."""
+    return html.Div([
+        html.Label("Operations-Familie", style=_LABEL),
+        dbc.Select(id=ID_FAMILY, value="contraction",
+                   options=[{"label": lbl, "value": k} for lbl, k in FAMILIES]),
+    ])
+
+
 def _preset_select() -> html.Div:
-    """Preset-Dropdown: setzt den Ausdruck (Komfort; der Freitext bleibt maßgeblich)."""
+    """Preset-Dropdown: setzt Ausdruck (+ Op) der aktuellen Familie (Komfort; der
+    Freitext bleibt maßgeblich). Der Wert ist ``"<op>|<expr>"`` (s. preset_value)."""
     return html.Div([
         html.Label("Preset", style=_LABEL),
-        dbc.Select(id=ID_PRESET, value=_DEFAULT_EXPR,
-                   options=[{"label": lbl, "value": e} for lbl, e in PRESETS]),
+        dbc.Select(id=ID_PRESET, value=family_default_preset("contraction"),
+                   options=preset_options("contraction")),
     ])
+
+
+def _op_select() -> html.Div:
+    """Elementwise-Op-Auswahl (add/mul/copy). Nur bei family=elementwise sichtbar
+    (die Sichtbarkeit schaltet ein Callback über ID_OP_WRAP)."""
+    return html.Div(
+        id=ID_OP_WRAP, style={"display": "none"},
+        children=[
+            html.Label("Elementwise-Op", style=_LABEL),
+            dbc.RadioItems(id=ID_OP, options=_OP_OPTIONS, value="add", inline=True,
+                           style={"fontSize": "13px"}, inputStyle={"marginRight": "5px"},
+                           labelStyle={"marginRight": "14px"}),
+        ],
+    )
 
 
 def _expr_input() -> html.Div:
@@ -405,11 +571,12 @@ def _expr_input() -> html.Div:
     ])
 
 
-def index_size_inputs(expr: str, values: Optional[dict] = None) -> list:
+def index_size_inputs(expr: str, family: str = "contraction",
+                      values: Optional[dict] = None) -> list:
     """Ein Größen-Eingabefeld je Index des Ausdrucks (Pattern-Matching-ID), mit
-    Kategorie-Label (M/N/K/Batch). ``values`` erhält bereits eingegebene Größen."""
+    family-abhängigem Kategorie-Label. ``values`` erhält bereits eingegebene Größen."""
     values = values or {}
-    cats = index_categories(expr)
+    cats = index_categories(expr, family)
     fields = []
     for d in expr_indices(expr):
         label = d + (f"  ({cats[d]})" if d in cats else "")
@@ -584,8 +751,10 @@ def build_controls() -> html.Div:
     Run/Cancel + Progress."""
     return html.Div([
         html.H2("Operation", style={**_H2, "marginTop": 0}),
+        _family_select(),
         _preset_select(),
         _expr_input(),
+        _op_select(),
         # Aufgelöster Output / Klassifikation / Fehler (vom Callback gefüllt).
         html.Div(id=ID_EXPR_INFO, style={"fontSize": "12px", "margin": "6px 0 0",
                                          "minHeight": "16px"}),
