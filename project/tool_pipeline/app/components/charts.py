@@ -93,6 +93,12 @@ def _points(results) -> list[dict]:
             "max_abs_err": acc.get("max_abs_err"),
             "gbps": met.get("gbps"),
             "percent_peak_flops": met.get("percent_peak_flops"),
+            # %-der-Bandbreite (memory-bound Primärmetrik, TZ 7) + Familie/Op, damit
+            # der Roofline-Hover memory-bound-Punkte über die BW statt %-vom-Peak
+            # betont. Additiv, .get → fehlt graceful None (Kontraktion unberührt).
+            "percent_peak_bw": met.get("percent_peak_bw"),
+            "family": cfg.get("family", "contraction"),
+            "op": cfg.get("op"),
             # arithm. Intensität (FLOP/Byte) = x-Achse der Roofline (TZ 5). Additiv
             # aus denselben verifizierten metrics — kein Zweit-Extraktor; fehlt sie
             # (dtype-Größe unbekannt → None), lässt die Roofline den Punkt später aus.
@@ -509,8 +515,17 @@ def figure_roofline(results, primary_key: Optional[str] = None) -> go.Figure:
     # --- Messpunkte: Farbe = Format, Symbol = Swizzle, Primärformat hervorgehoben
     for p in rpts:
         is_prim = p["key"] == prim
-        name = p["label"] + (" · sw" if p["swizzle"] else "")
-        pct = p["percent_peak_flops"]
+        # memory-bound-Punkte tragen ihre Op (add/mul/sum) im Namen (disambiguiert
+        # gleiche dtype-Kombis; Kontraktion hat op=None → unverändert).
+        op_suffix = f" · {p['op']}" if p.get("op") else ""
+        name = p["label"] + op_suffix + (" · sw" if p["swizzle"] else "")
+        # memory-bound: %-der-Bandbreite ist die Primärmetrik (nicht %-vom-Compute-
+        # Peak, der hier per Definition winzig ist) → im Hover betonen.
+        memory_bound = p.get("family") in ("elementwise", "reduction")
+        if memory_bound:
+            pct, pct_lbl = p.get("percent_peak_bw"), "% der Bandbreite"
+        else:
+            pct, pct_lbl = p["percent_peak_flops"], "% vom Peak"
         pct_str = f"{pct:.1f}" if isinstance(pct, (int, float)) else "—"
         fig.add_trace(go.Scatter(
             x=[p["arithmetic_intensity"]], y=[p["tflops"]], mode="markers", name=name,
@@ -519,11 +534,11 @@ def figure_roofline(results, primary_key: Optional[str] = None) -> go.Figure:
                 symbol=_SWZ_SYMBOL[p["swizzle"]],
                 line=dict(color=_INK if is_prim else "#ffffff", width=2 if is_prim else 1.5),
             ),
-            customdata=[[p["label"], p["arithmetic_intensity"], pct_str,
-                         "mit" if p["swizzle"] else "ohne"]],
+            customdata=[[p["label"] + op_suffix, p["arithmetic_intensity"], pct_str,
+                         "mit" if p["swizzle"] else "ohne", pct_lbl]],
             hovertemplate=("%{customdata[0]} · %{customdata[3]} Swizzle<br>"
-                           "AI %{customdata[1]:.1f} FLOP/B<br>"
-                           "%{y:.2f} TFLOP/s  ·  %{customdata[2]} % vom Peak<extra></extra>"),
+                           "AI %{customdata[1]:.2f} FLOP/B<br>"
+                           "%{y:.2f} TFLOP/s  ·  %{customdata[2]} %{customdata[4]}<extra></extra>"),
         ))
 
     _style(fig, title="Roofline — memory- vs compute-bound",
