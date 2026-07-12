@@ -42,16 +42,24 @@ KERNELS_DIR = RESULTS_DIR / "kernels"
 def config_slug(config: Union[RunConfig, dict[str, Any]]) -> str:
     """Lesbarer, normalisierter Name aus den quelltextbestimmenden Feldern.
 
-    Form: ``<expr>__<dtype>-<acc_dtype>__TM<..>_TN<..>_TK<..>[__sw]`` mit im
-    `expr` ersetztem `->` (→ `_to_`) und `,` (→ `_`). Deterministisch über die
+    Form: ``<expr>__<dtype>-<acc_dtype>__TM<..>_TN<..>_TK<..>[__<op>][__sw]`` mit
+    im `expr` ersetztem `->` (→ `_to_`) und `,` (→ `_`). Deterministisch über die
     Tile-Reihenfolge (TM/TN/TK werden explizit gelesen) und **unabhängig** von
     `dim_sizes`/`baselines` ⇒ logisch gleiche Configs ⇒ gleicher Slug.
+
+    ``op`` (TZ 7) wird nur angehängt, wenn gesetzt: Kontraktion (``op=None``) ⇒
+    Slug **byte-identisch** zu TZ 1-6; memory-bound-Familien hängen ihre Op an,
+    damit z. B. Elementwise ``add`` und ``mul`` (gleicher Ausdruck!) getrennte
+    Kernel-Dateien/Cache-Einträge bekommen (sonst still falsches gecachtes Artefakt).
     """
     d = config.to_dict() if isinstance(config, RunConfig) else dict(config)
     expr = (d.get("expr") or "").replace(" ", "").replace("->", "_to_").replace(",", "_")
     t = d.get("tile") or {}
     tile = f"TM{t.get('TM')}_TN{t.get('TN')}_TK{t.get('TK')}"
     slug = f"{expr}__{d.get('dtype')}-{d.get('acc_dtype')}__{tile}"
+    op = d.get("op")
+    if op:
+        slug += f"__{op}"
     if d.get("swizzle"):
         slug += "__sw"
     return slug

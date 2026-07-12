@@ -35,15 +35,17 @@ import torch
 _L2_FLUSH_BYTES = 256 * 1024 * 1024
 
 
-def time_first_launch(launch: Callable, A: torch.Tensor, B: torch.Tensor,
-                      C: torch.Tensor) -> float:
+def time_first_launch(launch: Callable, *operands: torch.Tensor) -> float:
     """Wall-Clock-ms des ersten (kalten) Launches — inkl. cuTile-JIT.
 
-    Füllt `C` mit dem Kernel-Ergebnis (für die anschließende `verify`-Prüfung).
+    Füllt den Output-Tensor mit dem Kernel-Ergebnis (für die anschließende
+    `verify`-Prüfung). ``operands`` sind die Launch-Argumente in der
+    Consumer-Konvention (letzter = Output): GEMM/Elementwise-binär ``(A, B, C)``,
+    Reduktion/Elementwise-unär ``(A, C)`` — arity-agnostisch (TZ 7).
     """
     torch.cuda.synchronize()
     t0 = time.perf_counter()
-    launch(A, B, C)
+    launch(*operands)
     torch.cuda.synchronize()
     return (time.perf_counter() - t0) * 1e3
 
@@ -71,20 +73,33 @@ def _summarize_times(times_ms: list[float]) -> dict[str, float]:
     }
 
 
-def benchmark(launch: Callable, A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
-              warmup: int = 10, iters: int = 30, flush_l2: bool = True) -> dict[str, Any]:
+def benchmark(launch: Callable, *operands: torch.Tensor,
+              warmup: int = 10, iters: int = 30, flush_l2: bool = True,
+              progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
     """Warme, CUDA-Event-getaktete Läufe → **Verteilung** der GPU-Kernel-Zeit.
 
+    :param operands: die Launch-Argumente (Consumer-Konvention, letzter = Output):
+                     GEMM/Elementwise-binär ``(A, B, C)``, Reduktion/Elementwise-
+                     unär ``(A, C)``. Arity-agnostisch (TZ 7); der L2-Flush-Puffer
+                     liegt auf dem Gerät des Outputs (``operands[-1]``).
     :param warmup:   ungetaktete Aufwärm-Läufe (stabilisieren Takt/Caches).
     :param iters:    getaktete Läufe; je Lauf ein eigenes Event-Paar.
     :param flush_l2: L2 zwischen den Iterationen leeren (cold-L2, PLAN §3
                      Default). Der Flush wird VOR dem Start-Event abgesetzt und
                      zählt daher NICHT in die gemessene Kernel-Zeit.
+    :param progress: optionaler Callback ``(done, iters)`` — wird nach JEDER
+                     getakteten Iteration aufgerufen (für die Live-Anzeige „k/N").
+                     Ist er gesetzt, wird pro Iteration synchronisiert, damit der
+                     Host mit der GPU taktet und die Zählung echte Läufe spiegelt;
+                     die Event-basierte Zeit je Iteration bleibt davon unberührt.
+                     Ohne Callback (CLI/Tests) läuft der unveränderte schnelle Pfad
+                     (alles enqueuen, EINMAL synchronisieren).
     :returns: ``{"run_ms"(Median), "min_ms", "p90_ms", "sigma_ms", "iters",
               "warmup"}`` — additiv zu TZ 1 (nur neue Schlüssel dazu).
     """
+    out = operands[-1]   # Consumer-Konvention: der letzte Operand ist der Output
     for _ in range(warmup):
-        launch(A, B, C)
+        launch(*operands)
     torch.cuda.synchronize()
 
     # Flush-Puffer EINMAL allozieren, dann je Iteration nullen (die Allokation
@@ -95,7 +110,7 @@ def benchmark(launch: Callable, A: torch.Tensor, B: torch.Tensor, C: torch.Tenso
     flush_buf = None
     if flush_l2:
         try:
-            flush_buf = torch.empty(_L2_FLUSH_BYTES, dtype=torch.int8, device=C.device)
+            flush_buf = torch.empty(_L2_FLUSH_BYTES, dtype=torch.int8, device=out.device)
         except RuntimeError:      # torch.cuda.OutOfMemoryError ist eine RuntimeError-Unterklasse
             flush_buf = None
 
@@ -107,8 +122,14 @@ def benchmark(launch: Callable, A: torch.Tensor, B: torch.Tensor, C: torch.Tenso
             # (Stream-Reihenfolge) → kalt gemessen, ohne den Flush mitzutakten.
             flush_buf.zero_()
         starts[i].record()
-        launch(A, B, C)
+        launch(*operands)
         ends[i].record()
+        if progress is not None:
+            # Nur mit Live-Anzeige: Host mit GPU takten (die elapsed_time zwischen
+            # start[i]/end[i] ist GPU-seitig und bleibt unberührt) und „i+1/iters"
+            # melden — NACH ends[i].record(), also außerhalb des Messfensters.
+            torch.cuda.synchronize()
+            progress(i + 1, iters)
     torch.cuda.synchronize()
 
     times_ms = [s.elapsed_time(e) for s, e in zip(starts, ends)]

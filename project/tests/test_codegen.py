@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tool_pipeline.codegen.compile import clear_cache, load_kernel  # noqa: E402
 from tool_pipeline.codegen.emit import emit  # noqa: E402
 from tool_pipeline.codegen.templates.contraction import build_gemm_module  # noqa: E402
+from tool_pipeline.codegen.templates.elementwise import build_elementwise_module  # noqa: E402
+from tool_pipeline.codegen.templates.reduction import build_reduction_module  # noqa: E402
 from tool_pipeline.measure.verify import _TOLERANCES  # noqa: E402
 from tool_pipeline.schema import RunConfig, RunResult  # noqa: E402
 
@@ -232,6 +234,115 @@ def test_swizzle_emit_structure():
     assert "group_size_m = min(" in swz, swz
     # Orientierung in BEIDEN gleich (der eine Beweis-Invariant, Risiko ①).
     assert "acc = ct.mma(a, b, acc)" in plain and "acc = ct.mma(a, b, acc)" in swz
+
+
+def test_reduction_emit_structure():
+    """Headless: das Reduktions-Template ist memory-bound — ct.sum-Idiom, KEIN
+    ct.mma/kein GEMM-K-Loop-Reshape; beide Pfade (single-shot + markierter
+    Fallback) da; launch-Arity 2 (launch(A, C)); TK steuert LOOP_TILE."""
+    src = build_reduction_module({"TM": 128, "TN": 128, "TK": 512}, "fp16", "fp32")
+    # memory-bound: ct.sum da, KEIN Tensor-Core.
+    assert "ct.sum(" in src and "ct.mma(" not in src, src
+    # Beide Pfade vorhanden.
+    assert "def row_sum_single(" in src and "def row_sum_loop(" in src, src
+    assert "single-shot" in src and "FALLBACK" in src, src
+    # launch-Arity 2 (1 Operand + Output) — NICHT die GEMM-Arity 3.
+    assert "def launch(A, C):" in src, src
+    # TK steuert die Fallback-Chunk-Breite (steht im Slug).
+    assert "LOOP_TILE = 512" in src, src
+
+
+def test_reduction_emit_rejects_bad_acc():
+    """Unbekannter acc_dtype ⇒ ValueError (loud-fail, wie beim GEMM-Template)."""
+    try:
+        build_reduction_module({"TM": 128, "TN": 128, "TK": 64}, "fp16", "bf16")
+    except ValueError:
+        return
+    raise AssertionError("erwartete ValueError für acc_dtype='bf16'")
+
+
+def test_elementwise_emit_structure():
+    """Headless: das Elementwise-Template ist memory-bound — cdiv-2D-Grid, KEIN
+    ct.mma/kein Akku; binaere Ops laden A+B (Arity 3), copy nur A (Arity 2); das
+    Op-Fragment wird korrekt substituiert (a+b / a*b / a)."""
+    tile = {"TM": 64, "TN": 128, "TK": 64}
+    add = build_elementwise_module(tile, "fp16", "fp32", "add")
+    mul = build_elementwise_module(tile, "fp16", "fp32", "mul")
+    cpy = build_elementwise_module(tile, "fp16", "fp32", "copy")
+    # memory-bound: kein Tensor-Core, kein Akku, cdiv-Grid.
+    for src in (add, mul, cpy):
+        assert "ct.mma(" not in src and "ct.full(" not in src, src
+        assert "ct.cdiv(M, TM)" in src and "ct.cdiv(N, TN)" in src, src
+        assert "TM = 64" in src and "TN = 128" in src, src
+    # Op-Fragment korrekt substituiert.
+    assert "ct.astype(a + b, C.dtype)" in add, add
+    assert "ct.astype(a * b, C.dtype)" in mul, mul
+    assert "ct.astype(a, C.dtype)" in cpy, cpy
+    # Arity: binaer laedt A+B und hat launch(A, B, C); copy nur A und launch(A, C).
+    assert "def launch(A, B, C):" in add and "ct.load(B," in add, add
+    assert "def launch(A, C):" in cpy and "ct.load(B," not in cpy, cpy
+
+
+def test_elementwise_emit_rejects_bad_op():
+    """Unbekannte Op ⇒ ValueError (loud-fail)."""
+    try:
+        build_elementwise_module({"TM": 128, "TN": 128, "TK": 64}, "fp16", "fp32", "relu")
+    except ValueError:
+        return
+    raise AssertionError("erwartete ValueError für op='relu'")
+
+
+def test_emit_routes_families():
+    """Headless: emit() routet auf das Template der Familie (Kopf + Body passend)."""
+    # Kontraktion → GEMM (ct.mma da).
+    gemm = emit(RunConfig())
+    assert "ct.mma(a, b, acc)" in gemm, gemm
+    # Elementwise → cdiv-Grid, kein mma; Header nennt Familie + op.
+    el = emit(RunConfig(family="elementwise", op="mul", expr="ij,ij->ij",
+                        dim_sizes={"i": 4, "j": 4}))
+    assert "ct.mma(" not in el and "ct.astype(a * b, C.dtype)" in el, el
+    assert "# Familie  : elementwise" in el and "op=mul" in el, el
+    # Reduktion → ct.sum, kein mma; Header nennt Familie + op=sum.
+    red = emit(RunConfig(family="reduction", op="sum", expr="ij->i",
+                         dim_sizes={"i": 4, "j": 4}))
+    assert "ct.mma(" not in red and "ct.sum(" in red, red
+    assert "# Familie  : reduction" in red and "op=sum" in red, red
+
+
+def test_emit_elementwise_requires_op():
+    """Elementwise ohne op ⇒ ValueError (loud-fail statt still falscher Kernel)."""
+    try:
+        emit(RunConfig(family="elementwise", op=None, expr="ij,ij->ij",
+                       dim_sizes={"i": 4, "j": 4}))
+    except ValueError:
+        return
+    raise AssertionError("erwartete ValueError für Elementwise ohne op")
+
+
+def test_emit_unknown_family_rejected():
+    """Unbekannte Familie ⇒ ValueError."""
+    try:
+        emit(RunConfig(family="foo"))
+    except ValueError:
+        return
+    raise AssertionError("erwartete ValueError für unbekannte Familie")
+
+
+def test_emit_contraction_header_byte_identical():
+    """Der Kontraktions-Header bleibt byte-identisch zu TZ 1-6 (keine Familie-Zeile)
+    → die git-getrackten results/kernels/*.py werden NICHT umgeschrieben."""
+    gemm = emit(RunConfig())
+    expected_head = (
+        "# " + "=" * 74 + "\n"
+        "# Auto-generiert vom cuTile Performance Lab (Codegen C1).\n"
+        "# Aus einer RunConfig erzeugt.\n"
+        "# Ausdruck : ik,kj->ij\n"
+        "# Format   : fp16 -> fp32 (Akku)\n"
+        "# Tile     : TM=128 TN=128 TK=64 | swizzle=False\n"
+        "# " + "=" * 74 + "\n"
+    )
+    assert gemm.startswith(expected_head), gemm[:400]
+    assert "# Familie" not in gemm.split('import cuda.tile')[0], "Kontraktion darf keine Familie-Zeile haben"
 
 
 def test_gemm_swizzle_correct_across_sizes():
@@ -444,7 +555,8 @@ def test_run_verify_failed_status():
 
     orig_store, orig_verify = st.append_result, R.verify
     st.append_result = lambda r, path=None: None
-    R.verify = lambda C, A, B, cfg: {"max_abs_err": 999.0, "passed": False, "atol": 0.2, "rtol": 0.02}
+    # verify ist seit TZ 7 variadisch: verify(output, operands: list, config).
+    R.verify = lambda out, ops, cfg: {"max_abs_err": 999.0, "passed": False, "atol": 0.2, "rtol": 0.02}
     try:
         res = R.run(RunConfig())
         assert res.status == "verify_failed", f"status={res.status}"

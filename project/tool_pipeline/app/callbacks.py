@@ -30,7 +30,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import dash_bootstrap_components as dbc
-from dash import ALL, Input, Output, State, dcc, html
+from dash import ALL, Input, Output, State, dcc, html, no_update
 from filelock import FileLock, Timeout
 
 from .components import charts, code_panel, controls, kpis
@@ -64,6 +64,8 @@ def _format_status_strip(results) -> html.Div:
     for r in results:
         cfg = r.config or {}
         lbl = f"{cfg.get('dtype')} → {cfg.get('acc_dtype')}"
+        if cfg.get("op"):
+            lbl += f" · {cfg.get('op')}"
         if cfg.get("swizzle"):
             lbl += " · sw"
         ok = r.status == "ok"
@@ -81,7 +83,11 @@ _SECTION = {"fontSize": "11px", "letterSpacing": "0.08em", "textTransform": "upp
 def _format_label(result) -> str:
     cfg = result.config or {}
     base = f"{cfg.get('dtype')} → {cfg.get('acc_dtype')}"
-    return base + " · sw" if cfg.get("swizzle") else base   # einheitlich '· sw' (Tab/Badge/Legende)
+    if cfg.get("op"):            # memory-bound: Op mit (add/mul/copy/sum) — disambiguiert
+        base += f" · {cfg.get('op')}"
+    if cfg.get("swizzle"):
+        base += " · sw"          # einheitlich '· sw' (Tab/Badge/Legende)
+    return base
 
 
 def _tab_content(result) -> html.Div:
@@ -150,10 +156,15 @@ def render_comparison(results) -> list:
     return [p for p in parts if p is not None]
 
 
-def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
-                swizzle=False, baselines=None, progress=None) -> list:
+def execute_run(expr, dim_sizes, selection, family="contraction", op=None,
+                tm=None, tn=None, tk=None, swizzle=False, baselines=None,
+                warmup=None, iters=None, progress=None) -> list:
     """Reine Ablauflogik des Batch-Vergleichs (Dash-frei, headless testbar):
     validieren → RunConfig je Format → EIN GPU-Lock → ``run()`` je Format → rendern.
+
+    ``family`` (contraction/elementwise/reduction) + ``op`` (Elementwise: add/mul/
+    copy) wählen die Operations-Familie; alle Validierungen und der Config-Bau sind
+    entsprechend family-abhängig.
 
     Gibt **immer** eine Liste von Main-Komponenten zurück (nie eine Exception):
     ungültiger Ausdruck/Größen/Tile/Auswahl → Warnung (kein GPU-Lauf); GPU belegt →
@@ -163,7 +174,8 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
     ``expr`` ist der einsum-Ausdruck (Presets/Freitext), ``dim_sizes`` das Roh-dict
     Index→Größe (aus den dynamischen Feldern). ``tm/tn/tk`` (Tile) + ``swizzle``
     steuern die Kachelung; ``tm/tn/tk=None`` ⇒ RunConfig-Default-Tile. ``baselines``
-    ist die (evtl. leere) Liste zuzuschaltender Vergleiche. ``progress`` ist der
+    ist die (evtl. leere) Liste zuzuschaltender Vergleiche. ``warmup``/``iters`` sind
+    die Mess-Einstellungen (``None`` ⇒ RunConfig-Defaults 10/30). ``progress`` ist der
     optionale Dash-``set_progress``-Callback → headless mit ``None`` testbar.
     """
     def _set(pct: int, text: str) -> None:
@@ -174,13 +186,13 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
     _set(0, "")  # neuer Lauf → Balken sofort leeren (löst den vollen Balken des
                  # Vorlaufs ab; auch bei anschließendem Validierungsfehler ehrlich leer)
 
-    err = controls.validate_expr(expr)
+    err = controls.validate_expr(expr, family)
     if err:
         return [_alert("Ungültiger Ausdruck", err, "warning")]
-    err = controls.validate_dim_sizes(expr, dim_sizes)
+    err = controls.validate_dim_sizes(expr, dim_sizes, family)
     if err:
         return [_alert("Ungültige Größe", err, "warning")]
-    err = controls.validate_selection(selection)
+    err = controls.validate_selection(selection, family)
     if err:
         return [_alert("Ungültige Auswahl", err, "warning")]
     err = controls.validate_baselines(baselines)
@@ -200,6 +212,15 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
             return [_alert("Ungültige Kachelung", err, "warning")]
         tile = controls.tile_from_controls(tm, tn, tk)
 
+    # Mess-Einstellungen (Warmup/Iterationen): analog zum Tile nur wenn gesetzt (GUI
+    # liefert immer welche); sonst None ⇒ RunConfig-Default (10/30).
+    bench = None
+    if warmup is not None or iters is not None:
+        err = controls.validate_bench(warmup, iters)
+        if err:
+            return [_alert("Ungültige Mess-Einstellungen", err, "warning")]
+        bench = controls.bench_from_controls(warmup, iters)
+
     # ALLES ab hier steht IM try — inkl. Config-Bau, Lazy-Import (kann ImportError
     # werfen), mkdir/Lock, die run()-Schleife und das Rendern —, damit execute_run
     # die Zusage „gibt immer eine Liste zurück, nie eine Exception" hält (Naht-
@@ -208,23 +229,33 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
     # 100 % zu setzen) — der Alert erklärt den Grund.
     try:
         configs = controls.configs_from_selection(expr, dim_sizes, selection, tile=tile,
-                                                   swizzle=swizzle, baselines=baselines)
+                                                   swizzle=swizzle, baselines=baselines,
+                                                   bench=bench, family=family, op=op)
         from tool_pipeline.run import run  # lazy → Haupt-Prozess bleibt CUDA-frei
         _GPU_LOCK.parent.mkdir(parents=True, exist_ok=True)
         results = []
         total = len(configs)
         with FileLock(str(_GPU_LOCK)).acquire(timeout=_LOCK_TIMEOUT):
             for i, cfg in enumerate(configs, 1):
+                op_txt = f" · {cfg.op}" if cfg.op else ""
+                label = f"Format {i}/{total}: {cfg.dtype} → {cfg.acc_dtype}{op_txt}"
                 # Vor dem Lauf: welches Format gerade rechnet; der Balken steht auf den
-                # bereits fertigen Schritten ((i-1)/total).
-                _set(int(100 * (i - 1) / total),
-                     f"Format {i}/{total}: {cfg.dtype} → {cfg.acc_dtype} …")
-                results.append(run(cfg))
+                # bereits fertigen Schritten ((i-1)/total). Bis die Messung startet
+                # (Compile/Verify) bleibt er hier stehen.
+                _set(int(100 * (i - 1) / total), f"{label} · kompiliere/verifiziere …")
+
+                # Live-Fortschritt der Messung: run() ruft diesen Callback nach jeder
+                # getakteten Iteration mit (done, iters). Der Balken wächst innerhalb
+                # des Formats von (i-1)/total bis i/total; der Text zeigt „Iteration k/N".
+                def _bench_progress(done, n_iters, _label=label, _i=i):
+                    frac = (_i - 1 + done / n_iters) / total
+                    _set(int(100 * frac), f"{_label} · Iteration {done}/{n_iters}")
+
+                results.append(run(cfg, progress=_bench_progress))
                 # Nach dem Lauf: Schritt erledigt → Balken einen Schritt voller (i/total).
                 # Nach dem letzten Format steht er auf 100 % und bleibt dort (running=
                 # blendet ihn NICHT mehr aus) bis der nächste Lauf ihn oben zurücksetzt.
-                _set(int(100 * i / total),
-                     f"Format {i}/{total}: {cfg.dtype} → {cfg.acc_dtype} ✓")
+                _set(int(100 * i / total), f"{label} ✓")
         return render_comparison(results)
     except Timeout:
         return [_alert("GPU belegt",
@@ -234,11 +265,12 @@ def execute_run(expr, dim_sizes, selection, tm=None, tn=None, tk=None,
         return [_alert("Interner Fehler", f"{type(e).__name__}: {e}", "danger")]
 
 
-def _expr_info(expr):
+def _expr_info(expr, family="contraction"):
     """Info-Zeile unter dem Ausdrucksfeld: aufgelöster (expliziter) Ausdruck +
-    Kategorie je Index (M/N/K/Batch) — macht die Klassifikation sichtbar."""
-    resolved = controls.resolve_expr(expr)
-    cats = controls.index_categories(expr)
+    Kategorie je Index (family-abhängig: M/N/K/Batch bzw. elem bzw. bleibt/Σ) —
+    macht die Klassifikation sichtbar."""
+    resolved = controls.resolve_expr(expr, family)
+    cats = controls.index_categories(expr, family)
     parts = ", ".join(f"{d}:{c}" for d, c in cats.items())
     children = [html.Span("→ ", style={"color": "#6b7280"}), html.Code(resolved)]
     if parts:
@@ -249,36 +281,67 @@ def _expr_info(expr):
 def register(app) -> None:
     """Callbacks registrieren: Preset→Ausdruck, Ausdruck→Größenfelder, Background-Vergleich."""
 
-    # 1) Preset-Dropdown füllt den Ausdruck (der Freitext bleibt danach editierbar).
+    # 0) Familien-Auswahl: aktualisiert Presets, setzt das erste Preset der Familie
+    #    (löst dann Preset→Ausdruck+Op aus), blendet die Op-Auswahl nur bei
+    #    Elementwise ein und passt die Format-Auswahl an (memory-bound: fp16/bf16/fp32).
+    @app.callback(
+        Output(controls.ID_PRESET, "options"),
+        Output(controls.ID_PRESET, "value"),
+        Output(controls.ID_OP_WRAP, "style"),
+        Output(controls.ID_DTYPES, "options"),
+        Output(controls.ID_DTYPES, "value"),
+        Input(controls.ID_FAMILY, "value"),
+        prevent_initial_call=True,
+    )
+    def _apply_family(family):
+        family = family or "contraction"
+        op_style = ({"display": "block", "marginTop": "10px"}
+                    if family == "elementwise" else {"display": "none"})
+        return (controls.preset_options(family),
+                controls.family_default_preset(family),
+                op_style,
+                controls.dtype_options_for_family(family),
+                controls.default_selection_for_family(family))
+
+    # 1) Preset-Dropdown füllt Ausdruck **und** (Elementwise-)Op. Der Preset-Wert ist
+    #    "<op>|<expr>"; der Freitext/die Op bleiben danach editierbar. Op wird nur
+    #    für die Elementwise-Ops (add/mul/copy) gesetzt (sum/None → unverändert).
     @app.callback(
         Output(controls.ID_EXPR, "value"),
+        Output(controls.ID_OP, "value"),
         Input(controls.ID_PRESET, "value"),
         prevent_initial_call=True,
     )
-    def _apply_preset(preset_expr):
-        return preset_expr or controls._DEFAULT_EXPR
+    def _apply_preset(preset_value):
+        expr, op = controls.parse_preset_value(preset_value)
+        op_out = op if op in controls._OP_KEYS else no_update
+        return (expr or controls._DEFAULT_EXPR), op_out
 
-    # 2) Ausdruck → dynamische Größenfelder (je Index) + Info/Fehler. Bereits
-    #    eingegebene Größen bleiben erhalten; ungültiger Ausdruck → nur Fehlertext,
-    #    keine Felder (der Run-Callback lehnt ihn dann ebenfalls sauber ab).
+    # 2) Ausdruck → dynamische Größenfelder (je Index) + Info/Fehler (family-abhängig).
+    #    Bereits eingegebene Größen bleiben erhalten; ungültiger Ausdruck → nur
+    #    Fehlertext, keine Felder (der Run-Callback lehnt ihn dann ebenfalls sauber ab).
     @app.callback(
         Output(controls.ID_INDEX_SIZES, "children"),
         Output(controls.ID_EXPR_INFO, "children"),
         Input(controls.ID_EXPR, "value"),
+        State(controls.ID_FAMILY, "value"),
         State({"type": controls.INDEX_SIZE_TYPE, "index": ALL}, "id"),
         State({"type": controls.INDEX_SIZE_TYPE, "index": ALL}, "value"),
     )
-    def _rebuild_index_sizes(expr, cur_ids, cur_vals):
-        err = controls.validate_expr(expr)
+    def _rebuild_index_sizes(expr, family, cur_ids, cur_vals):
+        family = family or "contraction"
+        err = controls.validate_expr(expr, family)
         prev = controls.dim_sizes_from_state(cur_ids, cur_vals)  # eingegebene Größen erhalten
         if err:
             return [], html.Span(err, style={"color": "#b91c1c"})
-        return controls.index_size_inputs(expr, values=prev), _expr_info(expr)
+        return controls.index_size_inputs(expr, family, values=prev), _expr_info(expr, family)
 
     # 3) Haupt-Callback (Background): Ausdruck + Größen (Pattern-Matching) + Achsen.
     @app.callback(
         Output("main", "children"),
         Input(controls.ID_RUN, "n_clicks"),
+        State(controls.ID_FAMILY, "value"),
+        State(controls.ID_OP, "value"),
         State(controls.ID_EXPR, "value"),
         State({"type": controls.INDEX_SIZE_TYPE, "index": ALL}, "id"),
         State({"type": controls.INDEX_SIZE_TYPE, "index": ALL}, "value"),
@@ -288,6 +351,8 @@ def register(app) -> None:
         State(controls.ID_TILE_TK, "value"),
         State(controls.ID_SWIZZLE, "value"),
         State(controls.ID_BASELINES, "value"),
+        State(controls.ID_BENCH_WARMUP, "value"),
+        State(controls.ID_BENCH_ITERS, "value"),
         background=True,
         running=[
             (Output(controls.ID_RUN, "disabled"), True, False),
@@ -303,11 +368,12 @@ def register(app) -> None:
         cancel=[Input(controls.ID_CANCEL, "n_clicks")],
         prevent_initial_call=True,
     )
-    def _on_run(set_progress, n_clicks, expr, size_ids, size_vals, selection,
-                tm, tn, tk, swizzle, baselines):
+    def _on_run(set_progress, n_clicks, family, op, expr, size_ids, size_vals, selection,
+                tm, tn, tk, swizzle, baselines, warmup, iters):
         dim_sizes = controls.dim_sizes_from_state(size_ids, size_vals)
-        return execute_run(expr, dim_sizes, selection, tm=tm, tn=tn, tk=tk,
-                           swizzle=swizzle, baselines=baselines, progress=set_progress)
+        return execute_run(expr, dim_sizes, selection, family=family, op=op,
+                           tm=tm, tn=tn, tk=tk, swizzle=swizzle, baselines=baselines,
+                           warmup=warmup, iters=iters, progress=set_progress)
 
     # 4) Nach jedem Lauf im Browser prüfen: ist die Kopfmeldung im Main eine Warnung
     #    oder ein Fehler (dbc.Alert vom Typ warning/danger — also ein abgebrochener
