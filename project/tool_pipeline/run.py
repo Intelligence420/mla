@@ -28,7 +28,11 @@ import cuda.tile as ct
 import torch
 
 from .codegen.compile import load_kernel
-from .intermediate_representation.parse import parse
+from .intermediate_representation.parse import (
+    ElementwiseIR,
+    ReductionIR,
+    parse,
+)
 from .intermediate_representation.reshape import (
     from_canonical_output,
     to_canonical,
@@ -36,7 +40,11 @@ from .intermediate_representation.reshape import (
 )
 from .measure.baselines import measure_baselines
 from .measure.bench import benchmark, time_first_launch
-from .measure.metrics import compute_metrics
+from .measure.metrics import (
+    compute_metrics,
+    compute_metrics_elementwise,
+    compute_metrics_reduction,
+)
 from .measure.provenance import gpu_state
 from .measure.verify import verify
 from .schema import (
@@ -63,35 +71,30 @@ _TORCH_DTYPE = {
 }
 
 
-def _build_natural_operands(dtype: str, shape_a: tuple, shape_b: tuple):
-    """Baue A, B in **natürlicher einsum-Shape** (aus dem Ausdruck) im Compute-
-    `dtype` (deterministisch; Seed außen). Der B1-View bringt sie danach auf die
-    kanonische (B,M,K)/(B,K,N)-Form.
+def _build_operand(dtype: str, shape: tuple):
+    """Ein Operand in beliebiger Rang-Shape im Compute-`dtype` (deterministisch;
+    Seed außen).
 
-    Beliebige Rang-Shapes (nicht nur 2D) — der Ausdruck bestimmt die Achsen.
-    fp16/bf16 sind native `torch.randn`-dtypes; tf32 (torch.float32 + Kernel-Cast)
-    und fp8 (fp16→`.to(fp8)`) haben eigene Zweige.
+    fp16/bf16/fp32 sind native `torch.randn`-dtypes; tf32 ist torch.float32 (+
+    Kernel-Cast, nur Kontraktion); fp8 wird host-seitig gecastet (fp16→`.to(fp8)`,
+    wie in analysis/dtype_analyse.py bewiesen).
     """
     if dtype in ("fp16", "bf16", "fp32"):
-        # Native torch-dtypes (fp32 = Anker/Diagnose ohne Tensor-Core-Pfad).
-        t = _TORCH_DTYPE[dtype]
-        return (torch.randn(*shape_a, dtype=t, device="cuda"),
-                torch.randn(*shape_b, dtype=t, device="cuda"))
+        return torch.randn(*shape, dtype=_TORCH_DTYPE[dtype], device="cuda")
     if dtype == "tf32":
-        # tf32-Operanden sind normale fp32-Tensoren; die tf32-Reduktion macht
-        # der Kernel-Cast (ct.astype .. ct.tfloat32), NICHT der Input-dtype.
-        return (torch.randn(*shape_a, dtype=torch.float32, device="cuda"),
-                torch.randn(*shape_b, dtype=torch.float32, device="cuda"))
+        return torch.randn(*shape, dtype=torch.float32, device="cuda")
     if dtype in ("fp8e4m3", "fp8e5m2"):
-        # torch.randn kann fp8 NICHT direkt erzeugen -> fp16 bauen und host-seitig
-        # casten (genau wie in analysis/dtype_analyse.py bewiesen). Der Kernel
-        # rechnet die fp8-Tiles direkt (kein in-Kernel-Cast).
         fp8 = torch.float8_e4m3fn if dtype == "fp8e4m3" else torch.float8_e5m2
-        return (torch.randn(*shape_a, dtype=torch.float16, device="cuda").to(fp8),
-                torch.randn(*shape_b, dtype=torch.float16, device="cuda").to(fp8))
-    raise NotImplementedError(
-        f"input-dtype {dtype!r} noch nicht implementiert."
-    )
+        return torch.randn(*shape, dtype=torch.float16, device="cuda").to(fp8)
+    raise NotImplementedError(f"input-dtype {dtype!r} noch nicht implementiert.")
+
+
+def _build_natural_operands(dtype: str, shape_a: tuple, shape_b: tuple):
+    """Baue A, B in **natürlicher einsum-Shape** (aus dem Ausdruck) im Compute-
+    `dtype`. Der B1-View bringt sie danach auf die kanonische (B,M,K)/(B,K,N)-Form.
+    (Dünner Wrapper um `_build_operand` — die Kontraktion braucht genau zwei.)
+    """
+    return _build_operand(dtype, shape_a), _build_operand(dtype, shape_b)
 
 
 def _build_inputs(config: RunConfig, canonical):
@@ -120,6 +123,82 @@ def _build_inputs(config: RunConfig, canonical):
     return A_nat, B_nat, A_c, B_c, C_c
 
 
+# ---------------------------------------------------------------------------
+# Memory-bound-Familien (TZ 7): eigener, additiver Pfad — KEIN B1-Reshape, keine
+# Kanonisierung, family-abhängige Operanden/Metriken. Die Kontraktion bleibt
+# davon unberührt (eigener Zweig in `run`).
+# ---------------------------------------------------------------------------
+def _memory_bound_sizes(ir) -> dict:
+    """`provenance["sizes"]` family-geformt (Anzeige/CLI; kein M/N/K)."""
+    if isinstance(ir, ElementwiseIR):
+        return {"shape": list(ir.shape), "elements": ir.num_elements, "arity": ir.arity}
+    if isinstance(ir, ReductionIR):
+        return {"in_shape": list(ir.in_shape), "kept": ir.kept_size,
+                "reduced": ir.reduced_size, "out_shape": list(ir.out_shape)}
+    return {}
+
+
+def _build_memory_bound_inputs(config: RunConfig, ir):
+    """Baue die Operanden für Elementwise/Reduktion — **ohne** B1/Kanonisierung.
+
+    :returns: ``(operands, ref_operands, out_reshaper)`` mit
+              * ``operands``     = Launch-Argumente (letzter = Output), 2D-geformt.
+              * ``ref_operands`` = natürliche Operanden für die verify-Referenz.
+              * ``out_reshaper`` = formt den Kernel-Output in die natürliche
+                                   einsum-Shape zurück (für verify).
+    Output-dtype = `acc_dtype` (kein Akku-Loop; nur der Store castet). Acc-Regeln
+    werden auch hier früh erzwungen (Stufe-2-Prüfung).
+    """
+    err = check_dtype_combo(config.dtype, config.acc_dtype)
+    if err:
+        raise NotImplementedError(err)
+    if config.acc_dtype not in _TORCH_DTYPE:  # Sicherheitsnetz (Regeln decken das ab)
+        raise NotImplementedError(f"acc-dtype {config.acc_dtype!r} nicht nach torch auflösbar.")
+    torch.manual_seed(0)
+    out_dt = _TORCH_DTYPE[config.acc_dtype]
+
+    if isinstance(ir, ElementwiseIR):
+        # Op bestimmt die Arity (copy=1, add/mul=2) — muss zum Ausdruck passen.
+        expected_arity = 1 if config.op == "copy" else 2
+        if ir.arity != expected_arity:
+            raise ValueError(
+                f"Elementwise-Op {config.op!r} erwartet {expected_arity} Operanden, "
+                f"Ausdruck '{config.expr}' hat {ir.arity}."
+            )
+        nat = [_build_operand(config.dtype, ir.shape) for _ in range(ir.arity)]
+        rows, cols = ir.rows, ir.cols
+        # 2D-Sicht (rows, cols) für den gekachelten Kernel (View — nat ist kontig.).
+        kern_ins = [t.reshape(rows, cols) for t in nat]
+        C = torch.empty(rows, cols, dtype=out_dt, device="cuda")
+        shape = ir.shape
+        return (tuple(kern_ins) + (C,), nat, lambda c: c.reshape(shape))
+
+    if isinstance(ir, ReductionIR):
+        A_nat = _build_operand(config.dtype, ir.in_shape)
+        # Permute auf [kept…, reduced…], kontiguieren, auf (kept, reduced) falten.
+        # Die evtl. Kopie ist Setup (außerhalb der Zeitmessung + der analytischen
+        # Roofline-Metriken → verfälscht nichts).
+        order = ir.kept_dims + ir.reduced_dims
+        perm = [ir.input_axes.index(d) for d in order]
+        A_2d = A_nat.permute(*perm).contiguous().reshape(ir.kept_size, ir.reduced_size)
+        C = torch.empty(ir.kept_size, dtype=out_dt, device="cuda")
+        out_shape = ir.out_shape
+        return ((A_2d, C), [A_nat], lambda c: c.reshape(out_shape))
+
+    raise NotImplementedError(f"memory-bound: unbekannte IR {type(ir).__name__}")
+
+
+def _memory_bound_metrics(config: RunConfig, ir, run_ms: float) -> dict:
+    """Family-abhängige Kennzahlen (GB/s primär) für Elementwise/Reduktion."""
+    if isinstance(ir, ElementwiseIR):
+        return compute_metrics_elementwise(ir.num_elements, ir.arity, config.op,
+                                           run_ms, config.dtype, config.acc_dtype)
+    if isinstance(ir, ReductionIR):
+        return compute_metrics_reduction(ir.kept_size, ir.reduced_size, run_ms,
+                                         config.dtype, config.acc_dtype)
+    raise NotImplementedError(f"memory-bound-Metrik: unbekannte IR {type(ir).__name__}")
+
+
 def _provenance(config: RunConfig) -> dict:
     """Statische Provenienz-Basis. `sizes` wird nach dem Parsen, `gpu_state`
     (Takt/Temp/Power via nvidia-smi) nach der Messung ergänzt (TZ 4)."""
@@ -132,8 +211,13 @@ def _provenance(config: RunConfig) -> dict:
     }
 
 
-def run(config: RunConfig) -> RunResult:
-    """Führe einen vollständigen Lauf aus und liefere ein `RunResult`."""
+def run(config: RunConfig, progress=None) -> RunResult:
+    """Führe einen vollständigen Lauf aus und liefere ein `RunResult`.
+
+    ``progress`` ist ein optionaler Callback ``(done, iters)``, der während der
+    warmen Messung nach jeder getakteten Iteration aufgerufen wird (Live-Anzeige
+    „k/N" in der GUI). Ohne Callback (CLI/Tests) unverändert.
+    """
     provenance = _provenance(config)
     accuracy: dict = {}
     timing: dict = {}
@@ -157,6 +241,80 @@ def run(config: RunConfig) -> RunResult:
             note = f"store: {type(store_e).__name__}: {store_e}"
             r.error = f"{r.error} | {note}" if r.error else note
         return r
+
+    # ===================================================================
+    # Memory-bound-Familien (Elementwise/Reduktion, TZ 7): eigener, additiver
+    # Zweig — KEIN B1-Reshape/Kanonisierung, family-abhängige Operanden/Verify/
+    # Metriken, variable Launch-Arity. Kehrt in allen Pfaden zurück; der
+    # Kontraktions-Flow darunter bleibt dadurch **unberührt**.
+    # ===================================================================
+    if config.family in ("elementwise", "reduction"):
+        # 1) IR (family-typisiert) + family-geformte Größen.
+        try:
+            ir = parse(config)
+            provenance["sizes"] = _memory_bound_sizes(ir)
+        except Exception as e:
+            return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")
+
+        # 2) Operanden (natürlich → 2D für den Kernel), OHNE B1/Kanonisierung.
+        try:
+            operands, ref_operands, out_reshaper = _build_memory_bound_inputs(config, ir)
+        except Exception as e:
+            return _result(STATUS_COMPILE_ERROR, error=f"input build: {type(e).__name__}: {e}")
+
+        # 3) Quelltext → ladbarer Kernel (persistiert + gecacht).
+        try:
+            comp = load_kernel(config)
+            kernel_path = store.store_relpath(comp.kernel_path)
+            try:
+                kernel_source = Path(comp.kernel_path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                kernel_source = None
+        except Exception as e:
+            return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")
+
+        # 4) Kalt-Lauf = compile_ms (füllt den Output für verify). Arity variabel.
+        try:
+            timing["compile_ms"] = round(time_first_launch(comp.launch, *operands), 3)
+        except ct.TileError as e:
+            return _result(STATUS_COMPILE_ERROR, error=f"cuTile-JIT: {type(e).__name__}: {str(e)[:400]}")
+        except Exception as e:
+            return _result(STATUS_RUN_ERROR, error=f"kalt-launch: {type(e).__name__}: {str(e)[:400]}")
+
+        # 5) verify-before-trust: Output in die natürliche Shape zurückformen, dann
+        #    gegen die family-/op-abhängige fp32-Referenz prüfen (variadisch).
+        try:
+            out_nat = out_reshaper(operands[-1])   # letzter Operand = Output
+            accuracy = verify(out_nat, ref_operands, config)
+        except NotImplementedError as e:
+            return _result(STATUS_COMPILE_ERROR, error=f"verify: {type(e).__name__}: {e}")
+        except Exception as e:
+            return _result(STATUS_RUN_ERROR, error=f"verify: {type(e).__name__}: {str(e)[:400]}")
+        if not accuracy["passed"]:
+            return _result(
+                STATUS_VERIFY_FAILED,
+                error=(f"max_abs_err={accuracy['max_abs_err']:.4g} überschreitet Toleranz "
+                       f"(atol={accuracy['atol']}, rtol={accuracy['rtol']})"),
+            )
+
+        # 6) Warme Messung + family-abhängige Metriken (GB/s primär).
+        try:
+            b = benchmark(comp.launch, *operands,
+                          warmup=config.bench_warmup, iters=config.bench_iters,
+                          progress=progress)
+            timing["run_ms"] = round(b["run_ms"], 5)
+            timing["min_ms"] = round(b["min_ms"], 5)
+            timing["p90_ms"] = round(b["p90_ms"], 5)
+            timing["sigma_ms"] = round(b["sigma_ms"], 5)
+            timing["bench_iters"] = b["iters"]
+            metrics = _memory_bound_metrics(config, ir, b["run_ms"])
+            metrics["tflops"] = round(metrics["tflops"], 3)
+        except Exception as e:
+            return _result(STATUS_RUN_ERROR, error=f"bench: {type(e).__name__}: {str(e)[:400]}")
+
+        provenance["gpu_state"] = gpu_state()
+        # Keine GEMM-Baselines für memory-bound (torch.matmul/gemm_flops passen nicht).
+        return _result(STATUS_OK)
 
     # 1) IR → kanonische Größen + B1-View-Spezifikation
     try:
@@ -204,7 +362,7 @@ def run(config: RunConfig) -> RunResult:
     #    zurückführen, dann gegen die fp32-`torch.einsum`-Referenz prüfen.
     try:
         C_nat = from_canonical_output(canonical, C_c)   # (1,M,N) → natürliche Output-Shape
-        accuracy = verify(C_nat, A_nat, B_nat, config)
+        accuracy = verify(C_nat, [A_nat, B_nat], config)
     except NotImplementedError as e:
         return _result(STATUS_COMPILE_ERROR, error=f"verify: {type(e).__name__}: {e}")
     except Exception as e:
@@ -218,7 +376,9 @@ def run(config: RunConfig) -> RunResult:
 
     # 6) Warme Messung (=run_ms) + Metriken (TFLOP/s)
     try:
-        b = benchmark(comp.launch, A_c, B_c, C_c)
+        b = benchmark(comp.launch, A_c, B_c, C_c,
+                      warmup=config.bench_warmup, iters=config.bench_iters,
+                      progress=progress)
         timing["run_ms"] = round(b["run_ms"], 5)      # Median (unveränderter Key)
         timing["min_ms"] = round(b["min_ms"], 5)      # schnellste Iteration
         timing["p90_ms"] = round(b["p90_ms"], 5)      # 90.-Perzentil (Ausreißer-Kopf)

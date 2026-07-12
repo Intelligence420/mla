@@ -21,16 +21,40 @@ from dash import dcc, html
 _MUTED = {"color": "#6b7280", "fontSize": "12px"}
 
 
-def _header(kernel_path: Optional[str]):
-    children = [html.Strong("Generiertes cuTile-Kernel")]
+# Kopier-Button (dcc.Clipboard): kopiert den Kernel-Quelltext komplett clientseitig
+# in die Zwischenablage (kein Callback nötig, mit Browser-Fallbacks). Als kleiner
+# Button gestylt; das Icon wechselt beim Klick kurz auf ein Häkchen.
+_COPY_STYLE = {
+    "cursor": "pointer",
+    "color": "#5b21b6",
+    "fontSize": "15px",
+    "border": "1px solid #e4e7ec",
+    "borderRadius": "6px",
+    "padding": "3px 8px",
+    "background": "#fff",
+    "flexShrink": 0,
+}
+
+
+def _header(kernel_path: Optional[str], source: Optional[str] = None):
+    title = [html.Strong("Generiertes cuTile-Kernel")]
     if kernel_path:
-        children.append(html.Span(f"  {kernel_path}",
-                                   style={**_MUTED, "fontFamily": "ui-monospace, monospace"}))
-    return html.Div(children, className="mb-2")
+        title.append(html.Span(f"  {kernel_path}",
+                               style={**_MUTED, "fontFamily": "ui-monospace, monospace"}))
+    row = [html.Div(title)]
+    # Kopier-Button nur, wenn es überhaupt Quelltext zu kopieren gibt.
+    if source:
+        row.append(dcc.Clipboard(content=source, title="Kernel in die Zwischenablage kopieren",
+                                 style=_COPY_STYLE))
+    return html.Div(row, className="mb-2",
+                    style={"display": "flex", "alignItems": "center",
+                           "justifyContent": "space-between", "gap": "8px"})
 
 
 def render_code_panel(source: Optional[str], kernel_path: Optional[str] = None):
-    """Karte mit dem generierten Quelltext (oder Hinweis, wenn keiner vorliegt)."""
+    """Karte mit dem generierten Quelltext (oder Hinweis, wenn keiner vorliegt).
+    Bei vorhandenem Quelltext trägt der Header einen Kopier-Button (dcc.Clipboard),
+    der den kompletten Kernel-Quelltext in die Zwischenablage kopiert."""
     if not source:
         return dbc.Card(dbc.CardBody(
             [_header(kernel_path),
@@ -40,4 +64,4 @@ def render_code_panel(source: Optional[str], kernel_path: Optional[str] = None):
         f"```python\n{source}\n```",
         style={"maxHeight": "440px", "overflow": "auto", "fontSize": "12.5px", "marginBottom": 0},
     )
-    return dbc.Card(dbc.CardBody([_header(kernel_path), code]))
+    return dbc.Card(dbc.CardBody([_header(kernel_path, source), code]))

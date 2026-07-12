@@ -13,6 +13,11 @@ zählt dort als `compile_ms`, statt hier verdeckt zu laufen.
 TZ 3: zusätzlich `mean_abs_err` + `rel_err` (L2, relativ zur fp32-Referenznorm)
 und eine nach **(dtype, acc_dtype)** gekeyte Toleranztabelle (bf16/tf32/fp8).
 Der Rückgabe-dict war dafür schon offen — es kamen nur Schlüssel dazu.
+
+TZ 7: `verify(output, operands, config)` ist **variadisch** (1 oder 2 Operanden)
+und **family-/op-abhängig** in der Referenz: Kontraktion/Reduktion über
+`torch.einsum`, Elementwise `add`/`mul`/`copy` direkt aus der Op (`add`/`copy`
+sind kein einsum-Ausdruck). Die Toleranztabelle bleibt family-neutral.
 """
 
 from __future__ import annotations
@@ -67,22 +72,47 @@ def _tolerances(dtype: str, acc_dtype: str) -> tuple[float, float]:
     return _TOLERANCES[key]
 
 
-def verify(output: torch.Tensor, A: torch.Tensor, B: torch.Tensor,
-           config: RunConfig) -> dict[str, Any]:
-    """Vergleiche einen Kernel-Output mit der fp32-`torch.einsum`-Referenz.
+def _reference(config: RunConfig, operands: list) -> torch.Tensor:
+    """fp32-Referenz je Operations-Familie/Op (alles in voller Präzision).
 
-    :param output: der vom Kernel erzeugte Tensor (beliebiger dtype; wird zum
-                   Vergleich nach fp32 hochgezogen).
-    :param A, B:   die Eingabe-Operanden (in ihrem Compute-dtype).
-    :param config: liefert `expr` (Referenz-Kontraktion) sowie `dtype`/`acc_dtype`
-                   (Toleranzen).
-    :returns:      ``{"max_abs_err", "mean_abs_err", "rel_err", "passed", "atol",
-                   "rtol"}`` — passend zu ``RunResult.accuracy``.
+    Kontraktion **und** Reduktion (Summe) drückt `torch.einsum(expr, *ops)` aus.
+    Elementwise ist gemischt: `mul` ließe sich als einsum schreiben, `add`/`copy`
+    **nicht** — daher wird die Elementwise-Referenz direkt aus der Op berechnet
+    (das ist genau die geforderte `A (op) B`- bzw. `A`-Referenz).
+    """
+    ops_f = [o.float() for o in operands]
+    if config.family == "elementwise":
+        op = config.op
+        if op == "add":
+            return ops_f[0] + ops_f[1]
+        if op == "mul":
+            return ops_f[0] * ops_f[1]
+        if op == "copy":
+            return ops_f[0]
+        raise NotImplementedError(
+            f"Elementwise-Op {op!r} hat keine verify-Referenz."
+        )
+    # Reduktion (Summe) + Kontraktion: einsum deckt beide ab.
+    return torch.einsum(config.expr, *ops_f)
+
+
+def verify(output: torch.Tensor, operands: list, config: RunConfig) -> dict[str, Any]:
+    """Vergleiche einen Kernel-Output mit der fp32-Referenz (family-/op-abhängig).
+
+    :param output:   der vom Kernel erzeugte Tensor (beliebiger dtype; wird zum
+                     Vergleich nach fp32 hochgezogen).
+    :param operands: Liste der Eingabe-Operanden (in ihrem Compute-dtype) — 1
+                     (unär/Reduktion) **oder** 2 (binär/Kontraktion). Variadisch
+                     (TZ 7) statt fest `A, B`.
+    :param config:   liefert `family`/`op`/`expr` (Referenz) sowie `dtype`/`acc_dtype`
+                     (Toleranzen).
+    :returns:        ``{"max_abs_err", "mean_abs_err", "rel_err", "passed", "atol",
+                     "rtol"}`` — passend zu ``RunResult.accuracy``.
     """
     atol, rtol = _tolerances(config.dtype, config.acc_dtype)
 
-    # fp32-Referenz: dieselbe Kontraktion in voller Präzision.
-    ref = torch.einsum(config.expr, A.float(), B.float())
+    # fp32-Referenz: dieselbe Operation in voller Präzision.
+    ref = _reference(config, operands)
 
     out_f = output.float()
     diff = out_f - ref

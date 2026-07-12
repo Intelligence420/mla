@@ -80,7 +80,14 @@ class RunConfig:
     """
 
     # --- Operation ---
-    family: str = "contraction"        # "contraction" | (später) "elementwise"/"reduction"
+    family: str = "contraction"        # "contraction" | "elementwise" | "reduction"
+    # Op der Operation (TZ 7, additiv): ``None`` = Kontraktion (die Op steckt im
+    # GEMM selbst); ``"add"``/``"mul"``/``"copy"`` = Elementwise; ``"sum"`` =
+    # Reduktion. Geht in den Slug ein (``store.config_slug``), damit z. B.
+    # Elementwise ``add`` und ``mul`` — gleicher Ausdruck ``ij,ij->ij``! —
+    # verschiedene Kernel-Dateien bekommen. Kontraktion lässt ``op=None`` ⇒ Slug
+    # byte-identisch zu TZ 1-6 (keine Regression, keine Cache-Kollision).
+    op: Optional[str] = None
     expr: str = "ik,kj->ij"            # einsum-Ausdruck; treibt inputs/output
     inputs: Optional[list[str]] = None  # z. B. ["ik", "kj"]; aus expr abgeleitet
     output: Optional[str] = None        # z. B. "ij"; aus expr abgeleitet
@@ -100,6 +107,14 @@ class RunConfig:
 
     # --- Vergleichsbaselines (TZ 1: leer; cuBLAS/naive kommen in TZ 4) ---
     baselines: list[str] = field(default_factory=list)
+
+    # --- Messung (Benchmark-Iterationen) ---
+    # bench_iters = getaktete warme Läufe (→ Verteilung Median/min/p90/σ),
+    # bench_warmup = ungetaktete Aufwärm-Läufe (stabilisieren Takt/Caches).
+    # Defaults = die bewährten bench.py-Werte. Sie bestimmen NICHT den Kernel-Slug
+    # (reiner Messaufwand) → additiv ohne Cache-/Dateinamen-Drift.
+    bench_warmup: int = 10
+    bench_iters: int = 30
 
     def __post_init__(self) -> None:
         # inputs/output konsistent aus expr ableiten, wenn nicht vorgegeben.

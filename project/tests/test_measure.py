@@ -17,7 +17,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tool_pipeline.hardware import peak_tflops  # noqa: E402
 from tool_pipeline.measure.bench import _summarize_times  # noqa: E402
-from tool_pipeline.measure.metrics import compute_metrics, gemm_bytes, gemm_flops  # noqa: E402
+from tool_pipeline.measure.metrics import (  # noqa: E402
+    compute_metrics,
+    compute_metrics_elementwise,
+    compute_metrics_reduction,
+    elementwise_bytes,
+    elementwise_flops,
+    gemm_bytes,
+    gemm_flops,
+    reduction_bytes,
+    reduction_flops,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +117,66 @@ def test_compute_metrics_run_ms_zero_graceful():
     m = compute_metrics(128, 128, 128, 0.0, "fp16", "fp32")
     assert m["tflops"] != m["tflops"], m             # NaN != NaN
     assert m["gbps"] != m["gbps"], m
+
+
+# ---------------------------------------------------------------------------
+# Memory-bound-Metriken (TZ 7) — headless, exakt vorhersagbar (kein GPU nötig).
+# ---------------------------------------------------------------------------
+def test_elementwise_flops_and_bytes():
+    """add/mul = 1 FLOP/Element, copy = 0 (reine Bandbreite). Bytes = arity·in + out."""
+    E = 1_000_000
+    assert elementwise_flops(E, "add") == E
+    assert elementwise_flops(E, "mul") == E
+    assert elementwise_flops(E, "copy") == 0
+    # binär fp16(2)->fp32(4): 2·2 + 4 = 8 B/Element; unär (copy): 1·2 + 4 = 6 B/Element.
+    assert elementwise_bytes(E, 2, "fp16", "fp32") == 8 * E
+    assert elementwise_bytes(E, 1, "fp16", "fp32") == 6 * E
+
+
+def test_reduction_flops_and_bytes():
+    """Summe ~ kept·reduced Additionen; Traffic = ganze Eingabe + kleiner Output."""
+    assert reduction_flops(1000, 2000) == 2_000_000
+    # fp16(2) Eingabe (kept·reduced), fp32(4) Output (kept).
+    assert reduction_bytes(1000, 2000, "fp16", "fp32") == 1000 * 2000 * 2 + 1000 * 4
+
+
+def test_compute_metrics_elementwise_add_known_values():
+    """E=1e6, add, fp16->fp32 @ 1 ms: flops=1e6, bytes=8e6 ⇒ AI=0.12 (round 0.125);
+    tflops=0.001, gbps=8.0, %-Peak-bw=8/273·100≈2.9, %-Peak-flops≈0.0 (memory-bound)."""
+    m = compute_metrics_elementwise(1_000_000, 2, "add", 1.0, "fp16", "fp32")
+    assert m["arithmetic_intensity"] == 0.12, m
+    assert abs(m["tflops"] - 0.001) < 1e-12, m
+    assert m["gbps"] == 8.0, m
+    assert m["percent_peak_bw"] == 2.9, m
+    assert m["percent_peak_flops"] == 0.0, m
+
+
+def test_compute_metrics_elementwise_copy_zero_flops():
+    """copy: flops=0 ⇒ tflops=0, AI=0 (kein Roofline-Punkt — reine Bandbreite);
+    bytes=6e6 ⇒ gbps=6.0, %-Peak-bw definiert."""
+    m = compute_metrics_elementwise(1_000_000, 1, "copy", 1.0, "fp16", "fp32")
+    assert m["tflops"] == 0.0 and m["arithmetic_intensity"] == 0.0, m
+    assert m["gbps"] == 6.0, m
+    assert m["percent_peak_bw"] == 2.2, m
+
+
+def test_compute_metrics_reduction_known_values():
+    """kept=1000, reduced=2000, fp16->fp32 @ 1 ms: flops=2e6, bytes=4.004e6 ⇒ AI=0.5;
+    tflops=0.002, gbps=4.0, %-Peak-bw≈1.5."""
+    m = compute_metrics_reduction(1000, 2000, 1.0, "fp16", "fp32")
+    assert m["arithmetic_intensity"] == 0.5, m
+    assert abs(m["tflops"] - 0.002) < 1e-12, m
+    assert m["gbps"] == 4.0, m
+    assert m["percent_peak_bw"] == 1.5, m
+
+
+def test_memory_bound_ai_far_below_gemm():
+    """Kernaussage der Roofline: memory-bound-AI (Elementwise/Reduktion) liegt
+    weit UNTER der GEMM-AI (128 @ 512³) — die Punkte sitzen links vom Ridge."""
+    gemm_ai = compute_metrics(512, 512, 512, 1.0, "fp16", "fp32")["arithmetic_intensity"]
+    el_ai = compute_metrics_elementwise(1_000_000, 2, "add", 1.0, "fp16", "fp32")["arithmetic_intensity"]
+    rd_ai = compute_metrics_reduction(1000, 2000, 1.0, "fp16", "fp32")["arithmetic_intensity"]
+    assert el_ai < 1.0 and rd_ai < 1.0 < gemm_ai, (el_ai, rd_ai, gemm_ai)
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,9 @@
 """tool_pipeline.codegen.compile — generierten Quelltext ladbar machen + cachen.
 
 `load_kernel(config)` verwandelt eine `RunConfig` in ein aufrufbares
-`launch(A, B, C)`-Objekt:
+`launch(*operanden)`-Objekt (Arity je Familie: GEMM/Elementwise-binär
+`launch(A, B, C)`, Reduktion/Elementwise-unär `launch(A, C)`; letzter Operand =
+Output):
 
   emit(config) -> Quelltext -> **Datei** results/kernels/<slug>.py -> importieren.
 
@@ -44,7 +46,7 @@ _MODULE_CACHE: dict[str, Callable] = {}
 class CompileResult:
     """Ergebnis von `load_kernel`."""
 
-    launch: Callable        # launch(A, B, C) -> C
+    launch: Callable        # launch(*operanden) -> Output (Arity je Familie)
     kernel_path: str        # Pfad des persistierten Quelltexts
     slug: str
     cached: bool            # True = aus dem In-Memory-Cache (kein Import nötig)
@@ -70,14 +72,14 @@ def _import_launch(path) -> Callable:
     launch = getattr(module, "launch", None)
     if launch is None:
         raise AttributeError(
-            f"generierter Modul {path} definiert kein launch(A, B, C) "
+            f"generierter Modul {path} definiert kein launch(*operanden) "
             f"(Consumer-Konvention verletzt)."
         )
     return launch
 
 
 def load_kernel(config: RunConfig, source: Optional[str] = None) -> CompileResult:
-    """`RunConfig` → aufrufbares `launch(A, B, C)` (persistiert + gecacht).
+    """`RunConfig` → aufrufbares `launch(*operanden)` (persistiert + gecacht).
 
     :param config: der Lauf; bestimmt den Slug (= Cache-Schlüssel + Dateiname).
     :param source: optional bereits emittierter Quelltext; sonst via `emit(config)`.
