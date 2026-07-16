@@ -30,6 +30,7 @@ import torch
 from .codegen.compile import load_kernel
 from .intermediate_representation.parse import (
     ElementwiseIR,
+    NAryContractionIR,
     ReductionIR,
     parse,
 )
@@ -43,6 +44,7 @@ from .measure.bench import benchmark, time_first_launch
 from .measure.metrics import (
     compute_metrics,
     compute_metrics_elementwise,
+    compute_metrics_nary,
     compute_metrics_reduction,
 )
 from .measure.provenance import gpu_state
@@ -211,13 +213,100 @@ def _provenance(config: RunConfig) -> dict:
     }
 
 
-def run(config: RunConfig, progress=None) -> RunResult:
+# ---------------------------------------------------------------------------
+# n-äres einsum (TZ 7.5-3): paarweise Ketten-Zerlegung durch den 2-Op-GEMM-Pfad.
+# Jeder Schritt ist eine eigene Sub-RunConfig (2-Op-expr, gleiche dtype/tile/swizzle/
+# group_m) und läuft durch die BESTEHENDE Maschinerie (to_canonical → load_kernel).
+# Zwischentensoren bleiben auf der GPU; ein Composite-Launch fährt alle Schritte
+# sequenziell (für time_first_launch/benchmark). EIN aggregierter Roofline-Punkt.
+# ---------------------------------------------------------------------------
+def _cast_to_compute(t, dtype: str):
+    """Zwischentensor (im acc_dtype) auf den Compute-dtype des nächsten Schritts
+    bringen — analog zu `_build_operand` (tf32→float32, fp8→float8-Cast)."""
+    if dtype in ("fp16", "bf16", "fp32"):
+        return t.to(_TORCH_DTYPE[dtype])
+    if dtype == "tf32":
+        return t.to(torch.float32)
+    if dtype == "fp8e4m3":
+        return t.to(torch.float8_e4m3fn)
+    if dtype == "fp8e5m2":
+        return t.to(torch.float8_e5m2)
+    raise NotImplementedError(f"cast-to-compute {dtype!r} nicht implementiert.")
+
+
+def _nary_leaves(config: RunConfig, ir) -> list:
+    """Leaf-Operanden (je Original-Operand ein Tensor in natürlicher Shape, Compute-
+    dtype), deterministisch (Seed außen einmal). Reihenfolge = ir.inputs."""
+    torch.manual_seed(0)
+    return [_build_operand(config.dtype, tuple(ir.dim_sizes[d] for d in operand))
+            for operand in ir.inputs]
+
+
+def _nary_prepare(config: RunConfig, ir) -> tuple:
+    """Je paarweisem Schritt: Sub-RunConfig → parse → to_canonical → load_kernel +
+    ein C-Buffer (acc_dtype). Gibt ``(step_ctx, size_list)`` mit ``size_list`` =
+    ``(M, N, K, B)`` je Schritt (für die aggregierte n-är-Metrik). Die Step-Kernel
+    werden über ihre EIGENEN 2-Op-Slugs persistiert + gecacht (Wiederverwendung)."""
+    out_dt = _TORCH_DTYPE[config.acc_dtype]
+    step_ctx: list = []
+    size_list: list = []
+    for st in ir.steps:
+        expr = f"{st['a_expr']},{st['b_expr']}->{st['c_expr']}"
+        idxs = set(st["a_expr"]) | set(st["b_expr"]) | set(st["c_expr"])
+        sub = RunConfig(family="contraction", op=None, expr=expr,
+                        dim_sizes={d: ir.dim_sizes[d] for d in idxs},
+                        dtype=config.dtype, acc_dtype=config.acc_dtype,
+                        tile=dict(config.tile), swizzle=config.swizzle, group_m=config.group_m)
+        canonical = to_canonical(parse(sub))
+        comp = load_kernel(sub)
+        C_c = torch.empty(canonical.c_shape, dtype=out_dt, device="cuda")
+        try:
+            source = Path(comp.kernel_path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            source = None
+        step_ctx.append({"a_expr": st["a_expr"], "b_expr": st["b_expr"], "c_expr": st["c_expr"],
+                         "a_src": st["a_src"], "b_src": st["b_src"],
+                         "canonical": canonical, "comp": comp, "C_c": C_c, "source": source})
+        size_list.append((canonical.M, canonical.N, canonical.K, canonical.B))
+    return step_ctx, size_list
+
+
+def _nary_source(step_ctx: list) -> str:
+    """Kernel-Quelltext eines n-är-Laufs = Konkatenation der Step-Quelltexte (mit
+    Trennkommentaren) — für die GUI-Code-Anzeige."""
+    parts = []
+    n = len(step_ctx)
+    for si, st in enumerate(step_ctx, 1):
+        head = (f"# ===== n-är Schritt {si}/{n}: "
+                f"{st['a_expr']},{st['b_expr']}->{st['c_expr']} =====")
+        parts.append(head + "\n" + (st["source"] or "# (Quelltext nicht lesbar)"))
+    return "\n\n".join(parts)
+
+
+def _nary_sizes(ir, step_ctx: list, size_list: list) -> dict:
+    """`provenance["sizes"]` family-geformt für n-är: Operanden, Output, geplanter
+    Pfad (paarweise Sub-Ausdrücke) und die Per-Schritt-M/N/K/B."""
+    return {
+        "operands": list(ir.inputs), "output": ir.output,
+        "path": [f"{st['a_expr']},{st['b_expr']}->{st['c_expr']}" for st in step_ctx],
+        "steps": [{"M": M, "N": N, "K": K, "B": B} for (M, N, K, B) in size_list],
+        "n_steps": len(size_list),
+    }
+
+
+def run(config: RunConfig, progress=None, run_id=None, run_name=None,
+        created_at=None) -> RunResult:
     """Führe einen vollständigen Lauf aus und liefere ein `RunResult`.
 
     ``progress`` ist ein optionaler Callback ``(done, iters)``, der während der
     warmen Messung nach jeder getakteten Iteration aufgerufen wird (Live-Anzeige
     „k/N" in der GUI). Ohne Callback (CLI/Tests) unverändert.
-    """
+
+    ``run_id``/``run_name``/``created_at`` (TZ 7.5-4) tragen die **Batch-Identität**
+    durch: der Aufrufer (``execute_run``) vergibt sie EINMAL je „Vergleichen"-Klick
+    und reicht sie an jedes ``run()`` des Batches — so gehört jede results.jsonl-Zeile
+    zu einem benannten, wieder-ansehbaren Lauf. ``None`` (CLI/Tests) ⇒ Einzelzeile ohne
+    Batch-Identität (Store synthetisiert beim Lesen einen Fallback-Lauf)."""
     provenance = _provenance(config)
     accuracy: dict = {}
     timing: dict = {}
@@ -231,6 +320,7 @@ def run(config: RunConfig, progress=None) -> RunResult:
             kernel_source=kernel_source,
             accuracy=accuracy, timing=timing, metrics=metrics,
             provenance=provenance, error=error,
+            run_id=run_id, run_name=run_name, created_at=created_at,
         )
         # Persistenz darf den Core↔GUI-Vertrag ("run() wirft nie") NICHT brechen:
         # ein Store-Fehler (Platte voll/Rechte) wird notiert, das RunResult aber
@@ -316,9 +406,94 @@ def run(config: RunConfig, progress=None) -> RunResult:
         # Keine GEMM-Baselines für memory-bound (torch.matmul/gemm_flops passen nicht).
         return _result(STATUS_OK)
 
-    # 1) IR → kanonische Größen + B1-View-Spezifikation
+    # 1) IR. n-är (>2 Operanden) → eigener Wrapper (paarweise Kette); sonst 2-Op-B1.
     try:
         ir = parse(config)
+    except Exception as e:
+        return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")
+
+    # =====================================================================
+    # n-äres einsum (TZ 7.5-3): paarweise Ketten-Zerlegung. Eigener Zweig; der
+    # 2-Op-Kontraktions-Flow darunter bleibt UNBERÜHRT. Liefert EIN RunResult /
+    # EINEN aggregierten Roofline-Punkt (1-run=1-Punkt-Vertrag).
+    # =====================================================================
+    if isinstance(ir, NAryContractionIR):
+        err = check_dtype_combo(config.dtype, config.acc_dtype)
+        if err:
+            return _result(STATUS_COMPILE_ERROR, error=f"input build: NotImplementedError: {err}")
+        # 2)+3) Leaf-Operanden + je Schritt (Sub-Config → canonical → load_kernel + Buffer).
+        try:
+            leaves = _nary_leaves(config, ir)
+            step_ctx, size_list = _nary_prepare(config, ir)
+        except ct.TileError as e:
+            return _result(STATUS_COMPILE_ERROR, error=f"cuTile-JIT: {type(e).__name__}: {str(e)[:400]}")
+        except Exception as e:
+            return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")
+        provenance["sizes"] = _nary_sizes(ir, step_ctx, size_list)
+        # Kernel-Quelltext = Konkatenation der Step-Kernel; Pfad = synthetischer
+        # Composite-Slug (die Step-Kernel liegen unter ihren eigenen 2-Op-Slugs).
+        kernel_path = store.store_relpath(store.kernel_file(store.config_slug(config)))
+        kernel_source = _nary_source(step_ctx)
+
+        # Composite-Launch: alle Schritte sequenziell; Zwischenergebnisse bleiben auf
+        # der GPU (acc_dtype) und werden vor der nächsten Nutzung auf den Compute-dtype
+        # gecastet. Rebuild der (leichten) Views je Aufruf → korrekte Kette je Messung.
+        def _composite(*_ignore):
+            vals = {("leaf", i): leaves[i] for i in range(len(leaves))}
+            for si, st in enumerate(step_ctx):
+                a, b = vals[st["a_src"]], vals[st["b_src"]]
+                if st["a_src"][0] == "step":
+                    a = _cast_to_compute(a, config.dtype)
+                if st["b_src"][0] == "step":
+                    b = _cast_to_compute(b, config.dtype)
+                A_c, B_c = to_canonical_operands(st["canonical"], a, b)
+                st["comp"].launch(A_c, B_c, st["C_c"])
+                vals[("step", si)] = from_canonical_output(st["canonical"], st["C_c"])
+            return vals[("step", len(step_ctx) - 1)]
+
+        final_buf = step_ctx[-1]["C_c"]
+        # 4) Kalt-Lauf = compile_ms (erste GPU-Launches → cuTile-JIT je Step-Kernel).
+        try:
+            timing["compile_ms"] = round(time_first_launch(_composite, final_buf), 3)
+        except ct.TileError as e:
+            return _result(STATUS_COMPILE_ERROR, error=f"cuTile-JIT: {type(e).__name__}: {str(e)[:400]}")
+        except Exception as e:
+            return _result(STATUS_RUN_ERROR, error=f"kalt-launch: {type(e).__name__}: {str(e)[:400]}")
+        # 5) verify-before-trust: finalen Output (natürliche Shape) gegen die fp32-
+        #    torch.einsum-Referenz des VOLLEN Ausdrucks (alle n Leaf-Operanden).
+        try:
+            final_nat = _composite()
+            accuracy = verify(final_nat, leaves, config)
+        except NotImplementedError as e:
+            return _result(STATUS_COMPILE_ERROR, error=f"verify: {type(e).__name__}: {e}")
+        except Exception as e:
+            return _result(STATUS_RUN_ERROR, error=f"verify: {type(e).__name__}: {str(e)[:400]}")
+        if not accuracy["passed"]:
+            return _result(
+                STATUS_VERIFY_FAILED,
+                error=(f"max_abs_err={accuracy['max_abs_err']:.4g} überschreitet Toleranz "
+                       f"(atol={accuracy['atol']}, rtol={accuracy['rtol']})"),
+            )
+        # 6) Warme Messung der Kette + EIN aggregierter Roofline-Punkt (n-är-Metrik).
+        try:
+            b = benchmark(_composite, final_buf, warmup=config.bench_warmup,
+                          iters=config.bench_iters, progress=progress)
+            timing["run_ms"] = round(b["run_ms"], 5)
+            timing["min_ms"] = round(b["min_ms"], 5)
+            timing["p90_ms"] = round(b["p90_ms"], 5)
+            timing["sigma_ms"] = round(b["sigma_ms"], 5)
+            timing["bench_iters"] = b["iters"]
+            metrics = compute_metrics_nary(size_list, b["run_ms"], config.dtype, config.acc_dtype)
+            metrics["tflops"] = round(metrics["tflops"], 3)
+        except Exception as e:
+            return _result(STATUS_RUN_ERROR, error=f"bench: {type(e).__name__}: {str(e)[:400]}")
+        provenance["gpu_state"] = gpu_state()
+        # Keine GEMM-Baselines für n-är (das Ein-GEMM-Baseline-Modell passt nicht auf
+        # die Kette) — bewusst weggelassen.
+        return _result(STATUS_OK)
+
+    # 2-Op-Kontraktion (unverändert): kanonische Größen + B1-View-Spezifikation.
+    try:
         canonical = to_canonical(ir)
         M, N, K, B = canonical.M, canonical.N, canonical.K, canonical.B
         provenance["sizes"] = {"M": M, "N": N, "K": K, "B": B}

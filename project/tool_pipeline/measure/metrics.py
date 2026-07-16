@@ -126,6 +126,25 @@ def compute_metrics(M: int, N: int, K: int, run_ms: float,
     return _finish(flops, nbytes, run_ms, dtype)
 
 
+def compute_metrics_nary(steps: list, run_ms: float,
+                         dtype: str, acc_dtype: str) -> dict[str, Any]:
+    """Kennzahlen-dict für eine **n-äre Kontraktion** (Kette paarweiser GEMMs, TZ 7.5-3).
+
+    ``steps`` = Liste von ``(M, N, K, B)`` je paarweisem Schritt. Aggregiert zu
+    **einem** Roofline-Punkt: ``total_flops = Σ 2·B·M·N·K``; ``total_bytes`` = Summe
+    der Per-Schritt-GEMM-Bytes — das schließt den **Zwischentensor-Traffic** ein (jeder
+    Schritt liest seine zwei Operanden und schreibt sein Ergebnis, das der nächste
+    Schritt wieder liest). So sitzt die Kette als *ein* Punkt korrekt auf der Roofline.
+    """
+    total_flops = sum(gemm_flops(M, N, K, B) for (M, N, K, B) in steps)
+    try:
+        total_bytes: Optional[int] = sum(
+            gemm_bytes(M, N, K, dtype, acc_dtype, B) for (M, N, K, B) in steps)
+    except KeyError:
+        total_bytes = None
+    return _finish(total_flops, total_bytes, run_ms, dtype)
+
+
 def compute_metrics_elementwise(num_elements: int, arity: int, op: str, run_ms: float,
                                 dtype: str, acc_dtype: str) -> dict[str, Any]:
     """Kennzahlen-dict für eine **Elementwise**-Op (memory-bound). `add`/`mul` =
