@@ -62,15 +62,16 @@ def _rand_operand(rows: int, cols: int, dtype: str):
 
 
 def _run_gemm(M: int, N: int, K: int, dtype: str = "fp16", acc: str = "fp32",
-              tile: dict | None = None, swizzle: bool = False):
+              tile: dict | None = None, swizzle: bool = False, group_m: int = 8):
     """Echten Codegen-Pfad fahren: emit → load → launch. Gibt (A, B, C).
 
     `dtype`/`acc` steuern Compute- bzw. Akku-/Output-dtype (Default fp16→fp32 =
     der TZ-1-Anker). `tile`/`swizzle` steuern die TZ-4-Kachel/Swizzle-Achse
-    (Default = die TZ-1-Kachel 128/128/64 ohne Swizzle).
+    (Default = die TZ-1-Kachel 128/128/64 ohne Swizzle). `group_m` (TZ 7.5) ist die
+    L2-Swizzle-Gruppengröße (Default 8 = byte-identisch; nur bei swizzle=True wirksam).
     """
     kwargs = {"dim_sizes": {"i": M, "k": K, "j": N}, "dtype": dtype,
-              "acc_dtype": acc, "swizzle": swizzle}
+              "acc_dtype": acc, "swizzle": swizzle, "group_m": group_m}
     if tile is not None:
         kwargs["tile"] = tile
     cfg = RunConfig(**kwargs)
@@ -234,6 +235,25 @@ def test_swizzle_emit_structure():
     assert "group_size_m = min(" in swz, swz
     # Orientierung in BEIDEN gleich (der eine Beweis-Invariant, Risiko ①).
     assert "acc = ct.mma(a, b, acc)" in plain and "acc = ct.mma(a, b, acc)" in swz
+    # GROUP_M einstellbar (TZ 7.5): ein abweichender Wert wird als Literal gebacken,
+    # der Default 8 bleibt der bewiesene TZ-1-3-Text.
+    swz16 = build_gemm_module(tile, "fp16", "fp32", swizzle=True, group_m=16)
+    assert "GROUP_M = 16" in swz16 and "GROUP_M=16" in swz16 and "GROUP_M = 8" not in swz16, swz16
+    # swizzle=False: group_m ist wirkungslos → byte-identisch zum Default-plain.
+    assert build_gemm_module(tile, "fp16", "fp32", swizzle=False, group_m=16) == plain
+
+
+def test_group_m_invalid_rejected():
+    """GROUP_M ist eine Gruppen-Anzahl ≥ 1 → group_m < 1 ist Loud-Fail (ValueError),
+    kein still falsch gebauter Kernel (verify-before-trust auf Codegen-Ebene)."""
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    for bad in (0, -1):
+        raised = False
+        try:
+            build_gemm_module(tile, "fp16", "fp32", swizzle=True, group_m=bad)
+        except ValueError:
+            raised = True
+        assert raised, f"kein ValueError bei group_m={bad}"
 
 
 def test_reduction_emit_structure():
@@ -290,6 +310,124 @@ def test_elementwise_emit_rejects_bad_op():
     except ValueError:
         return
     raise AssertionError("erwartete ValueError für op='relu'")
+
+
+# ---------------------------------------------------------------------------
+# Memory-bound-Familien: ragged-GPU-Verify (TZ 8-4 — Padding/Masking belegen).
+# ZERO-Padding beim ct.load + automatisches Clipping durch ct.store sind in allen
+# drei Templates identisch. Für die Kontraktion ist der Rand-Pfad oben abgedeckt;
+# hier ANALOG für Elementwise (2D-Grid) und Reduktion (K-Padding im ct.sum), gegen
+# die family-korrekte fp32-Referenz — sonst bliebe der Rand dieser beiden Familien
+# unter pytest zu 0 % belegt (bisher nur die template-internen __main__-Selbsttests).
+# ---------------------------------------------------------------------------
+def _run_elementwise(M: int, N: int, op: str, dtype: str = "fp16", acc: str = "fp32",
+                     tile: dict | None = None):
+    """Echten Codegen-Pfad fahren: emit → load → launch für ein Elementwise-Modul auf
+    2D-Operanden (M×N). Gibt (C, ref) mit ref = A OP B (bzw. A bei copy), in fp32."""
+    expr = "ij->ij" if op == "copy" else "ij,ij->ij"
+    kwargs = {"family": "elementwise", "op": op, "expr": expr,
+              "dim_sizes": {"i": M, "j": N}, "dtype": dtype, "acc_dtype": acc}
+    if tile is not None:
+        kwargs["tile"] = tile
+    cfg = RunConfig(**kwargs)
+    launch = load_kernel(cfg, emit(cfg)).launch
+    torch.manual_seed(0)
+    A = _rand_operand(M, N, dtype)
+    C = torch.empty(M, N, dtype=_TORCH[acc], device="cuda")   # Output = acc_dtype
+    if op == "copy":
+        launch(A, C)
+        ref = A.float()
+    else:
+        B = _rand_operand(M, N, dtype)
+        launch(A, B, C)
+        ref = A.float() + B.float() if op == "add" else A.float() * B.float()
+    torch.cuda.synchronize()
+    return C, ref
+
+
+def _run_reduction(rows: int, K: int, dtype: str = "fp16", acc: str = "fp32",
+                   tile: dict | None = None):
+    """Echten Codegen-Pfad fahren für ein Reduktions-Modul (Zeilensumme ij->i über K).
+    Gibt (C, ref) mit ref = A.sum(axis=1) in fp32. Ragged K triggert das ZERO-Padding
+    (single-shot: auf next_pow2(K); K>16384: Loop-Fallback-Chunks von LOOP_TILE)."""
+    kwargs = {"family": "reduction", "op": "sum", "expr": "ij->i",
+              "dim_sizes": {"i": rows, "j": K}, "dtype": dtype, "acc_dtype": acc}
+    if tile is not None:
+        kwargs["tile"] = tile
+    cfg = RunConfig(**kwargs)
+    launch = load_kernel(cfg, emit(cfg)).launch
+    torch.manual_seed(0)
+    A = _rand_operand(rows, K, dtype)
+    C = torch.empty(rows, dtype=_TORCH[acc], device="cuda")
+    launch(A, C)
+    torch.cuda.synchronize()
+    return C, A.float().sum(dim=1)
+
+
+def test_elementwise_correct_across_sizes():
+    """Elementwise (add/mul/copy) stimmt gegen die fp32-Referenz — glatte UND ragged
+    (nicht-tile-teilbare) 2D-Größen. Belegt den ZERO-Padding-/ct.store-Clipping-Pfad
+    des Elementwise-Templates (Risiko ⑤), analog zu test_gemm_correct_across_sizes."""
+    sizes = [(128, 128), (256, 128),               # glatt (TM=128/TN=128-Vielfache)
+             (130, 100), (129, 127), (1, 1)]       # ragged: M%TM, N%TN != 0
+    atol, rtol = _TOLERANCES[("fp16", "fp32")]
+    for op in ("add", "mul", "copy"):
+        for (M, N) in sizes:
+            C, ref = _run_elementwise(M, N, op)
+            assert C.shape == (M, N), f"{op} {(M, N)}: Shape {tuple(C.shape)}"
+            assert C.dtype == torch.float32, f"{op} {(M, N)}: Output-dtype {C.dtype} != fp32"
+            err = (C.float() - ref).abs().max().item()
+            assert torch.allclose(C.float(), ref, atol=atol, rtol=rtol), \
+                f"Elementwise {op} {(M, N)} weicht ab: max_abs_err={err:.3e}"
+
+
+def test_elementwise_ragged_dtypes():
+    """Der Elementwise-Rand-Pfad ist dtype-agnostisch: ragged (130×100) über die drei
+    memory-bound-Formate fp16/bf16/fp32 gegen fp32 (mit den Produktions-Toleranzen)."""
+    for dtype, acc in (("fp16", "fp32"), ("bf16", "fp32"), ("fp32", "fp32")):
+        atol, rtol = _TOLERANCES[(dtype, acc)]
+        for op in ("add", "mul"):
+            C, ref = _run_elementwise(130, 100, op, dtype, acc)
+            err = (C.float() - ref).abs().max().item()
+            assert torch.allclose(C.float(), ref, atol=atol, rtol=rtol), \
+                f"Elementwise {op} {dtype}->{acc} ragged weicht ab: {err:.3e}"
+
+
+def test_reduction_correct_across_sizes():
+    """Reduktion (Zeilensumme) stimmt gegen fp32 — glatte UND ragged K (K keine
+    Zweierpotenz ⇒ ZERO-Padding auf next_pow2(K) im single-shot-Kernel). Belegt den
+    Rand-Pfad des Reduktions-Templates (Risiko ⑤)."""
+    atol, rtol = _TOLERANCES[("fp16", "fp32")]
+    for (rows, K) in [(64, 128), (32, 256),            # glatt (K = Zweierpotenz)
+                      (48, 100), (17, 70), (1, 1)]:    # ragged: K keine Zweierpotenz
+        C, ref = _run_reduction(rows, K)
+        assert C.shape == (rows,), f"{(rows, K)}: Shape {tuple(C.shape)}"
+        assert C.dtype == torch.float32, f"{(rows, K)}: Output-dtype {C.dtype} != fp32"
+        err = (C.float() - ref).abs().max().item()
+        assert torch.allclose(C.float(), ref, atol=atol, rtol=rtol), \
+            f"Reduktion {(rows, K)} weicht ab: max_abs_err={err:.3e}"
+
+
+def test_reduction_loop_fallback_ragged():
+    """K > MAX_SINGLE_SHOT (16384) nimmt den Loop-Fallback-Kernel; ein K, das nicht
+    durch LOOP_TILE teilbar ist, triggert das ZERO-Padding im letzten Chunk. Gegen
+    fp32 verifiziert (der bisher als 'nicht in A02 bewiesen' markierte Pfad)."""
+    atol, rtol = _TOLERANCES[("fp16", "fp32")]
+    C, ref = _run_reduction(8, 20000)   # 20000 > 16384 → Loop; 20000 % 64 != 0 → Padding
+    err = (C.float() - ref).abs().max().item()
+    assert torch.allclose(C.float(), ref, atol=atol, rtol=rtol), \
+        f"Reduktion Loop-Fallback ragged weicht ab: max_abs_err={err:.3e}"
+
+
+def test_reduction_ragged_dtypes():
+    """Der Reduktions-Rand-Pfad ist dtype-agnostisch: ragged K=100 über die drei
+    memory-bound-Formate fp16/bf16/fp32 gegen fp32."""
+    for dtype, acc in (("fp16", "fp32"), ("bf16", "fp32"), ("fp32", "fp32")):
+        atol, rtol = _TOLERANCES[(dtype, acc)]
+        C, ref = _run_reduction(48, 100, dtype, acc)
+        err = (C.float() - ref).abs().max().item()
+        assert torch.allclose(C.float(), ref, atol=atol, rtol=rtol), \
+            f"Reduktion {dtype}->{acc} ragged weicht ab: {err:.3e}"
 
 
 def test_emit_routes_families():
@@ -367,6 +505,18 @@ def test_swizzle_equals_noswizzle():
     _, _, Cs = _run_gemm(M, N, K, swizzle=True)
     d = (Cs.float() - Cn.float()).abs().max().item()
     assert d < 1e-4, f"Swizzle weicht vom Nicht-Swizzle ab: max_diff={d:.3e}"
+
+
+def test_swizzle_group_m16_equals_noswizzle():
+    """TZ 7.5: ein *variabler* GROUP_M ist ebenfalls eine reine Block-Umordnung →
+    numerisch identisch zum Nicht-Swizzle. M=2176 (TM=128 → num_pid_m=17) triggert
+    bewusst eine partielle letzte Gruppe (17 % 16 = 1 → min-Zweig) und belegt so die
+    Bijektivität der grouped-M-Rasterung für GROUP_M≠8."""
+    M, N, K = 2176, 256, 256
+    _, _, Cn = _run_gemm(M, N, K, swizzle=False)
+    _, _, Cs = _run_gemm(M, N, K, swizzle=True, group_m=16)
+    d = (Cs.float() - Cn.float()).abs().max().item()
+    assert d < 1e-4, f"GROUP_M=16-Swizzle weicht vom Nicht-Swizzle ab: max_diff={d:.3e}"
 
 
 def test_tile_matrix_correct_across_sizes_and_swizzle():
@@ -527,6 +677,32 @@ def test_run_end_to_end_ok():
     assert res.accuracy["passed"] and res.metrics["tflops"] > 0
 
 
+def test_run_nary_end_to_end():
+    """TZ 7.5-3: run('ij,jk,kl->il') zerlegt in ZWEI paarweise GEMMs, läuft end-to-end
+    und ist gegen torch.einsum (voller Ausdruck, fp32-Referenz) verifiziert — EIN
+    aggregierter Roofline-Punkt, geplanter Pfad in der Provenienz."""
+    from tool_pipeline.store import store as st
+    import tool_pipeline.run as R
+
+    orig = st.append_result
+    st.append_result = lambda r, path=None: None
+    try:
+        cfg = RunConfig(expr="ij,jk,kl->il", dim_sizes={"i": 128, "j": 64, "k": 96, "l": 128})
+        res = R.run(cfg)
+    finally:
+        st.append_result = orig
+    assert res.status == "ok", f"status={res.status} error={res.error}"
+    assert res.accuracy["passed"], res.accuracy
+    # EIN aggregierter Roofline-Punkt (Durchsatz + arithmetische Intensität da)
+    assert res.metrics["tflops"] > 0 and res.metrics["arithmetic_intensity"] is not None
+    # Provenienz: geplanter Pfad = 2 paarweise Schritte über die drei Operanden
+    sizes = res.provenance["sizes"]
+    assert sizes["n_steps"] == 2 and len(sizes["path"]) == 2
+    assert sizes["operands"] == ["ij", "jk", "kl"] and sizes["output"] == "il"
+    # Kernel-Quelltext = Konkatenation der beiden Step-Kernel
+    assert res.kernel_source and res.kernel_source.count("@ct.kernel") == 2
+
+
 def test_run_returns_result_on_compile_error():
     """Nicht baubare Configs → RunResult mit compile_error, NIE eine Exception."""
     import tool_pipeline.run as R
@@ -536,7 +712,9 @@ def test_run_returns_result_on_compile_error():
     st.append_result = lambda r, path=None: None
     try:
         for cfg in [
-            RunConfig(expr="ij,jk,kl->il"),               # n-är (>2 Operanden) → parse lehnt ab
+            # n-är NICHT sauber zerlegbar (Hadamard, kein GEMM-K) → parse lehnt laut ab.
+            # (Die saubere Kette ij,jk,kl->il läuft jetzt durch — s. test_run_nary_end_to_end.)
+            RunConfig(expr="abc,bca,cba->abc"),
             RunConfig(family="elementwise"),              # falsche Familie → parse lehnt ab
             RunConfig(dtype="bf16", acc_dtype="fp16"),    # unzulässige Acc-Kombi → check_dtype_combo
         ]:

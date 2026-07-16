@@ -368,6 +368,76 @@ def test_ridge_point_matches_known_numbers():
     assert ridge_point("fp32") is None and ridge_point("fp64") is None
 
 
+# --- TZ 7.5-2: Multi-Config (mehrere Tiles/GROUP_M) --------------------------
+def _ok_cfg(dtype, acc, tflops, rel, tile=None, swizzle=False, group_m=8, ai=128.0) -> RunResult:
+    """ok-Lauf mit explizitem Tile/Swizzle/GROUP_M (+ Roofline-AI) — für die
+    Multi-Config-Disambiguierung."""
+    cfg = {"dtype": dtype, "acc_dtype": acc, "swizzle": swizzle, "group_m": group_m}
+    if tile is not None:
+        cfg["tile"] = tile
+    return RunResult(status="ok", config=cfg,
+                     metrics={"tflops": tflops, "arithmetic_intensity": ai,
+                              "percent_peak_flops": 5.0, "gbps": 85.0},
+                     accuracy={"rel_err": rel, "max_abs_err": 1e-4, "passed": True})
+
+
+def test_throughput_multi_tile_one_bar_per_config():
+    """Zwei Tiles desselben Formats → ZWEI Balken (kein last-write-wins-Kollaps wie
+    im alten _by_format); beide Zeilen tragen die Tile-Signatur."""
+    r = [_ok_cfg("fp16", "fp32", 18.0, 7e-7, tile={"TM": 128, "TN": 128, "TK": 64}),
+         _ok_cfg("fp16", "fp32", 15.0, 7e-7, tile={"TM": 64, "TN": 64, "TK": 32})]
+    fig = figure_throughput(r)
+    assert len(fig.data) == 1 and fig.data[0].type == "bar"
+    assert len(fig.data[0].y) == 2, "zwei Tiles → zwei Balken"
+    ys = list(fig.data[0].y)
+    assert any("TM64/TN64/TK32" in lbl for lbl in ys) and any("TM128/TN128/TK64" in lbl for lbl in ys)
+
+
+def test_scatter_multi_variant_distinct_symbols():
+    """Zwei Tiles gleicher Format-Farbe → verschiedene Marker-SYMBOLE (kollisionsfrei),
+    gleiche Farbe (Format), voll disambiguierte Namen."""
+    r = [_ok_cfg("fp16", "fp32", 18.0, 7e-7, tile={"TM": 128, "TN": 128, "TK": 64}),
+         _ok_cfg("fp16", "fp32", 15.0, 7e-7, tile={"TM": 64, "TN": 64, "TK": 32})]
+    fig = figure_accuracy_throughput(r)
+    assert len({t.marker.symbol for t in fig.data}) == 2, "Symbole müssen je Variante differieren"
+    assert len({t.marker.color for t in fig.data}) == 1, "Farbe bleibt das Format"
+    assert {t.name for t in fig.data} == {"fp16 → fp32 · TM128/TN128/TK64",
+                                          "fp16 → fp32 · TM64/TN64/TK32"}
+
+
+def test_roofline_multi_group_m_distinct():
+    """Zwei GROUP_M (beide swizzle) desselben Formats/Tiles → verschiedene Symbole +
+    disambiguierte Namen (der GROUP_M-Kanal, nicht nur Swizzle)."""
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    r = [_ok_cfg("fp16", "fp32", 19.0, 7e-7, tile=tile, swizzle=True, group_m=8),
+         _ok_cfg("fp16", "fp32", 20.0, 7e-7, tile=tile, swizzle=True, group_m=16)]
+    ms = [t for t in figure_roofline(r).data if t.mode == "markers"]
+    assert len(ms) == 2 and len({t.marker.symbol for t in ms}) == 2
+    assert {t.name for t in ms} == {"fp16 → fp32 · TM128/TN128/TK64 · sw G8",
+                                    "fp16 → fp32 · TM128/TN128/TK64 · sw G16"}
+
+
+def test_charts_single_tile_keeps_plain_names():
+    """Regression: EINE Variante (auch mit explizitem tile/group_m) behält die
+    schlichten Format-Namen — der Varianten-Kanal schaltet nur bei Mehrdeutigkeit zu."""
+    r = [_ok_cfg("fp16", "fp32", 18.0, 7e-7, tile={"TM": 128, "TN": 128, "TK": 64})]
+    assert figure_accuracy_throughput(r).data[0].name == "fp16 → fp32"
+
+
+def test_scatter_multi_run_disambiguates_by_name():
+    """History-Vergleich (TZ 7.5-4): dieselbe Config aus ZWEI Läufen → verschiedene
+    Serien (Lauf-Name vorangestellt, verschiedene Symbole); Farbe bleibt das Format."""
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    a = _ok_cfg("fp16", "fp32", 18.0, 7e-7, tile=tile); a.run_name = "Lauf A"
+    b = _ok_cfg("fp16", "fp32", 16.0, 7e-7, tile=tile); b.run_name = "Lauf B"
+    fig = figure_accuracy_throughput([a, b])
+    # Lauf-Name vorangestellt (+ Tile-Signatur, da gesetzt) → beide Serien eindeutig
+    assert {t.name for t in fig.data} == {"Lauf A · fp16 → fp32 · TM128/TN128/TK64",
+                                          "Lauf B · fp16 → fp32 · TM128/TN128/TK64"}
+    assert len({t.marker.symbol for t in fig.data}) == 2   # je Lauf ein Symbol
+    assert len({t.marker.color for t in fig.data}) == 1    # Farbe = Format (unverändert)
+
+
 def _main() -> int:
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

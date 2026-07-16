@@ -32,7 +32,7 @@ from typing import Optional
 import dash_bootstrap_components as dbc
 from dash import html
 
-from ...intermediate_representation.parse import parse
+from ...intermediate_representation.parse import NAryContractionIR, parse
 from ...schema import ALLOWED_ACC, RunConfig
 
 # --- Komponenten-IDs (von callbacks.py importiert) ---------------------------
@@ -47,7 +47,14 @@ INDEX_SIZE_TYPE = "index-size"    # Pattern-Matching-Typ der Größenfelder
 ID_DTYPES = "sel-dtypes"          # Multi-Select der zu vergleichenden Formate
 ID_DTYPE_INFO = "dtypes-info"     # Info-Marker (Tooltip: erklärt 'links → rechts')
 ID_TILE_TM, ID_TILE_TN, ID_TILE_TK = "sel-tm", "sel-tn", "sel-tk"  # Tile-Dropdowns
-ID_SWIZZLE = "chk-swizzle"        # L2-Swizzle-Toggle
+ID_SWIZZLE = "chk-swizzle"        # (Rückfall) Einzel-Swizzle-Toggle — execute_run-Skalarpfad/Tests
+ID_SWIZZLE_GROUP_M = "sel-group-m"  # (Rückfall) Einzel-GROUP_M — execute_run-Skalarpfad/Tests
+# TZ 7.5-2: mehrere Tile-Zeilen (+/-) und mehrere Swizzle-Konfigurationen gegeneinander.
+TILE_TM_TYPE, TILE_TN_TYPE, TILE_TK_TYPE = "tile-tm", "tile-tn", "tile-tk"  # Pattern-Matching je Tile-Zeile
+TILE_RM_TYPE = "tile-rm"          # Entfernen-Button je Tile-Zeile (Pattern-Matching)
+ID_TILE_ADD = "btn-tile-add"      # „+ Tile"-Button (Zeile hinzufügen)
+ID_TILE_ROWS = "tile-rows"        # Container der dynamischen Tile-Zeilen
+ID_SWIZZLE_CONFIGS = "chk-swizzle-configs"  # Mehrfachauswahl der Swizzle-Konfigurationen (aus / G…)
 ID_TILE_INFO = "tile-info"        # Info-Marker (Tooltip: Tile/Swizzle erklärt)
 ID_BASELINES = "sel-baselines"    # Multi-Select der Vergleichs-Baselines
 ID_BASELINE_INFO = "baselines-info"
@@ -91,6 +98,8 @@ PRESETS = [
     ("A transponiert   ki,kj->ij", "ki,kj->ij"),
     ("Mehrdim. M   ijk,kl->ijl", "ijk,kl->ijl"),
     ("Tensor-Kontraktion   acspx,bspy->abcyx", "acspx,bspy->abcyx"),
+    # n-är (TZ 7.5-3): Kettenprodukt → zwei paarweise GEMMs (Demonstrator).
+    ("Kettenprodukt (n-är)   ij,jk,kl->il", "ij,jk,kl->il"),
 ]
 
 # Die drei Operations-Familien (TZ 7). Label + Default-Ausdruck je Familie.
@@ -167,6 +176,13 @@ _TILE_M_OPTIONS = (32, 64, 128, 256)
 _TILE_N_OPTIONS = (32, 64, 128, 256)
 _TILE_K_OPTIONS = (16, 32, 64, 128)
 
+# Wählbare GROUP_M-Werte der L2-Swizzle-Rasterung (Zweierpotenzen). Default 8 = der
+# bisher fest verdrahtete Wert (TZ 1-3, byte-identisch); 1 = plain-bid-Zuordnung
+# („kein Swizzle"). GROUP_M wird zur Codegen-Zeit als Literal in den Swizzle-Kernel
+# gebacken → fixer Deckel (num_pid_m=cdiv(M,TM) ist erst zur Laufzeit bekannt; die
+# grouped-M-Rasterung klemmt eine partielle letzte Gruppe korrekt für JEDES GROUP_M≥1).
+_SWIZZLE_GROUP_M_OPTIONS = (1, 2, 4, 8, 16, 32)
+
 # Mess-Einstellungen: erlaubter Bereich (min, max). Iterationen ≥ 10 (unter 10 ist
 # die Verteilung/das p90 kaum aussagekräftig); Obergrenze 500 hält die Laufzeit auf
 # der geteilten Maschine im Rahmen. Warmup ab 0 (kein Aufwärmen zulassen).
@@ -180,13 +196,20 @@ _BASELINE_OPTIONS = [
 ]
 _BASELINE_KEYS = {"cublas", "naive"}
 
-# L2-Swizzle-Modus: aus / an / beide.
+# L2-Swizzle-Modus (Rückfall-Skalarform für execute_run/Tests): aus / an / beide.
 _SWIZZLE_OPTIONS = [
     {"label": "aus", "value": "off"},
     {"label": "an", "value": "on"},
     {"label": "beide (Vergleich)", "value": "both"},
 ]
 _SWIZZLE_KEYS = {"off", "on", "both"}
+
+# TZ 7.5-2: Swizzle-Konfigurationen als Mehrfachauswahl — „aus" + je GROUP_M-Wert
+# ein Eintrag „g<N>". Eine Auswahl ⇒ eine Menge zu vergleichender (swizzle, group_m).
+_SWIZZLE_CONFIG_OPTIONS = ([{"label": "aus", "value": "off"}]
+                           + [{"label": f"G{g}", "value": f"g{g}"} for g in _SWIZZLE_GROUP_M_OPTIONS])
+_SWIZZLE_CONFIG_KEYS = {"off"} | {f"g{g}" for g in _SWIZZLE_GROUP_M_OPTIONS}
+_DEFAULT_SWIZZLE_CONFIG = ["off"]   # Default = nur ohne Swizzle (wie bisher swizzle="off")
 
 
 def combo_key(dtype: str, acc: str) -> str:
@@ -243,9 +266,9 @@ def default_selection_for_family(family: str) -> list[str]:
     """Default-Format-Auswahl je Familie."""
     return list(_MEMORY_BOUND_SELECTION if family in _MEMORY_BOUND else _DEFAULT_SELECTION)
 
-_H2 = {"fontSize": "11px", "letterSpacing": "0.08em", "textTransform": "uppercase",
-       "color": "#6b7280", "margin": "18px 0 8px"}
-_LABEL = {"display": "block", "fontSize": "12.5px", "color": "#6b7280", "margin": "10px 0 4px"}
+# Sidebar-Typografie (Überschriften/Labels) liegt seit TZ 8 als CSS-Klassen
+# ``.ctl-section`` / ``.ctl-label`` in ``assets/theme.css`` (konsolidiert, kein
+# wiederholtes inline-style-dict mehr).
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +321,12 @@ def index_categories(expr: str, family: str = "contraction") -> dict[str, str]:
     except (ValueError, NotImplementedError):
         return {}
     cat: dict[str, str] = {}
+    if isinstance(ir, NAryContractionIR):
+        # n-är: Output-Indizes bleiben, der Rest wird über die Kette kontrahiert (Σ).
+        out_set = set(ir.output)
+        for d in expr_indices(expr):
+            cat[d] = "bleibt" if d in out_set else "Σ"
+        return cat
     if family == "elementwise":
         for d in ir.axes:
             cat[d] = "elem"
@@ -335,6 +364,19 @@ def _estimate_bytes(ir, family: str) -> int:
         return (ir.arity * 2 + 4) * ir.num_elements
     if family == "reduction":
         return 2 * (ir.kept_size * ir.reduced_size) + 4 * ir.kept_size
+    if isinstance(ir, NAryContractionIR):
+        # n-är: Summe über die paarweisen Schritte INKL. Zwischentensoren (jeder
+        # Schritt: 2 Operanden lesen + Ergebnis schreiben) — deckt die neue OOM-Quelle
+        # (Zwischentensoren auf der geteilten 32-GiB-Maschine) ab.
+        sz = ir.dim_sizes
+
+        def _p(idx: str) -> int:
+            r = 1
+            for d in idx:
+                r *= sz[d]
+            return r
+        return sum(2 * (_p(st["a_expr"]) + _p(st["b_expr"])) + 4 * _p(st["c_expr"])
+                   for st in ir.steps)
     return 2 * ir.B * (ir.M * ir.K + ir.K * ir.N) + 4 * ir.B * ir.M * ir.N
 
 
@@ -477,24 +519,123 @@ def validate_swizzle(v) -> Optional[str]:
     return None
 
 
+def validate_group_m(v) -> Optional[str]:
+    """Prüfe die GROUP_M-Auswahl (L2-Swizzle-Gruppengröße) gegen die zulässigen
+    Zweierpotenzen. GROUP_M wirkt nur bei aktivem Swizzle, wird aber immer geprüft
+    (es wird zur Codegen-Zeit als Literal in den Kernel gebacken)."""
+    if v is None or v == "":
+        return "GROUP_M fehlt — bitte eine Swizzle-Gruppengröße wählen."
+    try:
+        iv = int(float(v))
+    except (TypeError, ValueError):
+        return f"GROUP_M ist keine Zahl: {v!r}."
+    if iv not in _SWIZZLE_GROUP_M_OPTIONS:
+        return f"GROUP_M={iv} ist kein zulässiger Wert (erlaubt: {list(_SWIZZLE_GROUP_M_OPTIONS)})."
+    return None
+
+
 def tile_from_controls(tm, tn, tk) -> dict:
     """TM/TN/TK (evtl. als Strings aus den Dropdowns) → Tile-dict für ``RunConfig``."""
     return {"TM": int(float(tm)), "TN": int(float(tn)), "TK": int(float(tk))}
 
 
-def configs_from_selection(expr, dim_sizes, selection, tile=None, swizzle=False,
+def group_m_from_controls(v) -> int:
+    """GROUP_M-Dropdown-Wert (evtl. String) → int für ``RunConfig``. Erwartet einen
+    via ``validate_group_m`` geprüften Wert."""
+    return int(float(v))
+
+
+# --- TZ 7.5-2: mehrere Swizzle-Konfigurationen + mehrere Tile-Zeilen ----------
+def swizzle_configs_from_state(values) -> list:
+    """Mehrfachauswahl-Werte (``["off","g8","g16",…]``) → Liste von ``(swizzle, group_m)``.
+    ``"off"`` ⇒ ``(False, 8)`` (group_m irrelevant); ``"g<N>"`` ⇒ ``(True, N)``. Leer ⇒
+    ``[(False, 8)]`` (mind. ein Lauf). Deterministisch: ohne-Swizzle zuerst, dann
+    GROUP_M aufsteigend."""
+    out = []
+    for v in values or []:
+        if v == "off":
+            out.append((False, 8))
+        elif isinstance(v, str) and v.startswith("g") and v[1:].isdigit():
+            out.append((True, int(v[1:])))
+    out = sorted(set(out), key=lambda sg: (sg[0], sg[1]))
+    return out or [(False, 8)]
+
+
+def validate_swizzle_configs(values) -> Optional[str]:
+    """Prüfe die Swizzle-Konfig-Mehrfachauswahl (Teilmenge aus {off, g1..g32})."""
+    if not values:
+        return None   # leer ⇒ Default (nur ohne Swizzle)
+    unknown = [v for v in values if v not in _SWIZZLE_CONFIG_KEYS]
+    if unknown:
+        return f"Unbekannte Swizzle-Konfiguration: {unknown} (erlaubt: aus / G1..G32)."
+    return None
+
+
+def default_tile_row() -> dict:
+    """Eine neue Tile-Zeile mit den Default-Kachelwerten (RunConfig-Default 128/128/64)."""
+    t = RunConfig().tile
+    return {"TM": t["TM"], "TN": t["TN"], "TK": t["TK"]}
+
+
+def tiles_from_state(tm_vals, tn_vals, tk_vals) -> list[dict]:
+    """Pattern-Matching-Werte der Tile-Zeilen (drei index-parallele ALL-Listen) →
+    Liste von Tile-Roh-dicts. Die drei ALL-States sind index-sortiert (jede Zeile trägt
+    genau ein TM/TN/TK) → positionsweises Zippen richtet sie zeilenweise aus."""
+    return [{"TM": tm, "TN": tn, "TK": tk}
+            for tm, tn, tk in zip(tm_vals or [], tn_vals or [], tk_vals or [])]
+
+
+def validate_tiles(tiles) -> Optional[str]:
+    """Prüfe eine Liste von Tile-Zeilen: jede Zeile gültig (``validate_tile``) UND
+    keine Duplikate (zwei identische Tiles = doppelter, verwirrender Vergleich)."""
+    if not tiles:
+        return "Mindestens eine Tile-Konfiguration nötig."
+    seen = set()
+    for t in tiles:
+        err = validate_tile(t.get("TM"), t.get("TN"), t.get("TK"))
+        if err:
+            return err
+        sig = (int(float(t["TM"])), int(float(t["TN"])), int(float(t["TK"])))
+        if sig in seen:
+            return (f"Doppelte Tile-Konfiguration TM{sig[0]}/TN{sig[1]}/TK{sig[2]} — "
+                    f"bitte je Zeile eine andere Kachelung wählen.")
+        seen.add(sig)
+    return None
+
+
+def mutate_tile_rows(rows, triggered_id) -> list[dict]:
+    """Reine Zeilen-Mutation für den +/-Callback (headless testbar). ``triggered_id``
+    ist ``ID_TILE_ADD`` (Zeile anhängen) oder ``{'type': TILE_RM_TYPE, 'index': i}``
+    (Zeile i entfernen; mindestens **eine** Zeile bleibt erhalten)."""
+    rows = [dict(r) for r in (rows or [])] or [default_tile_row()]
+    if triggered_id == ID_TILE_ADD:
+        rows.append(default_tile_row())
+    elif isinstance(triggered_id, dict) and triggered_id.get("type") == TILE_RM_TYPE:
+        i = triggered_id.get("index")
+        if isinstance(i, int) and 0 <= i < len(rows) and len(rows) > 1:
+            rows.pop(i)
+    return rows
+
+
+def configs_from_selection(expr, dim_sizes, selection, tiles=None, swizzle_configs=None,
                            baselines=None, bench=None, family="contraction",
                            op=None) -> list[RunConfig]:
-    """Ausdruck + Größen + Format-Auswahl (+ Familie/Op/Tile/Swizzle/Baselines/
-    Mess-Einstellungen) → eine ``RunConfig`` je gewählter (dtype, acc)-Kombi.
+    """Ausdruck + Größen + Format-Auswahl → das **Kreuzprodukt** an ``RunConfig``s
+    ``selection × tiles × swizzle_configs`` (TZ 7.5-2).
 
-    Die Liste ist in kanonischer Familien-Reihenfolge (deterministisch, erstes
-    Element = primäres Format). **Ein festes Tile** gilt für die ganze Auswahl;
-    ``swizzle='both'`` erzeugt je Format zwei Configs (ohne + mit Swizzle).
+    * ``tiles``: Liste von Tile-dicts ``{"TM","TN","TK"}``; ``None`` ⇒ **ein** Config
+      je Format mit dem RunConfig-Default-Tile.
+    * ``swizzle_configs``: Liste von ``(swizzle: bool, group_m: int)``; ``None`` ⇒
+      ``[(False, 8)]`` (ohne Swizzle, wie bisher). So werden mehrere Tiles UND mehrere
+      GROUP_M gegeneinander gemessen.
+
+    Reihenfolge (deterministisch, erstes Element = primäres Format/Tile/Swizzle):
+    äußere Schleife über die Formate in kanonischer COMBOS-Reihenfolge, dann Tiles,
+    dann Swizzle-Konfigurationen. **Baselines werden nur an der ersten
+    (Tile, Swizzle)-Kombi je Format angehängt** (nicht je Tile erneut gemessen).
 
     memory-bound (Elementwise/Reduktion): **kein Swizzle** (die Templates kennen
-    keinen — Swizzle würde nur den Slug verunreinigen) und **keine GEMM-Baselines**
-    (torch.matmul/gemm_flops passen nicht). Die Op wird family-abhängig gesetzt
+    keinen) und **keine GEMM-Baselines**. Die Op wird family-abhängig gesetzt
     (Reduktion=sum, Elementwise=`op`, Kontraktion=None). ``bench`` ist das optionale
     dict ``{"bench_warmup", "bench_iters"}``; ``None`` ⇒ RunConfig-Defaults (10/30).
     Erwartet vorher validierte Eingaben.
@@ -504,23 +645,30 @@ def configs_from_selection(expr, dim_sizes, selection, tile=None, swizzle=False,
     idx = expr_indices(expr)
     sizes = {d: int(float(dim_sizes[d])) for d in idx}
     memory_bound = family in _MEMORY_BOUND
-    # memory-bound: Swizzle/Baselines sind Kontraktions-Konzepte → aus.
     bl = [] if memory_bound else (list(baselines) if baselines else [])
-    sw_list = [False] if memory_bound else swizzles_from_value(swizzle)
+    tile_list = list(tiles) if tiles else [None]
+    # memory-bound: Swizzle ist ein Kontraktions-Konzept → genau eine (False,8)-Konfig.
+    sw_list = ([(False, 8)] if memory_bound
+               else (list(swizzle_configs) if swizzle_configs else [(False, 8)]))
     chosen = set(selection)
     out: list[RunConfig] = []
     for (d, a) in combos_for_family(family):
         if combo_key(d, a) not in chosen:
             continue
-        for si, s in enumerate(sw_list):
-            kwargs = dict(family=family, op=the_op, expr=norm_expr, dim_sizes=dict(sizes),
-                          dtype=d, acc_dtype=a, swizzle=s,
-                          baselines=list(bl) if si == 0 else [])
-            if tile is not None:
-                kwargs["tile"] = dict(tile)
-            if bench is not None:
-                kwargs.update(bench)   # bench_warmup / bench_iters
-            out.append(RunConfig(**kwargs))
+        first = True   # Baselines NUR an der ersten (tile,swizzle)-Kombi je Format
+        for tile in tile_list:
+            for (sw, gm) in sw_list:
+                kwargs = dict(family=family, op=the_op, expr=norm_expr, dim_sizes=dict(sizes),
+                              dtype=d, acc_dtype=a, swizzle=bool(sw), group_m=int(gm),
+                              baselines=list(bl) if first else [])
+                if tile is not None:
+                    kwargs["tile"] = {"TM": int(float(tile["TM"])),
+                                      "TN": int(float(tile["TN"])),
+                                      "TK": int(float(tile["TK"]))}
+                if bench is not None:
+                    kwargs.update(bench)   # bench_warmup / bench_iters
+                out.append(RunConfig(**kwargs))
+                first = False
     return out
 
 
@@ -531,7 +679,7 @@ def _family_select() -> html.Div:
     """Familien-Dropdown: contraction/elementwise/reduction. Steuert Presets,
     Op-Sichtbarkeit und die zulässigen Formate (Callback in callbacks.py)."""
     return html.Div([
-        html.Label("Operations-Familie", style=_LABEL),
+        html.Label("Operations-Familie", className="ctl-label"),
         dbc.Select(id=ID_FAMILY, value="contraction",
                    options=[{"label": lbl, "value": k} for lbl, k in FAMILIES]),
     ])
@@ -541,7 +689,7 @@ def _preset_select() -> html.Div:
     """Preset-Dropdown: setzt Ausdruck (+ Op) der aktuellen Familie (Komfort; der
     Freitext bleibt maßgeblich). Der Wert ist ``"<op>|<expr>"`` (s. preset_value)."""
     return html.Div([
-        html.Label("Preset", style=_LABEL),
+        html.Label("Preset", className="ctl-label"),
         dbc.Select(id=ID_PRESET, value=family_default_preset("contraction"),
                    options=preset_options("contraction")),
     ])
@@ -553,7 +701,7 @@ def _op_select() -> html.Div:
     return html.Div(
         id=ID_OP_WRAP, style={"display": "none"},
         children=[
-            html.Label("Elementwise-Op", style=_LABEL),
+            html.Label("Elementwise-Op", className="ctl-label"),
             dbc.RadioItems(id=ID_OP, options=_OP_OPTIONS, value="add", inline=True,
                            style={"fontSize": "13px"}, inputStyle={"marginRight": "5px"},
                            labelStyle={"marginRight": "14px"}),
@@ -564,7 +712,7 @@ def _op_select() -> html.Div:
 def _expr_input() -> html.Div:
     """Freitext-einsum-Ausdruck (Source of Truth). '->' optional (impliziter Output)."""
     return html.Div([
-        html.Label("einsum-Ausdruck", style=_LABEL),
+        html.Label("einsum-Ausdruck", className="ctl-label"),
         dbc.Input(id=ID_EXPR, type="text", value=_DEFAULT_EXPR, debounce=True,
                   placeholder="z. B. bik,bkj->bij",
                   style={"fontFamily": "ui-monospace, monospace"}),
@@ -583,7 +731,8 @@ def index_size_inputs(expr: str, family: str = "contraction",
         fields.append(html.Div(
             style={"flex": "1 1 64px", "minWidth": "64px"},
             children=[
-                html.Label(label, style={**_LABEL, "fontFamily": "ui-monospace, monospace"}),
+                html.Label(label, className="ctl-label",
+                           style={"fontFamily": "ui-monospace, monospace"}),
                 dbc.Input(id={"type": INDEX_SIZE_TYPE, "index": d}, type="number",
                           value=values.get(d, _DEFAULT_INDEX_SIZE), min=1, step=1, debounce=True),
             ],
@@ -610,7 +759,7 @@ def _dtype_header() -> list:
         target=ID_DTYPE_INFO, placement="right",
         style={"maxWidth": "330px", "textAlign": "left", "fontSize": "12px"},
     )
-    return [html.H2(["Zahlenformate (Vergleich)", info], style=_H2), tip]
+    return [html.H2(["Zahlenformate (Vergleich)", info], className="ctl-section"), tip]
 
 
 def _dtype_select() -> html.Div:
@@ -625,7 +774,7 @@ def _tile_dropdown(id_: str, label: str, options: tuple, default: int) -> html.D
     return html.Div(
         style={"flex": 1},
         children=[
-            html.Label(label, style=_LABEL),
+            html.Label(label, className="ctl-label"),
             dbc.Select(id=id_, value=str(default),
                        options=[{"label": str(o), "value": str(o)} for o in options]),
         ],
@@ -641,35 +790,70 @@ def _tile_header() -> list:
             html.Div("Kachelung (Tiling)", style={"fontWeight": 600, "marginBottom": "5px"}),
             html.Div("TM×TN: Kantenlängen der Ausgabe-Kachel, die ein GPU-Block berechnet. "
                      "TK: Schrittweite entlang der Kontraktions-Dimension K."),
-            html.Div("Ein festes Tile gilt für alle gewählten Formate.",
-                     style={"marginTop": "5px", "opacity": 0.8}),
+            html.Div("Mehrere Tile-Zeilen (+ / ✕) werden gegeneinander gemessen — jede "
+                     "Zeile eine eigene Kachelung.", style={"marginTop": "5px", "opacity": 0.8}),
             html.Div("L2-Swizzle: ordnet die Block→Kachel-Zuordnung L2-freundlicher um "
-                     "(gleiches Ergebnis, oft weniger Speicherverkehr). „beide“ misst "
-                     "jedes Format ohne UND mit Swizzle → direkter A/B-Vergleich im Chart.",
+                     "(gleiches Ergebnis, oft weniger Speicherverkehr). Als Mehrfachauswahl: "
+                     "„aus“ plus je gewünschtem GROUP_M ein Eintrag — der Batch misst jede "
+                     "Format×Tile×Swizzle-Kombination gegeneinander.",
+                     style={"marginTop": "5px", "opacity": 0.8}),
+            html.Div("GROUP_M (G8/G16/…): wie viele M-Kachel-Zeilen der Swizzle zu einer "
+                     "L2-Gruppe bündelt (Standard 8, 1 = keine Umordnung). Größere Werte "
+                     "teilen mehr B-Spalten im L2-Cache.",
                      style={"marginTop": "5px", "opacity": 0.8}),
         ],
         target=ID_TILE_INFO, placement="right",
         style={"maxWidth": "330px", "textAlign": "left", "fontSize": "12px"},
     )
-    return [html.H2(["Kachelung (Tile)", info], style=_H2), tip]
+    return [html.H2(["Kachelung (Tile)", info], className="ctl-section"), tip]
+
+
+def _tile_row(i: int, tile: dict) -> html.Div:
+    """Eine Tile-Zeile: TM/TN/TK-Dropdowns (Pattern-Matching-IDs mit Index i) +
+    Entfernen-Button. Wird vom +/-Callback über den Index angesprochen."""
+    def _sel(type_: str, options: tuple, val) -> dbc.Select:
+        return dbc.Select(
+            id={"type": type_, "index": i}, value=str(val), size="sm",
+            options=[{"label": str(o), "value": str(o)} for o in options])
+    return html.Div(
+        style={"display": "flex", "gap": "6px", "alignItems": "center", "marginBottom": "6px"},
+        children=[
+            html.Div(_sel(TILE_TM_TYPE, _TILE_M_OPTIONS, tile.get("TM", 128)), style={"flex": 1}),
+            html.Div(_sel(TILE_TN_TYPE, _TILE_N_OPTIONS, tile.get("TN", 128)), style={"flex": 1}),
+            html.Div(_sel(TILE_TK_TYPE, _TILE_K_OPTIONS, tile.get("TK", 64)), style={"flex": 1}),
+            dbc.Button("✕", id={"type": TILE_RM_TYPE, "index": i}, color="link", size="sm",
+                       n_clicks=0, title="Diese Tile-Zeile entfernen",
+                       style={"color": "#b91c1c", "padding": "0 6px", "flex": "0 0 28px"}),
+        ],
+    )
+
+
+def tile_rows(rows) -> list:
+    """Renderer der dynamischen Tile-Zeilen (rein/headless testbar). Zeilen werden
+    fortlaufend 0..n-1 re-indiziert → der Entfernen-Index deckt sich mit der
+    Listenposition (``mutate_tile_rows``). Kopfzeile mit TM/TN/TK-Labels voran."""
+    rows = rows or [default_tile_row()]
+    header = html.Div(
+        style={"display": "flex", "gap": "6px", "marginBottom": "2px"},
+        children=[html.Label(x, className="ctl-label", style={"flex": 1, "margin": 0})
+                  for x in ("TM", "TN", "TK")] + [html.Span(style={"flex": "0 0 28px"})],
+    )
+    return [header] + [_tile_row(i, dict(t)) for i, t in enumerate(rows)]
 
 
 def _tile_select() -> html.Div:
-    t = RunConfig().tile
+    """Mehrere Tile-Zeilen (+/-) + Swizzle-Konfigurationen (Mehrfachauswahl). Der Batch
+    misst das Kreuzprodukt Format × Tile × Swizzle-Konfig (``configs_from_selection``)."""
     return html.Div([
-        html.Div(
-            style={"display": "flex", "gap": "8px"},
-            children=[
-                _tile_dropdown(ID_TILE_TM, "TM", _TILE_M_OPTIONS, t["TM"]),
-                _tile_dropdown(ID_TILE_TN, "TN", _TILE_N_OPTIONS, t["TN"]),
-                _tile_dropdown(ID_TILE_TK, "TK", _TILE_K_OPTIONS, t["TK"]),
-            ],
-        ),
+        html.Div(id=ID_TILE_ROWS, children=tile_rows([default_tile_row()])),
+        dbc.Button("+ Tile-Konfiguration", id=ID_TILE_ADD, color="link", size="sm",
+                   n_clicks=0, style={"padding": "2px 0", "fontSize": "12.5px"}),
         html.Div([
-            html.Label("L2-Swizzle", style=_LABEL),
-            dbc.RadioItems(id=ID_SWIZZLE, options=_SWIZZLE_OPTIONS, value="off",
-                           inline=True, style={"fontSize": "13px"},
-                           inputStyle={"marginRight": "5px"}, labelStyle={"marginRight": "14px"}),
+            html.Label("L2-Swizzle-Konfigurationen (Mehrfachauswahl)", className="ctl-label"),
+            dbc.Checklist(id=ID_SWIZZLE_CONFIGS, options=_SWIZZLE_CONFIG_OPTIONS,
+                          value=list(_DEFAULT_SWIZZLE_CONFIG), inline=True,
+                          style={"fontSize": "13px"}, inputStyle={"marginRight": "5px"},
+                          labelStyle={"marginRight": "12px"}),
         ], style={"marginTop": "10px"}),
     ])
 
@@ -691,7 +875,7 @@ def _baseline_header() -> list:
         target=ID_BASELINE_INFO, placement="right",
         style={"maxWidth": "330px", "textAlign": "left", "fontSize": "12px"},
     )
-    return [html.H2(["Baselines (Vergleich)", info], style=_H2), tip]
+    return [html.H2(["Baselines (Vergleich)", info], className="ctl-section"), tip]
 
 
 def _baseline_select() -> html.Div:
@@ -721,7 +905,7 @@ def _bench_header() -> list:
         target=ID_BENCH_INFO, placement="right",
         style={"maxWidth": "330px", "textAlign": "left", "fontSize": "12px"},
     )
-    return [html.H2(["Messung", info], style=_H2), tip]
+    return [html.H2(["Messung", info], className="ctl-section"), tip]
 
 
 def _bench_select() -> html.Div:
@@ -730,13 +914,13 @@ def _bench_select() -> html.Div:
         style={"display": "flex", "gap": "8px"},
         children=[
             html.Div(style={"flex": 1}, children=[
-                html.Label("Warmup", style=_LABEL),
+                html.Label("Warmup", className="ctl-label"),
                 dbc.Input(id=ID_BENCH_WARMUP, type="number", value=c.bench_warmup,
                           min=_BENCH_WARMUP_RANGE[0], max=_BENCH_WARMUP_RANGE[1],
                           step=1, debounce=True),
             ]),
             html.Div(style={"flex": 1}, children=[
-                html.Label("Iterationen", style=_LABEL),
+                html.Label("Iterationen", className="ctl-label"),
                 dbc.Input(id=ID_BENCH_ITERS, type="number", value=c.bench_iters,
                           min=_BENCH_ITERS_RANGE[0], max=_BENCH_ITERS_RANGE[1],
                           step=1, debounce=True),
@@ -750,7 +934,7 @@ def build_controls() -> html.Div:
     Auswahl + Kachelung/Swizzle + Baselines + Messung (Warmup/Iterationen) +
     Run/Cancel + Progress."""
     return html.Div([
-        html.H2("Operation", style={**_H2, "marginTop": 0}),
+        html.H2("Operation", className="ctl-section", style={"marginTop": 0}),
         _family_select(),
         _preset_select(),
         _expr_input(),
@@ -759,7 +943,7 @@ def build_controls() -> html.Div:
         html.Div(id=ID_EXPR_INFO, style={"fontSize": "12px", "margin": "6px 0 0",
                                          "minHeight": "16px"}),
 
-        html.H2("Größen je Index", style=_H2),
+        html.H2("Größen je Index", className="ctl-section"),
         html.Div(id=ID_INDEX_SIZES,
                  style={"display": "flex", "flexWrap": "wrap", "gap": "8px"},
                  children=index_size_inputs(_DEFAULT_EXPR)),

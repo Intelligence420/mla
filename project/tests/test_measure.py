@@ -204,6 +204,41 @@ def test_baselines_not_in_slug():
     assert a == b, (a, b)
 
 
+def test_group_m_in_slug_conditional():
+    """GROUP_M (TZ 7.5) geht NUR bei swizzle=True UND group_m!=8 in den Slug —
+    sonst byte-identisch zu TZ 1-6. Schützt den Compile-Cache vor stillem Fehltreffer
+    (zwei GROUP_M-Werte dürfen nicht dieselbe kernels/<slug>.py teilen)."""
+    from tool_pipeline.schema import RunConfig
+    from tool_pipeline.store.store import config_slug
+
+    base = "ik_kj_to_ij__fp16-fp32__TM128_TN128_TK64"
+    # Default 8 (implizit + explizit) → bares __sw (byte-identisch)
+    assert config_slug(RunConfig(swizzle=True)) == base + "__sw"
+    assert config_slug(RunConfig(swizzle=True, group_m=8)) == base + "__sw"
+    # abweichender GROUP_M → eigener Slug
+    assert config_slug(RunConfig(swizzle=True, group_m=16)) == base + "__sw_g16"
+    assert config_slug(RunConfig(swizzle=True, group_m=1)) == base + "__sw_g1"
+    # GROUP_M ohne Swizzle wirkungslos → kein Suffix
+    assert config_slug(RunConfig(swizzle=False, group_m=16)) == base
+    # Altzeile ohne group_m-Key → bares __sw (Rückwärtskompatibilität)
+    assert config_slug({"expr": "ik,kj->ij", "dtype": "fp16", "acc_dtype": "fp32",
+                        "tile": {"TM": 128, "TN": 128, "TK": 64}, "swizzle": True}) == base + "__sw"
+
+
+def test_compute_metrics_nary_aggregates():
+    """n-är-Metrik (TZ 7.5-3): FLOPs+Bytes über die paarweisen Schritte aggregiert →
+    EIN Roofline-Punkt = Summe der Per-Schritt-GEMM-Kosten (inkl. Zwischentensor)."""
+    from tool_pipeline.measure.metrics import (compute_metrics_nary, gemm_bytes,
+                                               gemm_flops, tflops)
+    steps = [(8, 6, 4, 1), (8, 5, 6, 1)]   # (M,N,K,B) zweier Ketten-Schritte
+    m = compute_metrics_nary(steps, run_ms=2.0, dtype="fp16", acc_dtype="fp32")
+    exp_flops = sum(gemm_flops(M, N, K, B) for (M, N, K, B) in steps)
+    exp_bytes = sum(gemm_bytes(M, N, K, "fp16", "fp32", B) for (M, N, K, B) in steps)
+    assert abs(m["tflops"] - tflops(exp_flops, 2.0)) < 1e-9
+    assert m["arithmetic_intensity"] == round(exp_flops / exp_bytes, 2)
+    assert m["gbps"] is not None and m["percent_peak_flops"] is not None
+
+
 def test_gpu_state_returns_dict():
     """gpu_state() liefert ein dict; wo nvidia-smi da ist, die erwarteten Keys."""
     from tool_pipeline.measure.provenance import gpu_state

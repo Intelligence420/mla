@@ -111,6 +111,137 @@ class ContractionIR:
 
 
 # ---------------------------------------------------------------------------
+# n-äre Kontraktion (TZ 7.5-3) — >2 Operanden, zerlegt in paarweise 2-Op-GEMMs
+# ---------------------------------------------------------------------------
+@dataclass
+class NAryContractionIR:
+    """n-äre Kontraktion (>2 Operanden), **geplant** als Folge paarweiser 2-Op-
+    Kontraktionen (Ketten-Zerlegung). Jeder Schritt ist ein sauberes 2-Op-Sub-Problem
+    (durch den bewiesenen GEMM-Pfad, ``reshape.to_canonical``) — nicht sauber
+    zerlegbare Ausdrücke scheitern schon beim Planen **laut** (kein still falsch).
+
+    ``steps``: Liste von dicts ``{a_expr, b_expr, c_expr, a_src, b_src}``. ``*_src``
+    ist die Herkunft eines Operanden: ``("leaf", i)`` = Original-Operand ``inputs[i]``,
+    ``("step", j)`` = Zwischenergebnis von Schritt ``j`` (bleibt auf der GPU). Der
+    letzte Schritt liefert exakt ``output`` (in Output-Reihenfolge).
+    """
+
+    expr: str
+    inputs: list[str]
+    output: str
+    dim_sizes: dict[str, int]
+    steps: list
+
+
+def _nary_order(expr: str, inputs: list[str], sizes: dict[str, int]) -> list | None:
+    """Reihenfolge der paarweisen Kontraktionen via ``opt_einsum.contract_path``
+    (**lazy** importiert — nie im Modulkopf, sonst bräche die CUDA-freie GUI). Gibt
+    eine Liste von Positions-Paaren (in der JEWEILS aktuellen Operandenliste) oder
+    ``None`` (opt_einsum fehlt/Fehler) ⇒ deterministischer Links-nach-rechts-Fold."""
+    try:
+        import opt_einsum  # noqa: PLC0415 — bewusst lazy
+        shapes = [tuple(sizes[d] for d in op) for op in inputs]
+        path, _info = opt_einsum.contract_path(expr, *shapes, shapes=True, optimize="auto")
+        return [tuple(step) for step in path]
+    except Exception:  # noqa: BLE001 — opt_einsum optional; Fold ist immer korrekt
+        return None
+
+
+def _validate_pairwise_step(a: str, b: str, c: str, sizes: dict[str, int]) -> None:
+    """Prüfe, dass ``a,b->c`` ein **sauberes** 2-Op-Kontraktions-Sub-Problem ist:
+    jeder kontrahierte Index (nicht in ``c``) muss in **beiden** Operanden stehen
+    (GEMM-K), jeder ``c``-Index aus ``a``/``b`` stammen — sonst loud-fail. Die volle
+    M/N/K/Diagonalen-Prüfung macht anschließend ``_parse_contraction``."""
+    sa, sb, sc = set(a), set(b), set(c)
+    for d in sa | sb:
+        if d not in sc and not (d in sa and d in sb):
+            raise NotImplementedError(
+                f"n-är: Schritt '{a},{b}->{c}' ist keine saubere 2-Operanden-Kontraktion — "
+                f"Index '{d}' würde nur aus einem Operanden summiert (kein paarweise "
+                f"klassifizierbares GEMM-K). Nur Ketten-Kontraktionen werden unterstützt.")
+    for d in sc:
+        if d not in (sa | sb):
+            raise NotImplementedError(
+                f"n-är: Schritt-Output-Index '{d}' in '{a},{b}->{c}' kommt in keinem Operanden vor.")
+    # Jeder Schritt MUSS mindestens einen Index kontrahieren (echtes GEMM-K); ein
+    # Schritt ohne Kontraktion ist ein Hadamard/elementwise-Produkt → bewusst draußen
+    # (Design-Entscheidung: nur echte Ketten-Kontraktionen, kein n-äres Hadamard).
+    if not [d for d in (sa & sb) if d not in sc]:
+        raise NotImplementedError(
+            f"n-är: Schritt '{a},{b}->{c}' kontrahiert keinen Index (Hadamard/elementwise) "
+            f"— nur echte Ketten-Kontraktionen (mit GEMM-K) werden unterstützt.")
+    _parse_contraction(f"{a},{b}->{c}", sizes)   # strikte 2-Op-Klassifikation (Diagonalen etc.)
+
+
+def _plan_nary(expr: str, inputs: list[str], output: str, sizes: dict[str, int]) -> list:
+    """Plane die Folge paarweiser 2-Op-Kontraktionen (opt_einsum-Reihenfolge, falls
+    verfügbar; sonst Links-nach-rechts-Fold). Jeder Schritt wird als sauberes 2-Op-
+    Sub-Problem validiert (loud-fail sonst). Der letzte Schritt liefert exakt
+    ``output`` (Reihenfolge!)."""
+    order = _nary_order(expr, inputs, sizes)
+    operands = [(op, ("leaf", i)) for i, op in enumerate(inputs)]
+    out_set = set(output)
+    steps: list = []
+    step_idx = 0
+    while len(operands) > 1:
+        i, j = 0, 1
+        if order and step_idx < len(order) and len(order[step_idx]) == 2:
+            oi, oj = order[step_idx]
+            if 0 <= oi < len(operands) and 0 <= oj < len(operands) and oi != oj:
+                i, j = sorted((oi, oj))
+        a_expr, a_src = operands[i]
+        b_expr, b_src = operands[j]
+        rest = [operands[k] for k in range(len(operands)) if k not in (i, j)]
+        if rest:
+            keep = set(out_set)
+            for (r_expr, _s) in rest:
+                keep |= set(r_expr)
+            c_list: list[str] = []
+            for d in a_expr + b_expr:
+                if d in keep and d not in c_list:
+                    c_list.append(d)
+            c_expr = "".join(c_list)
+        else:
+            c_expr = output    # letzter Schritt = exakt der finale Output
+        _validate_pairwise_step(a_expr, b_expr, c_expr, sizes)
+        steps.append({"a_expr": a_expr, "b_expr": b_expr, "c_expr": c_expr,
+                      "a_src": a_src, "b_src": b_src})
+        operands = rest + [(c_expr, ("step", step_idx))]
+        step_idx += 1
+    return steps
+
+
+def _parse_nary(expr: str, inputs: list[str], output: str | None,
+                sizes: dict[str, int]) -> NAryContractionIR:
+    """>2-Operanden-Ausdruck → geplante `NAryContractionIR`. Validiert wie die 2-Op-
+    Kontraktion (keine Wiederholungen/Diagonalen, impliziter Output nach einsum-
+    Konvention, alle Größen bekannt, kein freier Output-Index) und plant dann die
+    paarweise Kette. Nicht sauber zerlegbar ⇒ loud-fail (im Planer)."""
+    for k, idx in enumerate(inputs):
+        if len(set(idx)) != len(idx):
+            raise NotImplementedError(
+                f"Wiederholter Index in Operand {k} ('{idx}') — Diagonalen/Spuren "
+                f"werden (bewusst) nicht unterstützt.")
+    if output is None:
+        counts = Counter("".join(inputs))
+        output = "".join(sorted(i for i, c in counts.items() if c == 1))
+    if len(set(output)) != len(output):
+        raise NotImplementedError(
+            f"Wiederholter Index im Output ('{output}') — Diagonalen/Spuren "
+            f"werden (bewusst) nicht unterstützt.")
+    all_in = set("".join(inputs))
+    free = set(output) - all_in
+    if free:
+        raise ValueError(f"Output-Index/-Indizes {sorted(free)} kommen in keinem Operanden vor.")
+    missing = (all_in | set(output)) - set(sizes)
+    if missing:
+        raise ValueError(f"dim_sizes fehlt für Index/Indizes {sorted(missing)}.")
+    steps = _plan_nary(expr, inputs, output, sizes)
+    return NAryContractionIR(expr=expr, inputs=list(inputs), output=output,
+                             dim_sizes=dict(sizes), steps=steps)
+
+
+# ---------------------------------------------------------------------------
 # Memory-bound-IRs (TZ 7) — leicht: nur Achsen/Größen, kein M/N/K, kein Reshape
 # ---------------------------------------------------------------------------
 @dataclass
@@ -229,7 +360,8 @@ def _check_sizes(indices: set[str], sizes: dict[str, int]) -> None:
     if missing:
         raise ValueError(f"dim_sizes fehlt für Index/Indizes {sorted(missing)}.")
 def parse(config: Union[RunConfig, str], dim_sizes: dict[str, int] | None = None,
-          family: str | None = None) -> Union[ContractionIR, ElementwiseIR, ReductionIR]:
+          family: str | None = None
+          ) -> Union[ContractionIR, NAryContractionIR, ElementwiseIR, ReductionIR]:
     """`RunConfig` (oder roher Ausdruck + `dim_sizes`) → family-typisierte IR.
 
     Routet zuerst auf die **Operations-Familie** und delegiert an den passenden
@@ -259,12 +391,13 @@ def parse(config: Union[RunConfig, str], dim_sizes: dict[str, int] | None = None
     )
 
 
-def _parse_contraction(expr: str, sizes: dict[str, int]) -> ContractionIR:
-    """2-Operanden-Ausdruck → `ContractionIR` (M/N/K/Batch-Klassifikation).
+def _parse_contraction(expr: str, sizes: dict[str, int]):
+    """Kontraktions-Ausdruck → IR. **2 Operanden** → `ContractionIR` (M/N/K/Batch-
+    Klassifikation, Verhalten byte-identisch zu TZ 1-6). **>2 Operanden** → n-äre
+    Ketten-Zerlegung `NAryContractionIR` (TZ 7.5-3, via `_parse_nary`).
 
-    Validiert streng: genau 2 Operanden, Output explizit **oder** implizit
-    (einsum-Konvention), keine wiederholten Indizes je Operand, jede Größe bekannt,
-    kein freier Output-Index. (Verhalten unverändert ggü. TZ 1-6.)
+    Validiert streng: Output explizit **oder** implizit (einsum-Konvention), keine
+    wiederholten Indizes je Operand, jede Größe bekannt, kein freier Output-Index.
     """
     expr = expr.replace(" ", "")
 
@@ -277,11 +410,13 @@ def _parse_contraction(expr: str, sizes: dict[str, int]) -> ContractionIR:
         lhs, output = expr, None
     inputs = [s for s in lhs.split(",") if s]
 
-    if len(inputs) != 2:
+    if len(inputs) < 2:
         raise NotImplementedError(
-            f"genau 2 Operanden; '{expr}' hat {len(inputs)} "
-            f"(n-äres einsum = später/optional)."
-        )
+            f"Kontraktion braucht mindestens 2 Operanden; '{expr}' hat {len(inputs)}.")
+    if len(inputs) > 2:
+        # n-är (TZ 7.5-3): paarweise Ketten-Zerlegung statt Ablehnung. Der 2-Op-Pfad
+        # darunter bleibt byte-identisch (len == 2).
+        return _parse_nary(expr, inputs, output, sizes)
 
     in0, in1 = inputs
 

@@ -22,8 +22,12 @@ _MUTED = {"color": "#6b7280"}
 _STATUS_LABEL = {
     "ok": "Lauf erfolgreich — verifiziert und gemessen.",
     "verify_failed": "Verifikation fehlgeschlagen — Zahlen weichen von der fp32-Referenz ab.",
-    "compile_error": "Compile-Fehler — Kernel/Config nicht baubar.",
-    "run_error": "Laufzeit-Fehler — Kernel crasht beim Launch/Messen.",
+    # deckt auch den n-är-Loud-Fail (nicht zerlegbare Kontraktion) und unzulässige
+    # dtype-Kombis mit ab — die Ursache steht als Detailzeile darunter.
+    "compile_error": "Compile-Fehler — Ausdruck/Config nicht baubar "
+                     "(z. B. unzulässige dtype-Kombination oder nicht zerlegbare "
+                     "Kontraktion). Details unten.",
+    "run_error": "Laufzeit-Fehler — Kernel crasht beim Launch oder Messen.",
 }
 _STATUS_COLOR = {"ok": "success", "verify_failed": "danger",
                  "compile_error": "danger", "run_error": "danger"}
@@ -37,7 +41,8 @@ def _fmt(x, spec: str, default: str = "—") -> str:
 def render_status(result: RunResult):
     """Statusbanner (grün bei ok, rot bei Fehler) + ggf. Fehlertext."""
     color = _STATUS_COLOR.get(result.status, "secondary")
-    children = [html.Strong(_STATUS_LABEL.get(result.status, result.status))]
+    label = _STATUS_LABEL.get(result.status, f"Unbekannter Status: {result.status}")
+    children = [html.Strong(label)]
     if result.error:
         children += [html.Br(), html.Span(result.error, style={"fontSize": "12.5px"})]
     return dbc.Alert(children, color=color, className="mb-3")
