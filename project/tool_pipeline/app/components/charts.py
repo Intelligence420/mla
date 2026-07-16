@@ -30,6 +30,9 @@ from ...hardware import (
     ridge_point,
 )
 from .controls import COMBOS, combo_key, combo_label, parse_combo
+# config_slug ist die kanonische Kernel-Identität (torch-frei) → Serien-Schlüssel
+# der Multi-Config-Charts (TZ 7.5-2), damit kein zweites Key-Schema driftet.
+from ...store.store import config_slug
 
 # --- Farb-/Ink-Tokens (dataviz-Referenzpalette, Light-Surface) ---------------
 _PALETTE = ["#2a78d6", "#1baf7a", "#eda100", "#008300",
@@ -89,6 +92,14 @@ def _points(results) -> list[dict]:
         pts.append({
             "key": key, "label": combo_label(dt, ac),
             "swizzle": bool(cfg.get("swizzle")),
+            # TZ 7.5-2: Tile + GROUP_M + kanonischer Slug → zweiter Vergleichs-Kanal
+            # (Symbol/Name/Hover) OHNE die Format-Farbpalette anzutasten.
+            "tile": cfg.get("tile") or {},
+            "group_m": int(cfg.get("group_m", 8) or 8),
+            "slug": config_slug(cfg),
+            # TZ 7.5-4: Lauf-Name (History-Vergleich mehrerer Läufe) — nur relevant,
+            # wenn mehrere Läufe vorliegen (sonst konstant/None → keine Wirkung).
+            "run_name": getattr(r, "run_name", None),
             "tflops": float(tf), "rel_err": float(rel),
             "max_abs_err": acc.get("max_abs_err"),
             "gbps": met.get("gbps"),
@@ -116,6 +127,79 @@ def _resolve_primary(pts: list[dict], primary_key: Optional[str]) -> Optional[st
     if primary_key in keys:
         return primary_key
     return keys[0] if keys else None
+
+
+# ---------------------------------------------------------------------------
+# TZ 7.5-2: zweiter Vergleichs-Kanal für Tile-/GROUP_M-Varianten
+# ---------------------------------------------------------------------------
+# Marker-Symbole für die Tile/Swizzle-Varianten (NUR im Multi-Config-Modus; im
+# Einzel-Config-Fall bleibt alles wie in TZ 3-5). Farbe bleibt IMMER das Format.
+_VARIANT_SYMBOLS = ["circle", "diamond", "square", "triangle-up", "cross", "x",
+                    "star", "triangle-down", "pentagon", "hexagon", "star-diamond",
+                    "hourglass", "bowtie", "triangle-left"]
+
+
+def _tile_sig(tile) -> str:
+    """Kompakte Tile-Signatur für Legende/Hover, z. B. ``TM128/TN128/TK64`` (leer,
+    wenn kein Tile bekannt)."""
+    if not tile:
+        return ""
+    return f"TM{tile.get('TM')}/TN{tile.get('TN')}/TK{tile.get('TK')}"
+
+
+def _variant_id(p: dict) -> tuple:
+    """Kernel-Variante jenseits von Format+Swizzle: (Lauf-Name, Tile-Signatur, Swizzle,
+    wirksames GROUP_M). GROUP_M zählt nur bei Swizzle (sonst wirkungslos → 0); der
+    Lauf-Name unterscheidet gleiche Configs aus verschiedenen Läufen (History)."""
+    return (p.get("run_name") or "", _tile_sig(p["tile"]), bool(p["swizzle"]),
+            int(p["group_m"]) if p["swizzle"] else 0)
+
+
+def _multi_run(pts: list[dict]) -> bool:
+    """Mehr als ein benannter Lauf im Punktesatz? (History-Mehr-Lauf-Vergleich)."""
+    return len({p.get("run_name") for p in pts if p.get("run_name")}) > 1
+
+
+def _needs_variant_channel(pts: list[dict]) -> bool:
+    """Braucht dieser Punktesatz den ZWEITEN Kanal? Ja, sobald mehrere Tiles ODER
+    (unter Swizzle) mehrere GROUP_M ODER mehrere Läufe vorkommen — dann würden sich
+    Punkte gleicher Farbe+Swizzle sonst still überlagern. Nur-Swizzle-A/B (ein Tile,
+    ein Lauf) bleibt der bewährte TZ-3-5-Pfad (Farbe=Format, Symbol/Muster=Swizzle)."""
+    tiles = {_tile_sig(p["tile"]) for p in pts}
+    gms = {int(p["group_m"]) for p in pts if p["swizzle"]}
+    return len(tiles) > 1 or len(gms) > 1 or _multi_run(pts)
+
+
+def _variant_symbols(pts: list[dict]) -> dict:
+    """Deterministische Marker-Symbol-Zuordnung je distinkter Variante."""
+    variants = sorted({_variant_id(p) for p in pts})
+    return {v: _VARIANT_SYMBOLS[i % len(_VARIANT_SYMBOLS)] for i, v in enumerate(variants)}
+
+
+def _variant_suffix(p: dict) -> str:
+    """Disambiguierender Zusatz für Legende/Hover: Tile + Swizzle/GROUP_M
+    (z. B. ``TM64/TN64/TK32 · sw G16``)."""
+    parts = []
+    ts = _tile_sig(p["tile"])
+    if ts:
+        parts.append(ts)
+    if p["swizzle"]:
+        parts.append(f"sw G{int(p['group_m'])}")
+    return " · ".join(parts)
+
+
+def _full_label(p: dict, multi_run: bool = False) -> str:
+    """Voll disambiguierter Serien-Name: ``[Lauf-Name ·] Format [· Tile/Swizzle]``.
+    Der Lauf-Name wird nur vorangestellt, wenn mehrere Läufe vorliegen (History-
+    Vergleich) — sonst wäre er auf jeder Serie redundant."""
+    parts = []
+    if multi_run and p.get("run_name"):
+        parts.append(p["run_name"])
+    parts.append(p["label"])
+    suf = _variant_suffix(p)
+    if suf:
+        parts.append(suf)
+    return " · ".join(parts)
 
 
 def _style(fig: go.Figure, title: str, xaxis_title: str = "") -> None:
@@ -180,6 +264,12 @@ def figure_throughput(results, primary_key: Optional[str] = None) -> go.Figure:
     if not pts:
         return _empty("Noch keine verifizierten Läufe.")
     prim = _resolve_primary(pts, primary_key)
+
+    # TZ 7.5-2: mehrere Tile-/GROUP_M-Varianten → je Config ein eigener, voll
+    # beschrifteter Balken (Farbe = Format). Hat Vorrang vor dem Swizzle-A/B- und
+    # dem Baseline-Zweig, die das Einzel-Tile-Modell abbilden.
+    if _needs_variant_channel(pts):
+        return _figure_throughput_multi(pts, prim)
 
     # Swizzle-A/B: liegen für Formate BEIDE Zustände vor → gruppierter Vergleich.
     swz_set = {p["swizzle"] for p in pts}
@@ -255,6 +345,33 @@ def _figure_throughput_grouped(pts: list[dict], prim: Optional[str]) -> go.Figur
     fig.update_layout(barmode="group", bargap=0.3, bargroupgap=0.12,
                       legend=dict(orientation="h", yanchor="top", y=-0.18, x=0),
                       margin=dict(l=12, r=16, t=56, b=66))
+    fig.update_xaxes(rangemode="tozero")
+    fig.update_yaxes(automargin=True)
+    return fig
+
+
+def _figure_throughput_multi(pts: list[dict], prim: Optional[str]) -> go.Figure:
+    """TZ 7.5-2: ein Balken je Konfiguration (Format × Tile × Swizzle-Variante), voll
+    disambiguiert. Farbe = Format (Palette unangetastet); die Zeilen-Beschriftung
+    trägt Tile + Swizzle/GROUP_M; Balken des Primärformats mit Ink-Umrandung."""
+    pts = sorted(pts, key=lambda p: p["tflops"])   # aufsteigend → schnellste oben
+    mr = _multi_run(pts)
+    labels = [_full_label(p, mr) for p in pts]
+    fig = go.Figure(go.Bar(
+        x=[p["tflops"] for p in pts], y=labels, orientation="h",
+        marker=dict(
+            color=[p["color"] for p in pts],
+            line=dict(color=_INK, width=[2 if p["key"] == prim else 0 for p in pts]),
+            cornerradius=4,
+        ),
+        text=[f"{p['tflops']:.1f}" for p in pts],
+        textposition="outside", textfont=dict(color=_INK, size=10), cliponaxis=False,
+        customdata=[[lbl] for lbl in labels],
+        hovertemplate="%{customdata[0]}<br>%{x:.2f} TFLOP/s<extra></extra>",
+    ))
+    _style(fig, title="Durchsatz je Konfiguration", xaxis_title="TFLOP/s")
+    _subtitle(fig, "Farbe = Format · Zeile = Format·Tile·Swizzle-Variante · Rahmen = Primärformat")
+    fig.update_layout(bargap=0.35, margin=dict(l=12, r=16, t=56, b=40))
     fig.update_xaxes(rangemode="tozero")
     fig.update_yaxes(automargin=True)
     return fig
@@ -339,18 +456,26 @@ def figure_accuracy_throughput(results, primary_key: Optional[str] = None) -> go
     # Identität über Legende + Hover (geteilte Format-Farben mit dem Balken-Chart)
     # statt Direkt-Labels: die würden am rechten Rand clippen und die Legende
     # doppeln. Das primäre Format bekommt einen größeren, umrandeten Marker.
+    # TZ 7.5-2: bei mehreren Tile-/GROUP_M-Varianten kodiert das Marker-SYMBOL die
+    # Variante (Farbe bleibt Format), Name/Hover werden voll disambiguiert. Einzel-
+    # Config: unverändert (kein Symbol-Kanal, Name = Format [+ ' · sw']).
+    multi = _needs_variant_channel(pts)
+    mr = _multi_run(pts)
+    sym = _variant_symbols(pts) if multi else None
     fig = go.Figure()
     for p in pts:
         is_prim = p["key"] == prim
-        name = p["label"] + (" · sw" if p["swizzle"] else "")
+        name = _full_label(p, mr) if multi else p["label"] + (" · sw" if p["swizzle"] else "")
+        marker = dict(
+            color=p["color"], size=17 if is_prim else 11,
+            line=dict(color=_INK if is_prim else "#ffffff", width=2 if is_prim else 1.5),
+        )
+        if multi:
+            marker["symbol"] = sym[_variant_id(p)]
         fig.add_trace(go.Scatter(
             x=[p["tflops"]], y=[max(p["rel_err"], _REL_FLOOR)],
-            mode="markers", name=name,
-            marker=dict(
-                color=p["color"], size=17 if is_prim else 11,
-                line=dict(color=_INK if is_prim else "#ffffff", width=2 if is_prim else 1.5),
-            ),
-            customdata=[[p["label"], p["rel_err"], p["max_abs_err"]]],
+            mode="markers", name=name, marker=marker,
+            customdata=[[name, p["rel_err"], p["max_abs_err"]]],
             hovertemplate=("%{customdata[0]}<br>%{x:.2f} TFLOP/s<br>"
                            "rel. Fehler %{customdata[1]:.2e}<br>"
                            "max_abs %{customdata[2]:.2e}<extra></extra>"),
@@ -512,13 +637,25 @@ def figure_roofline(results, primary_key: Optional[str] = None) -> go.Figure:
                            xanchor="right", yanchor="bottom",
                            font=dict(color=_ROOF_RIDGE, size=10))
 
-    # --- Messpunkte: Farbe = Format, Symbol = Swizzle, Primärformat hervorgehoben
+    # --- Messpunkte: Farbe = Format. Einzel-Config: Symbol = Swizzle (TZ 5). Multi-
+    #     Config (mehrere Tiles/GROUP_M): Symbol = Variante, Name/Hover voll
+    #     disambiguiert (Tile + Swizzle/GROUP_M) — Primärformat hervorgehoben.
+    multi = _needs_variant_channel(rpts)
+    mr = _multi_run(rpts)
+    sym = _variant_symbols(rpts) if multi else None
     for p in rpts:
         is_prim = p["key"] == prim
         # memory-bound-Punkte tragen ihre Op (add/mul/sum) im Namen (disambiguiert
         # gleiche dtype-Kombis; Kontraktion hat op=None → unverändert).
         op_suffix = f" · {p['op']}" if p.get("op") else ""
-        name = p["label"] + op_suffix + (" · sw" if p["swizzle"] else "")
+        if multi:
+            name = _full_label(p, mr) + op_suffix
+            symbol = sym[_variant_id(p)]
+            hover0 = p["label"] + op_suffix + (" · " + _variant_suffix(p) if _variant_suffix(p) else "")
+        else:
+            name = p["label"] + op_suffix + (" · sw" if p["swizzle"] else "")
+            symbol = _SWZ_SYMBOL[p["swizzle"]]
+            hover0 = p["label"] + op_suffix
         # memory-bound: %-der-Bandbreite ist die Primärmetrik (nicht %-vom-Compute-
         # Peak, der hier per Definition winzig ist) → im Hover betonen.
         memory_bound = p.get("family") in ("elementwise", "reduction")
@@ -531,10 +668,10 @@ def figure_roofline(results, primary_key: Optional[str] = None) -> go.Figure:
             x=[p["arithmetic_intensity"]], y=[p["tflops"]], mode="markers", name=name,
             marker=dict(
                 color=p["color"], size=17 if is_prim else 11,
-                symbol=_SWZ_SYMBOL[p["swizzle"]],
+                symbol=symbol,
                 line=dict(color=_INK if is_prim else "#ffffff", width=2 if is_prim else 1.5),
             ),
-            customdata=[[p["label"] + op_suffix, p["arithmetic_intensity"], pct_str,
+            customdata=[[hover0, p["arithmetic_intensity"], pct_str,
                          "mit" if p["swizzle"] else "ohne", pct_lbl]],
             hovertemplate=("%{customdata[0]} · %{customdata[3]} Swizzle<br>"
                            "AI %{customdata[1]:.2f} FLOP/B<br>"

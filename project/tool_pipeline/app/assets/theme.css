@@ -11,6 +11,13 @@
   --line: #e4e7ec;
   --bg: #f5f6f8;
   --panel: #ffffff;
+  /* Akzent-System (TZ 8), aus der Topbar abgeleitet — eine Markenfarbe durchgängig. */
+  --accent: #5b21b6;
+  --accent-deep: #3b2f63;
+  --accent-soft: #f3effc;
+  --ok: #15803d;
+  --warn: #b45309;
+  --radius: 11px;
 }
 
 body {
@@ -68,3 +75,72 @@ body {
 
 /* Eingaben etwas kompakter in der schmalen Sidebar */
 .sidebar input.form-control { font-size: 13px; }
+
+/* ==========================================================================
+   TZ 8 — Politur: durchgängiges, professionelles Erscheinungsbild.
+   Rein additiv über dbc/Bootstrap; konsolidiert wiederkehrende inline-styles
+   (Sidebar-Überschriften/Labels) und poliert die TZ-7.5-Flächen (History-
+   Accordion, Tile-Zeilen, Swizzle-Checkliste). Kein Vibe-Coding, kein Umbau.
+   ========================================================================== */
+
+/* --- Konsolidierte Sidebar-Typografie (früher inline _H2 / _LABEL) --- */
+.ctl-section {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  margin: 18px 0 8px;
+}
+.ctl-label {
+  display: block;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+/* --- Primär-Aktion in der Markenfarbe (statt Bootstrap-Blau) --- */
+.btn-primary {
+  background: linear-gradient(90deg, var(--accent-deep), var(--accent));
+  border: none;
+  font-weight: 600;
+}
+.btn-primary:hover,
+.btn-primary:focus { filter: brightness(1.08); background: linear-gradient(90deg, var(--accent-deep), var(--accent)); }
+.btn-primary:disabled { filter: grayscale(0.3) opacity(0.8); }
+.btn-link { color: var(--accent); }
+.btn-outline-secondary { --bs-btn-hover-bg: var(--accent-soft); --bs-btn-hover-border-color: var(--accent); --bs-btn-hover-color: var(--accent); }
+
+/* --- Ausgewählte Checkbox/Radio in der Markenfarbe --- */
+.form-check-input:checked { background-color: var(--accent); border-color: var(--accent); }
+.form-check-input:focus { border-color: var(--accent); box-shadow: 0 0 0 0.2rem rgba(91, 33, 182, 0.15); }
+.form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 0.2rem rgba(91, 33, 182, 0.12); }
+
+/* --- KPI-/Ergebnis-Karten: sanfter Hover, konsistenter Radius --- */
+.main .card { transition: box-shadow 0.15s ease; }
+.main .card:hover { box-shadow: 0 3px 10px rgba(16, 24, 40, 0.09); }
+
+/* --- Alerts (Fehlerzustände) ruhiger + gerundet --- */
+.main .alert { border-radius: var(--radius); font-size: 13px; }
+
+/* --- History-Panel (TZ 7.5-4): dezentes Accordion mit Marken-Akzent --- */
+.accordion { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.accordion-item { border: none; background: transparent; }
+.accordion-button {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  background: #fafafc;
+  padding: 12px 16px;
+}
+.accordion-button:not(.collapsed) { color: var(--accent); background: var(--accent-soft); box-shadow: none; }
+.accordion-button:focus { box-shadow: none; border-color: var(--line); }
+.accordion-button::after { filter: grayscale(1) opacity(0.6); }
+.accordion-body { background: var(--panel); padding: 14px 16px; }
+
+/* --- Dynamische Tile-Zeilen + Swizzle-Checkliste: konsistente Rhythmik --- */
+.sidebar .form-check-inline { margin-right: 12px; }
+.sidebar .btn-sm { --bs-btn-padding-y: 0.15rem; }
+
+/* --- Status-/Verify-Badges: etwas Luft --- */
+.main .badge { font-weight: 600; letter-spacing: 0.01em; }

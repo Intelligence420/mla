@@ -104,6 +104,15 @@ class RunConfig:
         default_factory=lambda: {"TM": 128, "TN": 128, "TK": 64}
     )
     swizzle: bool = False
+    # L2-Swizzle-Gruppengröße GROUP_M (TZ 7.5, additiv): zählt NUR bei
+    # ``swizzle=True`` (``swizzle`` bleibt der Gate) und wird zur Codegen-Zeit als
+    # Literal in den Swizzle-Kernel gebacken (``codegen/templates/contraction.py``).
+    # Default 8 = das bisher hart verdrahtete ``_SWIZZLE_GROUP_M`` ⇒ emittierter
+    # Quelltext byte-identisch. Geht nur BEDINGT in den Slug ein (``store.config_slug``:
+    # nur wenn ``swizzle`` UND ``group_m != 8``), damit die bestehenden ``__sw``-Slugs
+    # und der Compile-Cache nicht driften. ``GROUP_M=1`` reproduziert die plain-``bid``-
+    # Zuordnung (= „kein Swizzle").
+    group_m: int = 8
 
     # --- Vergleichsbaselines (TZ 1: leer; cuBLAS/naive kommen in TZ 4) ---
     baselines: list[str] = field(default_factory=list)
@@ -124,6 +133,11 @@ class RunConfig:
                 self.inputs = [s.strip() for s in lhs.split(",") if s.strip()]
             if self.output is None:
                 self.output = rhs.strip()
+        # Defensive Untergrenze: GROUP_M ist eine Gruppen-*Anzahl* (≥ 1). Der
+        # autoritative Loud-Fail sitzt im Codegen (``build_gemm_module``) und in der
+        # GUI-Validierung (``controls.validate_group_m``); hier nur ein letzter Boden,
+        # damit ein unsinniger Wert nicht still in Slug/Kernel durchsickert.
+        self.group_m = max(1, int(self.group_m))
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serialisierbares dict (für Store/Echo/Hash)."""
@@ -162,6 +176,16 @@ class RunResult:
     metrics: dict[str, Any] = field(default_factory=dict)    # tflops, ... (TZ 4: GB/s, %-Peak)
     provenance: dict[str, Any] = field(default_factory=dict)  # gpu, dtype, sizes, timestamp
     error: Optional[str] = None         # Fehlertext, falls status != ok
+    # --- Lauf-Identität (TZ 7.5-4: Testlauf-Verwaltung) ---
+    # Ein „Testlauf" = ein „Vergleichen"-Batch: alle RunResults dieses Batches teilen
+    # denselben ``run_id`` (uuid4, EINMAL außen vergeben) + ``created_at`` (stabiler
+    # Gruppen-Sortierschlüssel, separat vom sekundengenauen provenance['timestamp'] je
+    # Zeile) und einen gemeinsamen ``run_name`` (Default: Familie+Expr+Uhrzeit,
+    # umbenennbar). Alle drei additiv+Optional ⇒ from_dict-tolerant; Altzeilen ohne
+    # diese Felder laden weiter (Store synthetisiert dann einen Fallback-Lauf).
+    run_id: Optional[str] = None
+    run_name: Optional[str] = None
+    created_at: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serialisierbares dict (eine Zeile in results.jsonl)."""

@@ -29,11 +29,15 @@ from tool_pipeline.app.components.controls import (  # noqa: E402
     ID_OP,
     ID_PRESET,
     ID_SWIZZLE,
+    ID_SWIZZLE_CONFIGS,
+    ID_TILE_ADD,
     ID_TILE_INFO,
+    ID_TILE_ROWS,
     ID_TILE_TK,
     ID_TILE_TM,
     ID_TILE_TN,
     INDEX_SIZE_TYPE,
+    TILE_TM_TYPE,
     PRESETS,
     _DEFAULT_EXPR,
     _DEFAULT_SELECTION,
@@ -45,23 +49,32 @@ from tool_pipeline.app.components.controls import (  # noqa: E402
     config_from_controls,
     configs_from_selection,
     default_selection_for_family,
+    default_tile_row,
     dim_sizes_from_state,
     expr_indices,
+    group_m_from_controls,
     index_categories,
     index_size_inputs,
+    mutate_tile_rows,
     parse_combo,
     parse_preset_value,
     preset_options,
     preset_value,
     resolve_expr,
+    swizzle_configs_from_state,
     swizzles_from_value,
     tile_from_controls,
+    tile_rows,
+    tiles_from_state,
     validate_baselines,
     validate_dim_sizes,
     validate_expr,
+    validate_group_m,
     validate_selection,
     validate_swizzle,
+    validate_swizzle_configs,
     validate_tile,
+    validate_tiles,
 )
 from tool_pipeline.schema import ALLOWED_ACC, RunConfig, check_dtype_combo  # noqa: E402
 
@@ -90,12 +103,13 @@ def test_index_categories():
 
 
 def test_validate_expr():
-    """Gültige Ausdrücke → None; n-är/Diagonale/leer → deutscher Fehlertext."""
+    """Gültige Ausdrücke → None; nicht zerlegbares n-är/Diagonale/leer → Fehlertext."""
     assert validate_expr("ik,kj->ij") is None
     assert validate_expr("bik,bkj->bij") is None
     assert validate_expr("ik,kj") is None                    # impliziter Output ok
     assert validate_expr("") is not None
-    assert validate_expr("ij,jk,kl->il") is not None         # n-är
+    assert validate_expr("ij,jk,kl->il") is None             # n-är-Kette jetzt unterstützt (TZ 7.5-3)
+    assert validate_expr("abc,bca,cba->abc") is not None     # n-äres Hadamard (kein GEMM-K) → abgelehnt
     assert validate_expr("ii,ij->ij") is not None            # Diagonale
 
 
@@ -164,8 +178,8 @@ def test_configs_from_selection_batched_expr():
 def test_configs_from_selection_fills_tile_swizzle_baselines():
     sel = [combo_key("fp16", "fp32"), combo_key("bf16", "fp32")]
     cfgs = configs_from_selection("ik,kj->ij", {"i": 128, "k": 64, "j": 128}, sel,
-                                  tile={"TM": 64, "TN": 64, "TK": 32},
-                                  swizzle=True, baselines=["cublas", "naive"])
+                                  tiles=[{"TM": 64, "TN": 64, "TK": 32}],
+                                  swizzle_configs=[(True, 8)], baselines=["cublas", "naive"])
     assert len(cfgs) == 2
     for c in cfgs:
         assert c.tile == {"TM": 64, "TN": 64, "TK": 32}
@@ -182,7 +196,8 @@ def test_configs_from_selection_default_tile_when_none():
 
 def test_configs_from_selection_swizzle_both_expands():
     cfgs = configs_from_selection("ik,kj->ij", {"i": 128, "k": 64, "j": 128},
-                                  [combo_key("fp16", "fp32")], swizzle="both", baselines=["cublas"])
+                                  [combo_key("fp16", "fp32")],
+                                  swizzle_configs=[(False, 8), (True, 8)], baselines=["cublas"])
     assert len(cfgs) == 2
     assert [c.swizzle for c in cfgs] == [False, True]
     assert cfgs[0].baselines == ["cublas"] and cfgs[1].baselines == []
@@ -224,6 +239,40 @@ def test_validate_tile_accepts_and_rejects():
     assert validate_tile(128, 128, 256) is not None
     assert validate_tile(128, 128, None) is not None
     assert validate_tile(128, 128, "x") is not None
+
+
+def test_validate_group_m_accepts_and_rejects():
+    """GROUP_M (TZ 7.5): akzeptiert die zulässigen Zweierpotenzen (auch als Strings),
+    lehnt Nicht-Werte/Fehlendes ab."""
+    for v in (1, 2, 4, 8, 16, 32):
+        assert validate_group_m(v) is None and validate_group_m(str(v)) is None
+    assert validate_group_m(5) is not None      # keine Option
+    assert validate_group_m(64) is not None      # außerhalb
+    assert validate_group_m(None) is not None
+    assert validate_group_m("") is not None
+    assert validate_group_m("x") is not None
+    assert group_m_from_controls("16") == 16
+
+
+def test_configs_from_selection_group_m():
+    """group_m wird in jede RunConfig durchgereicht; der Slug trägt es NUR bei
+    swizzle & group_m!=8 (bedingt, byte-identisch sonst)."""
+    from tool_pipeline.store.store import config_slug
+    sel = [combo_key("fp16", "fp32")]
+    ds = {"i": 128, "k": 64, "j": 128}
+    base = "ik_kj_to_ij__fp16-fp32__TM128_TN128_TK64"
+    # swizzle an, GROUP_M=16 → group_m gesetzt + Slug __sw_g16
+    c16 = configs_from_selection("ik,kj->ij", ds, sel, swizzle_configs=[(True, 16)])[0]
+    assert c16.group_m == 16 and config_slug(c16) == base + "__sw_g16"
+    # swizzle an, Default 8 → bares __sw
+    c8 = configs_from_selection("ik,kj->ij", ds, sel, swizzle_configs=[(True, 8)])[0]
+    assert c8.group_m == 8 and config_slug(c8) == base + "__sw"
+    # swizzle aus, GROUP_M=16 → gesetzt aber wirkungslos (kein Suffix)
+    coff = configs_from_selection("ik,kj->ij", ds, sel, swizzle_configs=[(False, 16)])[0]
+    assert coff.group_m == 16 and config_slug(coff) == base
+    # gemischt → False-Config sauber, True-Config mit GROUP_M
+    both = configs_from_selection("ik,kj->ij", ds, sel, swizzle_configs=[(False, 8), (True, 16)])
+    assert config_slug(both[0]) == base and config_slug(both[1]) == base + "__sw_g16"
 
 
 def test_validate_baselines():
@@ -331,9 +380,9 @@ def test_configs_from_selection_elementwise():
     """Elementwise: family/op landen in der RunConfig; kein Swizzle/keine Baselines."""
     cfgs = configs_from_selection("ij,ij->ij", {"i": 128, "j": 128},
                                   [combo_key("fp16", "fp32"), combo_key("bf16", "fp32")],
-                                  swizzle="both", baselines=["cublas"],
+                                  swizzle_configs=[(False, 8), (True, 8)], baselines=["cublas"],
                                   family="elementwise", op="mul")
-    # swizzle='both' wird für memory-bound ignoriert → nur 1 Config je Format.
+    # Swizzle-Konfigs werden für memory-bound ignoriert → nur 1 Config je Format.
     assert len(cfgs) == 2
     for c in cfgs:
         assert c.family == "elementwise" and c.op == "mul"
@@ -354,6 +403,83 @@ def test_configs_from_selection_contraction_unchanged():
     c = configs_from_selection("ik,kj->ij", {"i": 128, "k": 64, "j": 128},
                                [combo_key("fp16", "fp32")])[0]
     assert c.family == "contraction" and c.op is None
+
+
+# --- TZ 7.5-2: Multi-Config (Tile-Zeilen + Swizzle-Konfigs + Kreuzprodukt) ----
+def test_swizzle_configs_from_state():
+    """Mehrfachauswahl-Werte → sortierte (swizzle, group_m)-Liste; leer ⇒ nur (False,8)."""
+    assert swizzle_configs_from_state(["off"]) == [(False, 8)]
+    assert swizzle_configs_from_state([]) == [(False, 8)]
+    assert swizzle_configs_from_state(["g8"]) == [(True, 8)]
+    # deterministisch sortiert: ohne-Swizzle zuerst, dann GROUP_M aufsteigend
+    assert swizzle_configs_from_state(["g16", "off", "g8"]) == [(False, 8), (True, 8), (True, 16)]
+    assert swizzle_configs_from_state(["g32", "g1"]) == [(True, 1), (True, 32)]
+
+
+def test_validate_swizzle_configs():
+    assert validate_swizzle_configs(["off", "g8", "g16"]) is None
+    assert validate_swizzle_configs([]) is None          # leer ⇒ Default, ok
+    assert validate_swizzle_configs(["g7"]) is not None   # keine Option
+    assert validate_swizzle_configs(["bogus"]) is not None
+
+
+def test_tiles_from_state_and_validate_tiles():
+    """tiles_from_state zippt die drei ALL-Listen zeilenweise; validate_tiles prüft
+    jede Zeile + fängt Duplikate."""
+    tiles = tiles_from_state(["128", "64"], ["128", "64"], ["64", "32"])
+    assert tiles == [{"TM": "128", "TN": "128", "TK": "64"},
+                     {"TM": "64", "TN": "64", "TK": "32"}]
+    assert validate_tiles(tiles) is None
+    assert validate_tiles(tiles_from_state(["128", "128"], ["128", "128"], ["64", "64"])) is not None  # Duplikat
+    assert validate_tiles(tiles_from_state(["48"], ["128"], ["64"])) is not None  # ungültiger Wert
+    assert validate_tiles([]) is not None                                          # leer
+
+
+def test_mutate_tile_rows_add_remove():
+    """+/- Zeilen-Mutation: hinzufügen wächst, entfernen schrumpft, mind. 1 bleibt."""
+    from tool_pipeline.app.components.controls import ID_TILE_ADD, TILE_RM_TYPE
+    rows = [default_tile_row()]
+    rows = mutate_tile_rows(rows, ID_TILE_ADD)
+    assert len(rows) == 2
+    rows = mutate_tile_rows(rows, {"type": TILE_RM_TYPE, "index": 0})
+    assert len(rows) == 1
+    rows = mutate_tile_rows(rows, {"type": TILE_RM_TYPE, "index": 0})   # letzte Zeile bleibt
+    assert len(rows) == 1
+
+
+def test_tile_rows_renderer_reindexes():
+    """tile_rows re-indiziert 0..n-1 (Header + je Zeile TM/TN/TK-Selects + ✕)."""
+    from tool_pipeline.app.components.controls import TILE_TM_TYPE
+    comps = tile_rows([default_tile_row(), {"TM": 64, "TN": 64, "TK": 32}])
+    # 1 Header + 2 Zeilen
+    assert len(comps) == 3
+    # zweite Zeile: erstes Select hat index 1 vom Typ tile-tm
+    row1 = comps[2].to_plotly_json()["props"]["children"]
+    tm_sel = row1[0].to_plotly_json()["props"]["children"].to_plotly_json()["props"]
+    assert tm_sel["id"] == {"type": TILE_TM_TYPE, "index": 1}
+    assert tm_sel["value"] == "64"
+
+
+def test_configs_cross_product_tiles_x_swizzle():
+    """Volles Kreuzprodukt selection × tiles × swizzle_configs; Reihenfolge
+    Format→Tile→Swizzle; Baselines nur an der ersten (Tile,Swizzle) je Format;
+    jede Config hat einen EIGENEN (kollisionsfreien) Slug."""
+    from tool_pipeline.store.store import config_slug
+    sel = [combo_key("fp16", "fp32"), combo_key("bf16", "fp32")]
+    tiles = [{"TM": 128, "TN": 128, "TK": 64}, {"TM": 64, "TN": 64, "TK": 32}]
+    sw = [(False, 8), (True, 16)]
+    cfgs = configs_from_selection("ik,kj->ij", {"i": 128, "k": 64, "j": 128}, sel,
+                                  tiles=tiles, swizzle_configs=sw, baselines=["cublas"])
+    assert len(cfgs) == 8
+    assert [c.dtype for c in cfgs] == ["fp16"] * 4 + ["bf16"] * 4    # COMBOS-Reihenfolge
+    # je Format: (t0,sw0),(t0,sw1),(t1,sw0),(t1,sw1)
+    assert [(c.tile["TM"], c.swizzle) for c in cfgs[:4]] == \
+        [(128, False), (128, True), (64, False), (64, True)]
+    # Baselines NUR an der ersten (Tile,Swizzle)-Kombi je Format (Index 0 und 4)
+    assert cfgs[0].baselines == ["cublas"] and cfgs[4].baselines == ["cublas"]
+    assert all(c.baselines == [] for i, c in enumerate(cfgs) if i not in (0, 4))
+    # Kollisionsfreiheit: 8 verschiedene Slugs
+    assert len({config_slug(c) for c in cfgs}) == 8
 
 
 def test_validate_dim_sizes_family_memory_guard():
@@ -397,13 +523,17 @@ def _walk(node):
 
 
 def test_build_controls_has_expr_and_axis_ids():
-    """Ausdrucks-/Preset-/Größen-Container + Tile/Swizzle/Baseline-IDs sind im Baum."""
+    """Ausdrucks-/Preset-/Größen-Container + Multi-Config-Tile-/Swizzle-/Baseline-IDs
+    sind im Baum (TZ 7.5-2: dynamische Tile-Zeilen statt fester Dropdowns)."""
     # Liste (nicht set): Pattern-Matching-IDs sind dicts (nicht hashbar).
     ids = [(c.to_plotly_json().get("props", {}) or {}).get("id")
            for c in _walk(build_controls())]
-    for i in (ID_PRESET, ID_EXPR, ID_INDEX_SIZES, ID_TILE_TM, ID_TILE_TN, ID_TILE_TK,
-              ID_SWIZZLE, ID_BASELINES):
+    for i in (ID_PRESET, ID_EXPR, ID_INDEX_SIZES, ID_TILE_ROWS, ID_TILE_ADD,
+              ID_SWIZZLE_CONFIGS, ID_BASELINES):
         assert i in ids, f"Control-ID {i!r} fehlt im Baum"
+    # mindestens eine Tile-Zeile mit Pattern-Matching-TM-Select (Index 0)
+    assert any(isinstance(i, dict) and i.get("type") == TILE_TM_TYPE for i in ids), \
+        "keine dynamische Tile-Zeile im Baum"
 
 
 def test_build_controls_default_index_fields():
