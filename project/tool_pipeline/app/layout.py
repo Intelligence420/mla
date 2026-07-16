@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dash import dcc, html
 
-from .components import controls
+from .components import controls, history
 
 APP_TITLE = "cuTile Performance Lab"
 APP_SUBTITLE = "einsum/GEMM · live generiert · verifiziert · gemessen"
@@ -39,6 +39,10 @@ def build_layout() -> html.Div:
         className="app-shell",
         children=[
             _topbar(),
+            # Ausklappbares History-Panel (TZ 7.5-4) über dem Sidebar+Main-Bereich —
+            # collapsed by default (dünne Leiste, bis der Nutzer es öffnet). Die Liste
+            # füllt ein Callback beim Laden + nach jedem Lauf (store.list_runs).
+            html.Div(history.render_history(), style={"padding": "0 16px"}),
             html.Div(
                 className="app-body",
                 children=[

@@ -68,7 +68,7 @@ def emit(config: RunConfig) -> str:
     """
     if config.family == "contraction":
         body = build_gemm_module(config.tile, config.dtype, config.acc_dtype,
-                                 swizzle=config.swizzle)
+                                 swizzle=config.swizzle, group_m=config.group_m)
     elif config.family == "elementwise":
         if not config.op:
             raise ValueError(

@@ -27,18 +27,46 @@ schaltet die Buttons. Die Kernlogik ``execute_run`` ist Dash-frei und wird headl
 
 from __future__ import annotations
 
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 import dash_bootstrap_components as dbc
-from dash import ALL, Input, Output, State, dcc, html, no_update
+from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
+from dash.exceptions import PreventUpdate
 from filelock import FileLock, Timeout
 
-from .components import charts, code_panel, controls, kpis
+from .components import charts, code_panel, controls, history, kpis
+from ..store import store   # torch-frei (pandas lazy) → im Haupt-Prozess GPU-frei ladbar
 
 # GPU-Lock + Timeout. .cache/ ist gitignored; Parent wird vor dem Lock sichergestellt.
 _PROJECT_DIR = Path(__file__).resolve().parents[2]
 _GPU_LOCK = _PROJECT_DIR / ".cache" / "gpu.lock"
 _LOCK_TIMEOUT = 60  # s — danach freundliche „GPU belegt"-Meldung statt endlos zu warten
+# TZ 7.5-2: weiche Warnung (keine harte Sperre) ab so vielen Configs im Batch —
+# |Formate|×|Tiles|×|Swizzle-Konfigs| kann auf der geteilten Maschine lange dauern / OOM.
+_SOFT_CONFIG_WARN = 12
+
+
+def _default_run_name(family: str, expr: str, created_at: str) -> str:
+    """Default-Name eines Testlaufs (TZ 7.5-4): Familie · Ausdruck · Uhrzeit (HH:MM
+    aus dem ISO-created_at). Umbenennbar in der History."""
+    hhmm = created_at[11:16] if len(created_at) >= 16 else created_at
+    return f"{family} · {expr} · {hhmm}"
+
+
+def _reload_source(result):
+    """History-Läufe: ``kernel_source`` steht bewusst NICHT im JSONL → aus
+    ``kernels/<slug>.py`` (``kernel_path``, projekt-relativ) nachladen, damit das
+    Code-Panel den Kernel zeigt. Lesefehler ⇒ still ``None`` (render_code_panel zeigt
+    dann „kein Kernel"). Mutiert das übergebene RunResult und gibt es zurück."""
+    if getattr(result, "kernel_source", None) or not getattr(result, "kernel_path", None):
+        return result
+    try:
+        result.kernel_source = (_PROJECT_DIR / result.kernel_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        pass
+    return result
 
 # Progress-Balken: der Track (Hülle) wird via running= eingeblendet und bleibt danach
 # sichtbar (voll) stehen — bewusst kein Ausblenden; der nächste Lauf setzt die Füllung
@@ -55,6 +83,14 @@ _GRAPH_CONFIG = {
 
 def _alert(title: str, body: str, color: str):
     return dbc.Alert([html.Strong(title), html.Br(), html.Span(body)], color=color, className="mb-3")
+
+
+def _history_feedback(msg: str, ok: bool = True):
+    """Farbcodierte History-Rückmeldung: grün bei Erfolg (umbenannt/gelöscht), amber
+    bei einem Hinweis (z. B. „bitte Auswahl treffen"). Ersetzt den bisher einheitlich
+    grauen Feedback-Text und macht Erfolg vs. Hinweis auf einen Blick unterscheidbar."""
+    color = "#15803d" if ok else "#b45309"   # grün / amber
+    return html.Span(msg, style={"color": color, "fontWeight": 500})
 
 
 def _format_status_strip(results) -> html.Div:
@@ -85,8 +121,14 @@ def _format_label(result) -> str:
     base = f"{cfg.get('dtype')} → {cfg.get('acc_dtype')}"
     if cfg.get("op"):            # memory-bound: Op mit (add/mul/copy/sum) — disambiguiert
         base += f" · {cfg.get('op')}"
+    # TZ 7.5-2: Tile nur zeigen, wenn es vom Default (128/128/64) abweicht → Multi-
+    # Config-Tabs disambiguiert, Einzel-Default-Tabs bleiben schlicht 'dtype → acc'.
+    t = cfg.get("tile") or {}
+    if t and (t.get("TM"), t.get("TN"), t.get("TK")) != (128, 128, 64):
+        base += f" · TM{t.get('TM')}/{t.get('TN')}/{t.get('TK')}"
     if cfg.get("swizzle"):
-        base += " · sw"          # einheitlich '· sw' (Tab/Badge/Legende)
+        gm = int(cfg.get("group_m", 8) or 8)
+        base += " · sw" + (f" G{gm}" if gm != 8 else "")   # einheitlich '· sw' (Tab/Badge/Legende)
     return base
 
 
@@ -157,7 +199,8 @@ def render_comparison(results) -> list:
 
 
 def execute_run(expr, dim_sizes, selection, family="contraction", op=None,
-                tm=None, tn=None, tk=None, swizzle=False, baselines=None,
+                tm=None, tn=None, tk=None, swizzle=False, group_m=8,
+                tiles=None, swizzle_configs=None, baselines=None,
                 warmup=None, iters=None, progress=None) -> list:
     """Reine Ablauflogik des Batch-Vergleichs (Dash-frei, headless testbar):
     validieren → RunConfig je Format → EIN GPU-Lock → ``run()`` je Format → rendern.
@@ -173,10 +216,17 @@ def execute_run(expr, dim_sizes, selection, family="contraction", op=None,
 
     ``expr`` ist der einsum-Ausdruck (Presets/Freitext), ``dim_sizes`` das Roh-dict
     Index→Größe (aus den dynamischen Feldern). ``tm/tn/tk`` (Tile) + ``swizzle``
-    steuern die Kachelung; ``tm/tn/tk=None`` ⇒ RunConfig-Default-Tile. ``baselines``
+    steuern die Kachelung; ``tm/tn/tk=None`` ⇒ RunConfig-Default-Tile. ``group_m``
+    (L2-Swizzle-Gruppengröße, Default 8) wirkt nur bei aktivem Swizzle. ``baselines``
     ist die (evtl. leere) Liste zuzuschaltender Vergleiche. ``warmup``/``iters`` sind
     die Mess-Einstellungen (``None`` ⇒ RunConfig-Defaults 10/30). ``progress`` ist der
     optionale Dash-``set_progress``-Callback → headless mit ``None`` testbar.
+
+    TZ 7.5-2 (Multi-Config): ``tiles`` (Liste von Tile-dicts) und ``swizzle_configs``
+    (Liste von ``(swizzle, group_m)``) sind der **GUI-Pfad** — der Batch misst das
+    Kreuzprodukt Format × Tile × Swizzle-Konfig. Sind sie ``None``, gilt der obige
+    Skalar-Rückfall (``tm/tn/tk`` + ``swizzle``/``group_m`` — für Tests/CLI). Ab
+    ``_SOFT_CONFIG_WARN`` Configs erscheint eine **weiche** Warnung (keine Sperre).
     """
     def _set(pct: int, text: str) -> None:
         # Füllbreite (Style des inneren Balkens) + Statustext in EINEM set_progress.
@@ -198,22 +248,42 @@ def execute_run(expr, dim_sizes, selection, family="contraction", op=None,
     err = controls.validate_baselines(baselines)
     if err:
         return [_alert("Ungültige Baseline-Auswahl", err, "warning")]
-    err = controls.validate_swizzle(swizzle)
-    if err:
-        return [_alert("Ungültiger Swizzle-Modus", err, "warning")]
-
-    # Tile: nur wenn ein Wert gesetzt ist (GUI liefert immer welche); sonst None →
-    # RunConfig-Default. Bei gesetztem Tile hart validieren (sauberer Fehler statt
-    # still nicht-baubarem Kernel).
-    tile = None
-    if tm is not None or tn is not None or tk is not None:
+    # --- Tile-Konfiguration(en) (TZ 7.5-2: eine ODER mehrere Zeilen) ------------
+    # GUI-Pfad: `tiles` = Liste von Roh-Tile-dicts (aus den dynamischen +/-Zeilen).
+    # Rückfall/Skalarpfad (Tests/CLI): einzelnes tm/tn/tk ⇒ eine Zeile; nichts ⇒ Default.
+    if tiles is not None:
+        err = controls.validate_tiles(tiles)
+        if err:
+            return [_alert("Ungültige Kachelung", err, "warning")]
+        tile_list = [controls.tile_from_controls(t["TM"], t["TN"], t["TK"]) for t in tiles]
+    elif tm is not None or tn is not None or tk is not None:
         err = controls.validate_tile(tm, tn, tk)
         if err:
             return [_alert("Ungültige Kachelung", err, "warning")]
-        tile = controls.tile_from_controls(tm, tn, tk)
+        tile_list = [controls.tile_from_controls(tm, tn, tk)]
+    else:
+        tile_list = [None]   # RunConfig-Default-Tile
 
-    # Mess-Einstellungen (Warmup/Iterationen): analog zum Tile nur wenn gesetzt (GUI
-    # liefert immer welche); sonst None ⇒ RunConfig-Default (10/30).
+    # --- Swizzle-Konfiguration(en) (TZ 7.5-2: Mehrfachauswahl von GROUP_M) -------
+    # GUI-Pfad: `swizzle_configs` = Liste (swizzle: bool, group_m: int).
+    # Rückfall/Skalarpfad: Swizzle-Modus (off/on/both) × einzelnes group_m.
+    if swizzle_configs is not None:
+        for (_sw, gm) in swizzle_configs:
+            err = controls.validate_group_m(gm)
+            if err:
+                return [_alert("Ungültige Swizzle-Gruppengröße", err, "warning")]
+        sw_list = [(bool(sw), int(gm)) for (sw, gm) in swizzle_configs] or [(False, 8)]
+    else:
+        err = controls.validate_swizzle(swizzle)
+        if err:
+            return [_alert("Ungültiger Swizzle-Modus", err, "warning")]
+        err = controls.validate_group_m(group_m)
+        if err:
+            return [_alert("Ungültige Swizzle-Gruppengröße", err, "warning")]
+        sw_list = [(s, int(float(group_m))) for s in controls.swizzles_from_value(swizzle)]
+
+    # Mess-Einstellungen (Warmup/Iterationen): nur wenn gesetzt (GUI liefert immer
+    # welche); sonst None ⇒ RunConfig-Default (10/30).
     bench = None
     if warmup is not None or iters is not None:
         err = controls.validate_bench(warmup, iters)
@@ -228,9 +298,16 @@ def execute_run(expr, dim_sizes, selection, family="contraction", op=None,
     # fertigem Format; Fehlerpfade lassen ihn stehen (statt ihn irreführend auf
     # 100 % zu setzen) — der Alert erklärt den Grund.
     try:
-        configs = controls.configs_from_selection(expr, dim_sizes, selection, tile=tile,
-                                                   swizzle=swizzle, baselines=baselines,
-                                                   bench=bench, family=family, op=op)
+        configs = controls.configs_from_selection(expr, dim_sizes, selection,
+                                                   tiles=tile_list, swizzle_configs=sw_list,
+                                                   baselines=baselines, bench=bench,
+                                                   family=family, op=op)
+        # TZ 7.5-4: EINE Batch-Identität je „Vergleichen"-Klick (uuid4 + Default-Name +
+        # Zeitstempel), an jedes run() dieses Batches durchgereicht → ein benannter,
+        # wieder-ansehbarer Lauf. created_at EINMAL außen (nicht je Zeile via now()).
+        batch_id = uuid.uuid4().hex
+        created_at = datetime.now().isoformat(timespec="seconds")
+        run_name = _default_run_name(family, expr, created_at)
         from tool_pipeline.run import run  # lazy → Haupt-Prozess bleibt CUDA-frei
         _GPU_LOCK.parent.mkdir(parents=True, exist_ok=True)
         results = []
@@ -238,31 +315,52 @@ def execute_run(expr, dim_sizes, selection, family="contraction", op=None,
         with FileLock(str(_GPU_LOCK)).acquire(timeout=_LOCK_TIMEOUT):
             for i, cfg in enumerate(configs, 1):
                 op_txt = f" · {cfg.op}" if cfg.op else ""
-                label = f"Format {i}/{total}: {cfg.dtype} → {cfg.acc_dtype}{op_txt}"
-                # Vor dem Lauf: welches Format gerade rechnet; der Balken steht auf den
+                t = cfg.tile
+                # Tile + Swizzle-Variante ins Label (TZ 7.5-2: mehrere Configs je Format
+                # sind sonst im Fortschritt nicht auseinanderzuhalten).
+                tile_txt = f" · TM{t.get('TM')}/{t.get('TN')}/{t.get('TK')}"
+                sw_txt = f" · sw G{cfg.group_m}" if cfg.swizzle else ""
+                label = (f"Config {i}/{total}: {cfg.dtype}→{cfg.acc_dtype}{op_txt}"
+                         f"{tile_txt}{sw_txt}")
+                # Vor dem Lauf: welche Config gerade rechnet; der Balken steht auf den
                 # bereits fertigen Schritten ((i-1)/total). Bis die Messung startet
                 # (Compile/Verify) bleibt er hier stehen.
                 _set(int(100 * (i - 1) / total), f"{label} · kompiliere/verifiziere …")
 
                 # Live-Fortschritt der Messung: run() ruft diesen Callback nach jeder
                 # getakteten Iteration mit (done, iters). Der Balken wächst innerhalb
-                # des Formats von (i-1)/total bis i/total; der Text zeigt „Iteration k/N".
+                # der Config von (i-1)/total bis i/total; der Text zeigt „Iteration k/N".
                 def _bench_progress(done, n_iters, _label=label, _i=i):
                     frac = (_i - 1 + done / n_iters) / total
                     _set(int(100 * frac), f"{_label} · Iteration {done}/{n_iters}")
 
-                results.append(run(cfg, progress=_bench_progress))
+                results.append(run(cfg, progress=_bench_progress, run_id=batch_id,
+                                   run_name=run_name, created_at=created_at))
                 # Nach dem Lauf: Schritt erledigt → Balken einen Schritt voller (i/total).
-                # Nach dem letzten Format steht er auf 100 % und bleibt dort (running=
+                # Nach der letzten Config steht er auf 100 % und bleibt dort (running=
                 # blendet ihn NICHT mehr aus) bis der nächste Lauf ihn oben zurücksetzt.
                 _set(int(100 * i / total), f"{label} ✓")
-        return render_comparison(results)
+        rendered = render_comparison(results)
+        # Weiche Warnung (keine harte Sperre) bei großem Kreuzprodukt — informiert
+        # für den nächsten Lauf (der Batch selbst ist bereits gefahren).
+        if total > _SOFT_CONFIG_WARN:
+            rendered = [_alert(
+                "Großer Vergleich",
+                f"{total} Konfigurationen (Formate × Tiles × Swizzle) in einem Batch — "
+                f"das dauert und belastet die geteilte GPU. Ggf. Achsen reduzieren.",
+                "info")] + rendered
+        return rendered
     except Timeout:
         return [_alert("GPU belegt",
                        f"Ein anderer Lauf hält die GPU seit über {_LOCK_TIMEOUT}s. "
                        f"Bitte erneut versuchen.", "warning")]
     except Exception as e:  # noqa: BLE001 — Import-/Lock-/Infra-Fehler dürfen die UI nicht crashen
-        return [_alert("Interner Fehler", f"{type(e).__name__}: {e}", "danger")]
+        return [_alert(
+            "Interner Fehler",
+            "Ein unerwarteter Fehler hat den Vergleich abgebrochen. Bitte die "
+            "Eingaben prüfen und erneut versuchen; besteht das Problem fort, hilft "
+            f"das technische Detail bei der Diagnose: {type(e).__name__}: {e}",
+            "danger")]
 
 
 def _expr_info(expr, family="contraction"):
@@ -336,6 +434,29 @@ def register(app) -> None:
             return [], html.Span(err, style={"color": "#b91c1c"})
         return controls.index_size_inputs(expr, family, values=prev), _expr_info(expr, family)
 
+    # 2b) Tile-Zeilen +/- (TZ 7.5-2): „+ Tile" hängt eine Zeile an, „✕" entfernt eine.
+    #     Reine Zeilen-Mutation (controls.mutate_tile_rows) über den aktuellen Feld-
+    #     zustand; der Container hält die Wahrheit (wie ID_INDEX_SIZES). GPU-/torch-frei.
+    @app.callback(
+        Output(controls.ID_TILE_ROWS, "children"),
+        Input(controls.ID_TILE_ADD, "n_clicks"),
+        Input({"type": controls.TILE_RM_TYPE, "index": ALL}, "n_clicks"),
+        State({"type": controls.TILE_TM_TYPE, "index": ALL}, "value"),
+        State({"type": controls.TILE_TN_TYPE, "index": ALL}, "value"),
+        State({"type": controls.TILE_TK_TYPE, "index": ALL}, "value"),
+        prevent_initial_call=True,
+    )
+    def _mutate_tile_rows(add_clicks, rm_clicks, tm_vals, tn_vals, tk_vals):
+        # Nur auf einen ECHTEN Klick reagieren: das An-/Abhängen von Zeilen ändert die
+        # ALL-Menge und kann den Callback ohne echten Klick (Wert None/0) erneut
+        # auslösen → dann nichts tun (sonst spurious Zeilen).
+        val = ctx.triggered[0]["value"] if ctx.triggered else None
+        if not val:
+            raise PreventUpdate
+        rows = controls.tiles_from_state(tm_vals, tn_vals, tk_vals)
+        rows = controls.mutate_tile_rows(rows, ctx.triggered_id)
+        return controls.tile_rows(rows)
+
     # 3) Haupt-Callback (Background): Ausdruck + Größen (Pattern-Matching) + Achsen.
     @app.callback(
         Output("main", "children"),
@@ -346,10 +467,12 @@ def register(app) -> None:
         State({"type": controls.INDEX_SIZE_TYPE, "index": ALL}, "id"),
         State({"type": controls.INDEX_SIZE_TYPE, "index": ALL}, "value"),
         State(controls.ID_DTYPES, "value"),
-        State(controls.ID_TILE_TM, "value"),
-        State(controls.ID_TILE_TN, "value"),
-        State(controls.ID_TILE_TK, "value"),
-        State(controls.ID_SWIZZLE, "value"),
+        # TZ 7.5-2: dynamische Tile-Zeilen (Pattern-Matching, ALL) + Swizzle-Konfig-
+        # Mehrfachauswahl statt der bisherigen drei festen Tile-Dropdowns + Radio.
+        State({"type": controls.TILE_TM_TYPE, "index": ALL}, "value"),
+        State({"type": controls.TILE_TN_TYPE, "index": ALL}, "value"),
+        State({"type": controls.TILE_TK_TYPE, "index": ALL}, "value"),
+        State(controls.ID_SWIZZLE_CONFIGS, "value"),
         State(controls.ID_BASELINES, "value"),
         State(controls.ID_BENCH_WARMUP, "value"),
         State(controls.ID_BENCH_ITERS, "value"),
@@ -369,17 +492,28 @@ def register(app) -> None:
         prevent_initial_call=True,
     )
     def _on_run(set_progress, n_clicks, family, op, expr, size_ids, size_vals, selection,
-                tm, tn, tk, swizzle, baselines, warmup, iters):
+                tm_vals, tn_vals, tk_vals, swizzle_cfg_vals, baselines, warmup, iters):
+        # Rohe Swizzle-Konfig-Auswahl früh laut prüfen (statt ungültige Werte in
+        # swizzle_configs_from_state still zu verwerfen) — die Checkliste liefert zwar
+        # nur gültige Optionen, aber ein Loud-Fail bleibt konsistent mit dem übrigen
+        # verify-before-trust-Ansatz.
+        sw_err = controls.validate_swizzle_configs(swizzle_cfg_vals)
+        if sw_err:
+            return [_alert("Ungültige Swizzle-Konfiguration", sw_err, "warning")]
         dim_sizes = controls.dim_sizes_from_state(size_ids, size_vals)
+        tiles = controls.tiles_from_state(tm_vals, tn_vals, tk_vals)
+        swizzle_configs = controls.swizzle_configs_from_state(swizzle_cfg_vals)
         return execute_run(expr, dim_sizes, selection, family=family, op=op,
-                           tm=tm, tn=tn, tk=tk, swizzle=swizzle, baselines=baselines,
-                           warmup=warmup, iters=iters, progress=set_progress)
+                           tiles=tiles, swizzle_configs=swizzle_configs,
+                           baselines=baselines, warmup=warmup, iters=iters,
+                           progress=set_progress)
 
-    # 4) Nach jedem Lauf im Browser prüfen: ist die Kopfmeldung im Main eine Warnung
-    #    oder ein Fehler (dbc.Alert vom Typ warning/danger — also ein abgebrochener
-    #    Lauf: ungültige Eingabe, „GPU belegt", interner Fehler …), dann Main UND
-    #    Fenster nach ganz oben scrollen, damit die Meldung sofort sichtbar ist.
-    #    Bei Erfolg ist die Kopfmeldung ein 'alert-success' → kein Scroll.
+    # 4) Nach jedem Lauf im Browser prüfen: ist die Kopfmeldung im Main eine Warnung,
+    #    ein Fehler oder ein Hinweis (dbc.Alert vom Typ warning/danger/info — ein
+    #    abgebrochener Lauf: ungültige Eingabe, „GPU belegt", interner Fehler … ODER
+    #    die weiche „viele Configs"-Warnung), dann Main UND Fenster nach ganz oben
+    #    scrollen, damit die Meldung sofort sichtbar ist.
+    #    Bei reinem Erfolg ist die Kopfmeldung kein solcher Alert → kein Scroll.
     #    Clientside, weil Scrollen nur im Browser (nicht serverseitig) geht; der
     #    ``_scroll_dummy``-Store ist nur ein Pflicht-Output (bleibt via no_update leer).
     app.clientside_callback(
@@ -391,7 +525,8 @@ def register(app) -> None:
                 var head = main.firstElementChild;
                 if (head && head.classList &&
                     (head.classList.contains('alert-warning') ||
-                     head.classList.contains('alert-danger'))) {
+                     head.classList.contains('alert-danger') ||
+                     head.classList.contains('alert-info'))) {
                     main.scrollTo({top: 0, behavior: 'smooth'});
                     window.scrollTo({top: 0, behavior: 'smooth'});
                 }
@@ -403,3 +538,81 @@ def register(app) -> None:
         Input("main", "children"),
         prevent_initial_call=True,
     )
+
+    # ------------------------------------------------------------------
+    # 5) History (TZ 7.5-4): vergangene Läufe ansehen/vergleichen/umbenennen/löschen.
+    #    Alle NORMAL (nicht background=True) — reiner, GPU-/torch-freier Store-Zugriff.
+    # ------------------------------------------------------------------
+    # (5a) Liste füllen: beim Laden + nach jedem Lauf (main.children ändert sich) +
+    #      auf „Aktualisieren". store.list_runs ist verlustfrei (ohne pandas).
+    @app.callback(
+        Output(history.ID_HISTORY_LIST, "options"),
+        Input(history.ID_HISTORY_REFRESH, "n_clicks"),
+        Input("main", "children"),
+    )
+    def _refresh_history(_n, _main):
+        return history.history_options(store.list_runs())
+
+    # (5b) Ansehen/Vergleichen: ausgewählte Läufe aus dem Store rekonstruieren
+    #      (read_all → runs_for_ids), Kernel-Quelltext nachladen, render_comparison
+    #      WIEDERVERWENDEN. DIE eine nicht-additive Stelle: allow_duplicate auf main.
+    @app.callback(
+        Output("main", "children", allow_duplicate=True),
+        Input(history.ID_HISTORY_LOAD, "n_clicks"),
+        State(history.ID_HISTORY_LIST, "value"),
+        prevent_initial_call=True,
+    )
+    def _load_history(_n, run_ids):
+        if not run_ids:
+            return [_alert("Keine Auswahl", "Bitte mindestens einen Lauf auswählen.", "warning")]
+        results = history.runs_for_ids(store.read_all(), run_ids)
+        if not results:
+            return [_alert("Nichts gefunden",
+                           "Die ausgewählten Läufe sind nicht mehr im Store.", "warning")]
+        results = [_reload_source(r) for r in results]
+        return render_comparison(results)
+
+    # (5c) Löschen: Button öffnet die Bestätigung (nur bei nicht-leerer Auswahl).
+    @app.callback(
+        Output(history.ID_HISTORY_CONFIRM_DELETE, "displayed"),
+        Input(history.ID_HISTORY_DELETE_BTN, "n_clicks"),
+        State(history.ID_HISTORY_LIST, "value"),
+        prevent_initial_call=True,
+    )
+    def _ask_delete(_n, run_ids):
+        return bool(run_ids)
+
+    # (5d) Löschen bestätigt: store.delete_run je Lauf (atomar; Kernel-Dateien bleiben)
+    #      → Rückmeldung + Liste aktualisieren.
+    @app.callback(
+        Output(history.ID_HISTORY_FEEDBACK, "children"),
+        Output(history.ID_HISTORY_LIST, "options", allow_duplicate=True),
+        Input(history.ID_HISTORY_CONFIRM_DELETE, "submit_n_clicks"),
+        State(history.ID_HISTORY_LIST, "value"),
+        prevent_initial_call=True,
+    )
+    def _do_delete(_submit, run_ids):
+        run_ids = run_ids or []
+        removed = sum(store.delete_run(rid) for rid in run_ids)
+        msg = (f"{removed} Zeile(n) aus {len(run_ids)} Lauf/Läufen gelöscht "
+               f"(Kernel-Dateien bleiben unberührt).")
+        return _history_feedback(msg, ok=True), history.history_options(store.list_runs())
+
+    # (5e) Umbenennen: store.rename_run auf jede Auswahl → Rückmeldung + Liste neu.
+    @app.callback(
+        Output(history.ID_HISTORY_FEEDBACK, "children", allow_duplicate=True),
+        Output(history.ID_HISTORY_LIST, "options", allow_duplicate=True),
+        Input(history.ID_HISTORY_RENAME_BTN, "n_clicks"),
+        State(history.ID_HISTORY_RENAME_INPUT, "value"),
+        State(history.ID_HISTORY_LIST, "value"),
+        prevent_initial_call=True,
+    )
+    def _rename_history(_n, new_name, run_ids):
+        new_name = (new_name or "").strip()
+        if not run_ids:
+            return _history_feedback("Bitte mindestens einen Lauf auswählen.", ok=False), no_update
+        if not new_name:
+            return _history_feedback("Bitte einen neuen Namen eingeben.", ok=False), no_update
+        n = sum(store.rename_run(rid, new_name) for rid in run_ids)
+        return (_history_feedback(f"{len(run_ids)} Lauf/Läufe umbenannt ({n} Zeilen).", ok=True),
+                history.history_options(store.list_runs()))

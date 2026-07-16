@@ -57,6 +57,18 @@ def _safe_module_name(slug: str) -> str:
     return "tp_gen_" + re.sub(r"\W", "_", slug)
 
 
+def _read_text_or_none(path) -> Optional[str]:
+    """Bestehende Kernel-Datei lesen; bei fehlender, korrupter oder nicht
+    dekodierbarer Datei ``None`` (⇒ der Aufrufer schreibt sie neu). Härtet den
+    Compile-Cache gegen halb geschriebene/beschädigte ``<slug>.py`` (Risiko ⑥):
+    ein ``UnicodeDecodeError`` oder ``OSError`` beim Lesen darf keinen Lauf
+    crashen, sondern muss zum sauberen Neu-Schreiben führen."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def _import_launch(path) -> Callable:
     """Modul aus einer echten Datei importieren und `launch` herausgeben."""
     spec = importlib.util.spec_from_file_location(_safe_module_name(path.stem), str(path))
@@ -91,10 +103,13 @@ def load_kernel(config: RunConfig, source: Optional[str] = None) -> CompileResul
     if slug in _MODULE_CACHE:
         return CompileResult(_MODULE_CACHE[slug], str(path), slug, cached=True)
 
-    # 2) Quelltext beschaffen + idempotent persistieren.
+    # 2) Quelltext beschaffen + idempotent persistieren. Bei fehlender ODER
+    #    korrupter/nicht dekodierbarer Datei (`_read_text_or_none` → None) sowie bei
+    #    abweichendem Inhalt wird atomar (save_kernel) neu geschrieben — der Cache
+    #    heilt sich so gegen beschädigte Artefakte, statt einen Lauf zu crashen.
     if source is None:
         source = emit(config)
-    if not path.exists() or path.read_text(encoding="utf-8") != source:
+    if _read_text_or_none(path) != source:
         save_kernel(source, slug)
 
     # 3) Aus der Datei importieren + cachen.

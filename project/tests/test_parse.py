@@ -19,7 +19,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tool_pipeline.intermediate_representation.parse import (  # noqa: E402
+    ContractionIR,
     ElementwiseIR,
+    NAryContractionIR,
     ReductionIR,
     parse,
 )
@@ -109,10 +111,38 @@ def _raises(fn, exc):
     raise AssertionError(f"erwartete {exc.__name__}, aber nichts wurde geworfen")
 
 
-def test_rejects_nary():
-    """Mehr als 2 Operanden ⇒ NotImplementedError (n-är = später/optional)."""
-    assert _raises(lambda: parse("ij,jk,kl->il", {"i": 2, "j": 2, "k": 2, "l": 2}),
+def test_nary_chain_is_planned():
+    """TZ 7.5-3: >2 Operanden (Ketten-Kontraktion) ⇒ NAryContractionIR mit einer Folge
+    sauberer paarweiser 2-Op-Schritte; der letzte Schritt liefert exakt den Output."""
+    sizes = {"i": 8, "j": 4, "k": 6, "l": 5}
+    ir = parse("ij,jk,kl->il", sizes)
+    assert isinstance(ir, NAryContractionIR)
+    assert ir.inputs == ["ij", "jk", "kl"] and ir.output == "il"
+    assert len(ir.steps) == 2 and ir.steps[-1]["c_expr"] == "il"
+    # jeder geplante Schritt ist ein sauberes 2-Op-GEMM (parse als 2-Op → ContractionIR mit K)
+    for s in ir.steps:
+        sub = parse(f"{s['a_expr']},{s['b_expr']}->{s['c_expr']}", sizes)
+        assert isinstance(sub, ContractionIR) and sub.k_dims
+
+
+def test_nary_hadamard_rejected():
+    """n-äres Hadamard (kein Index kontrahiert, z. B. abc,bca,cba->abc) ist KEINE
+    Ketten-Kontraktion ⇒ Loud-Fail (kein still falsches Ergebnis)."""
+    assert _raises(lambda: parse("abc,bca,cba->abc", {"a": 2, "b": 2, "c": 2}),
                    NotImplementedError)
+
+
+def test_nary_implicit_output():
+    """n-är mit implizitem Output (einsum-Konvention): ij,jk,kl ⇒ Output il."""
+    ir = parse("ij,jk,kl", {"i": 2, "j": 2, "k": 2, "l": 2})
+    assert isinstance(ir, NAryContractionIR) and ir.output == "il"
+
+
+def test_two_operand_path_unchanged():
+    """Regression: genau 2 Operanden bleiben ContractionIR (M/N/K unverändert)."""
+    ir = parse("ik,kj->ij", {"i": 4, "k": 4, "j": 4})
+    assert isinstance(ir, ContractionIR)
+    assert ir.m_dims == ["i"] and ir.n_dims == ["j"] and ir.k_dims == ["k"]
 
 
 def test_rejects_diagonal_in_operand():

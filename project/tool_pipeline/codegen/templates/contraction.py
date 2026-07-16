@@ -55,7 +55,7 @@ _SWIZZLE_GROUP_M = 8
 
 
 def build_gemm_module(tile: dict, dtype: str, acc_dtype: str,
-                      swizzle: bool = False) -> str:
+                      swizzle: bool = False, group_m: int = _SWIZZLE_GROUP_M) -> str:
     """Baue den cuTile-Modul-Quelltext fuer ein kanonisches Batched-GEMM
     ``(B,M,K) x (B,K,N) -> (B,M,N)`` (B=1 = Plain-GEMM als Grid-Z=1).
 
@@ -70,6 +70,10 @@ def build_gemm_module(tile: dict, dtype: str, acc_dtype: str,
                       der erzeugte Quelltext **byte-identisch** zu TZ 1-3; bei
                       ``True`` wird nur die Block->Kachel-Zuordnung bijektiv
                       umgeordnet (Orientierung/mma bleiben unberuehrt).
+    :param group_m:   L2-Swizzle-Gruppengroesse GROUP_M (>= 1; Default 8 = TZ-1-3-
+                      Wert). Wirkt NUR bei ``swizzle=True`` und wird dort als Literal
+                      in den Kernel gebacken. ``group_m=8`` ⇒ byte-identisch; bei
+                      ``swizzle=False`` wirkungslos (ignoriert). Loud-Fail bei ``< 1``.
     :returns:         Vollstaendiger, ausfuehrbarer Modul-Quelltext als String.
                       Konvention fuer den compile.py-Consumer: der Modul
                       definiert eine Funktion ``launch(A, B, C)`` (C ist vorab
@@ -96,6 +100,16 @@ def build_gemm_module(tile: dict, dtype: str, acc_dtype: str,
     except KeyError as e:
         raise ValueError(f"tile-dict fehlt Schluessel {e}") from e
 
+    # GROUP_M (L2-Swizzle-Gruppengroesse) — Loud-Fail bei < 1 (analog dtype/acc/tile
+    # oben). Wirkt nur im swizzle=True-Zweig; wird dort als Zahlen-Literal in den
+    # Kernel gebacken. int()-Coercion haelt das Literal sauber (kein "8.0").
+    group_m = int(group_m)
+    if group_m < 1:
+        raise ValueError(
+            f"group_m {group_m!r} ungueltig — GROUP_M ist eine Gruppen-Anzahl >= 1 "
+            f"(1 = plain-bid-Zuordnung, kein Swizzle)."
+        )
+
     # Optionaler Input-Cast VOR ct.mma (nur tf32) — als Quelltext-Bloecke, damit
     # der emittierte Kernel byte-stabil und selbstdokumentierend bleibt.
     if cast_ct is not None:
@@ -110,7 +124,7 @@ def build_gemm_module(tile: dict, dtype: str, acc_dtype: str,
     # Swizzle-Bloecke: bei swizzle=False EXAKT die TZ-1-Zeilen (byte-identisch);
     # bei swizzle=True eine bijektive grouped-M-Rasterung der Block->Kachel-Zuordnung.
     if swizzle:
-        group_m = _SWIZZLE_GROUP_M
+        # group_m ist der (validierte) Funktionsparameter — Default 8 (= TZ-1-3).
         swizzle_doc = (f" L2-Swizzle EIN (grouped-M-Rasterung, GROUP_M={group_m}): i/j "
                        f"werden bijektiv umgeordnet (dieselbe Kachelmenge, L2-freundlichere Reihenfolge).")
         group_const = f"GROUP_M = {group_m}\n"

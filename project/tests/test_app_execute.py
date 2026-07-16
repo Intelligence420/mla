@@ -144,6 +144,25 @@ def test_execute_swizzle_both_compares():
     assert "· sw" in _text(comps), "der '· sw'-Tab (swizzle-Variante) fehlt"
 
 
+def test_execute_multi_config_cross_product():
+    """TZ 7.5-2: mehrere Tiles × mehrere Swizzle-Konfigs in EINEM Batch (echter GPU-
+    Lauf über die Naht) → alle verifiziert, drei Vergleichs-Charts, ein Tab je Config
+    (1 Format × 2 Tiles × 2 Swizzle-Konfigs = 4)."""
+    restore = _redirect_store()
+    try:
+        comps = execute_run(_EXPR, {"i": 256, "k": 128, "j": 256}, [combo_key("fp16", "fp32")],
+                            tiles=[{"TM": 128, "TN": 128, "TK": 64}, {"TM": 64, "TN": 64, "TK": 32}],
+                            swizzle_configs=[(False, 8), (True, 16)])
+    finally:
+        restore()
+    assert isinstance(comps, list) and comps
+    types = _types(comps)
+    assert types.count("Graph") == 3, "drei Vergleichs-Charts erwartet"
+    assert types.count("Tab") == 4, f"vier Config-Tabs erwartet, {types.count('Tab')}"
+    txt = _text(comps)
+    assert "erfolgreich" in txt and "PASS" in txt, f"kein ok/Verify: {txt[:300]}"
+
+
 def test_execute_invalid_tile_no_run():
     """Unzulässiger Tile-Wert → Warnung, KEIN GPU-Lauf."""
     comps = execute_run(_EXPR, dict(_DS), [combo_key("fp16", "fp32")], tm=48, tn=128, tk=64)
