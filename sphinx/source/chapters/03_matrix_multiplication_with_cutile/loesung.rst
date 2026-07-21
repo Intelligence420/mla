@@ -608,6 +608,62 @@ Das gewählte Mapping ist eine Super-Grouping-Variante:
 * Randstaendige Gruppen mit weniger als 8 Zeilen werden über
   ``min(num_bid_m - first_bid_m, GROUP_SIZE_M)`` korrekt behandelt.
 
+Wahl von ``GROUP_SIZE_M``
+-------------------------
+
+``GROUP_SIZE_M`` ist kein frei geratener Wert, sondern ein Trade-off, den wir
+per Sweep belegen. Innerhalb einer Gruppe laufen ``GROUP_SIZE_M`` Blöcke
+*column-major*: Sie teilen sich denselben B-Tile-Streifen (der wird einmal
+geladen und von allen ``GROUP_SIZE_M`` Blöcken aus dem L2 wiederverwendet),
+und beim Spaltenwechsel liegen die zuvor benutzten A-Streifen noch im L2.
+Größere Gruppen erhöhen diese Wiederverwendung, vergrößern aber den
+gleichzeitig „heißen" Working-Set im 24 MB L2 – nämlich die ``GROUP_SIZE_M``
+A-Tile-Streifen (je ``tile_m × K``), die dafür resident bleiben müssen. Zu
+kleine Gruppen verschenken L2-Reuse, zu große sprengen den L2 und
+verschlechtern zusätzlich die Lastverteilung. Das Optimum hängt damit von
+Tile-Shape **und Matrixform** ab.
+
+Ein Sweep über ``group_size_m ∈ {1, 2, 4, 8, 16, 32}`` (Tile ``(128, 128, 64)``,
+FP16, ``K = 4096``) ergibt:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 22 22 22
+
+   * - Matrixgröße (M × N × K)
+     - Bestes ``GROUP_SIZE_M``
+     - TFLOPS (best)
+     - ``g = 8`` zum Vergleich
+   * - 512 × 512 × 4096
+     - 8
+     - 19,8
+     - 19,8 (optimal)
+   * - 2048 × 2048 × 4096
+     - 8
+     - 59,6
+     - 59,6 (optimal)
+   * - 8192 × 8192 × 4096
+     - 16
+     - 73,4
+     - 71,0 (≈ 97 %)
+
+(Bei ``512²`` gibt es mit ``tile_m = 128`` nur vier Block-Zeilen, sodass alle
+``g ≥ 4`` dasselbe Ein-Gruppen-Mapping und damit praktisch identische Werte
+liefern – ``g = 8`` steht dort stellvertretend für diese Gleichstands-Klasse.
+Dieser Sweep und der Task-4b-Vergleich weiter unten sind zudem **getrennte**
+``do_bench``-Läufe; ihre absoluten TFLOPS sind daher nicht 1:1 vergleichbar –
+aussagekräftig ist nur der *relative* Verlauf über ``group_size_m`` innerhalb
+dieses Sweeps.)
+
+**Fazit:** ``GROUP_SIZE_M = 8`` ist ein gut belegter Default – für kleine und
+mittlere Matrizen optimal und für sehr große (``8192²``) nur ≈ 3 % unter dem
+Optimum (dort wäre ``16`` minimal besser). Die Sensitivität ist bei kleinen
+Matrizen gering (der Working-Set passt ohnehin in den L2), bei großen Matrizen
+dagegen erheblich: dort kollabiert sowohl ``g = 1`` (kaum Reuse, ≈ 27 TFLOPS)
+als auch ``g = 32`` (zu großer heißer Working-Set und schlechtere
+Lastverteilung, ≈ 38 TFLOPS). Reproduziert wird der Sweep von
+``benchmark_group_size_sweep()`` in ``src/task_04.py``.
+
 Implementierung
 ---------------
 
