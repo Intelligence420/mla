@@ -14,4 +14,3 @@ zu Bandbreiten-Benchmarks.
 
    aufgabe
    loesung
-   feedback

@@ -85,7 +85,7 @@ def verify():
 
 def bandwidth_benchmark():
     """
-    M=2048 fixed, N from 16 to 128 (step 16).
+    M=2048 fixed, N from 16 to 128 (step 1, volle Range).
     tile_M=64, tile_N=N (full width).
 
     bandwidth (GB/s) = 2 * M * N * sizeof(element) / (time_s * 1e9)
@@ -99,7 +99,7 @@ def bandwidth_benchmark():
     tile_m = 64
     element_size = 2                          # FP16 = 2 Bytes
 
-    ns = list(range(16, 129, 16))             # [16, 32, 48, …, 128]
+    ns = list(range(16, 129))                 # [16, 17, 18, …, 128] – ganze Range
     bandwidths = []
 
     for N in ns:
@@ -139,17 +139,17 @@ if __name__ == "__main__":
     print("Task 4b: Bandwidth Benchmark")
     bandwidth_benchmark()
 
-"""Ergebnisse
+"""Ergebnisse (volle Range N=16..128, Schritt 1 -> 113 Messpunkte;
+repräsentativer Auszug: Peaks an Zweierpotenzen + Einbrüche bei 2^+1)
 Task 4a: Copy Kernel — Verification
   Copy kernel verified.
 Task 4b: Bandwidth Benchmark
-  N=  16  time=0.0048 ms  BW=27.48 GB/s
-  N=  32  time=0.0065 ms  BW=40.24 GB/s
-  N=  48  time=0.0063 ms  BW=62.25 GB/s
-  N=  64  time=0.0081 ms  BW=64.49 GB/s
-  N=  80  time=0.0082 ms  BW=80.06 GB/s
-  N=  96  time=0.0105 ms  BW=75.14 GB/s
-  N= 112  time=0.0106 ms  BW=86.67 GB/s
-  N= 128  time=0.0109 ms  BW=96.17 GB/s
+  N=  16  time=0.0047 ms  BW=27.91 GB/s   (2er-Potenz, kein Padding)
+  N=  17  time=0.0065 ms  BW=21.52 GB/s   (tile_N 16->32, ~1/2 Padding)
+  N=  32  time=0.0069 ms  BW=38.18 GB/s   (2er-Potenz)
+  N=  33  time=0.0085 ms  BW=31.65 GB/s   (tile_N 32->64)
+  N=  64  time=0.0082 ms  BW=64.06 GB/s   (2er-Potenz)
+  N=  65  time=0.0116 ms  BW=45.81 GB/s   (tile_N 64->128)
+  N= 128  time=0.0119 ms  BW=88.15 GB/s   (2er-Potenz, kein Padding)
   Plot saved to bandwidth_plot.png
   """
