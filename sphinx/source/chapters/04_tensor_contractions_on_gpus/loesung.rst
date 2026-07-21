@@ -187,14 +187,22 @@ wiederverwendet.
        out = ct.reshape(ct.astype(acc, C.dtype), (1, 1, 1, 1, tx, tz))
        ct.store(C, index=(pid_e, pid_a, bb, pid_c, pid_x, pid_z), tile=out)
 
-**Vermutung & Tests**
+**Trade-off & Konfigurationswahl**
 
-Trade-off: c) gewinnt B-Tile-Reuse über die b-Schleife, verliert
-aber den b-Faktor im Grid – c) vorne erwartet bei großem ``|b|``,
-b) vorne bei kleinem ``|b|``. Getestet:
+c) gewinnt den B-Tile-Reuse über die b-Schleife (das B-Tile
+``B[e,c,k,l,y,z]`` hängt nicht von ``b`` ab), verliert aber den ``b``-Faktor
+im Grid. Der Reuse zahlt sich jedoch **nur dann aus, wenn das B-Tensor den
+24 MB L2 der GB10 sprengt**: Erst dann kostet b)s ``|b|``-fache Nachladung
+derselben B-Tiles echte DRAM-Bandbreite, während c) sie pro Block aus dem L2
+hält. Passt ``B`` dagegen in den L2 (kleine Dimensionen), bekommt b) exakt
+denselben Reuse gratis – dann bleibt c) nur der Occupancy-Nachteil des
+kleineren Grids. Zweite Bedingung: c)s Grid muss trotz sequentialisiertem
+``b`` groß genug bleiben, um die 48 SMs zu sättigen. Getestet:
 
-* ``|b|=2``, ``|a|·|c|=64`` → Erwartung b) vorne.
-* ``|b|=16``, ``|a|·|c|=4`` → Erwartung c) vorne.
+* **b) vorne:** ``B ≈ 1 MB`` (passt in L2), viel Restparallelität
+  (``|a|·|c| = 64``).
+* **c) vorne:** ``B ≈ 32 MB > L2`` (``E=8, C=8, K=4, L=4, Y=64, Z=256``), Grid
+  bleibt mit ``(E·A, C, ⌈X/tx⌉·⌈Z/tz⌉) = (16, 8, 32) = 4096`` Blöcken groß.
 
 Task 1d: GEMM = (x, y·l, z), l und y gemerged
 ----------------------------------------------
@@ -330,25 +338,25 @@ FP32-Akkumulator, GEMM-Tile ``(32, 32, 32)``:
      - ms
      - TFLOPS
      - Schneller
-   * - ``|b|=2, |a|·|c|=64, X=Y=Z=128`` (FLOPs ≈ 2.15·10⁹)
+   * - ``B ≈ 1 MB (in L2), |a|·|c|=64`` (FLOPs ≈ 2.15·10⁹)
      - b)
-     - 0.524
-     - **4.10**
+     - 0.527
+     - **4.07**
      - **b) (2.0×)**
    * -
      - c)
-     - 1.046
-     - 2.05
+     - 1.059
+     - 2.03
      -
-   * - ``|b|=16, |a|·|c|=4, X=Y=Z=128`` (FLOPs ≈ 5.37·10⁸)
+   * - ``B ≈ 32 MB (> L2), Grid 4096`` (FLOPs ≈ 6.87·10¹⁰)
      - b)
-     - 0.161
-     - **3.35**
-     - **b) (2.3×)**
+     - 44.67
+     - 1.54
+     - **c) (1.11×)**
    * -
      - c)
-     - 0.362
-     - 1.48
+     - 40.30
+     - **1.71**
      -
 
 .. list-table:: b) vs d)
@@ -362,23 +370,23 @@ FP32-Akkumulator, GEMM-Tile ``(32, 32, 32)``:
      - Schneller
    * - ``|l|=8, |y|=32, X=Z=128`` (FLOPs ≈ 1.07·10⁹)
      - b)
-     - 0.500
-     - 2.15
-     - **d) (1.30×)**
+     - 0.488
+     - 2.20
+     - **d) (1.21×)**
    * -
      - d)
-     - 0.386
-     - **2.78**
+     - 0.403
+     - **2.66**
      -
    * - ``|l|=1, |y|=64, X=Z=128`` (FLOPs ≈ 1.07·10⁹)
      - b)
-     - 0.528
-     - **2.03**
-     - b) (≈)
+     - 0.536
+     - 2.00
+     - ≈ (Gleichstand)
    * -
      - d)
-     - 0.538
-     - 2.00
+     - 0.528
+     - **2.03**
      -
 
 .. list-table:: Quervergleich b) / d) / e), ``|e|=4``
@@ -398,9 +406,9 @@ FP32-Akkumulator, GEMM-Tile ``(32, 32, 32)``:
      - **3.27**
      - 1.17×
    * - e)
-     - 0.203
-     - 1.32
-     - 0.47×
+     - 0.211
+     - 1.28
+     - 0.46×
 
 .. figure:: ../../../../assignments/04_assignment/src/task01_bc_vs_bd.png
    :align: center
@@ -422,15 +430,21 @@ FP32-Akkumulator, GEMM-Tile ``(32, 32, 32)``:
 Beobachtungen und Vermutungen
 ------------------------------
 
-* **b) vs c)**: b) gewinnt in *beiden* Konfigurationen – bei
-  ``|b|=16`` läuft das Gegenteil der Erwartung (3.35 vs 1.48 TFLOPS).
-  Vermutung: der L2-Reuse-Gewinn wird vom Occupancy-Verlust
-  überkompensiert. 
-* **b) vs d)**: wie erwartet. d) mit ~30 % vorne bei ``|l|=8``,
+* **b) vs c)**: Der Ausgang hängt daran, ob das B-Tensor in den L2 passt.
+  Bei kleinem ``B`` (≈ 1 MB) gewinnt b) klar (4.07 vs 2.03 TFLOPS): b) zieht
+  dieselben B-Tiles gratis aus dem L2, sodass c)s sequentialisiertem ``b`` nur
+  der Occupancy-Nachteil des kleineren Grids bleibt. Sobald ``B`` den 24 MB L2
+  überschreitet (hier ≈ 32 MB), dreht sich das Bild: c) ist ~11 % schneller
+  (1.71 vs 1.54 TFLOPS), weil b)s ``|b|``-fache B-Nachladung nun echte
+  DRAM-Bandbreite kostet, während c) das B-Tile pro Block über die b-Schleife
+  im L2 hält. Der L2-Reuse-Vorteil von c) ist also real, aber an ein großes,
+  nicht-cachebares ``B`` gebunden – bei kleinen, L2-residenten Tensoren
+  existiert er schlicht nicht.
+* **b) vs d)**: wie erwartet. d) mit ~21 % vorne bei ``|l|=8``,
   Vorteil verschwindet bei ``|l|=1``. So wie wir es in VL angesprochen hatten: mehr
   K-Merging → größere innere GEMM-K → bessere Tensor-Core-Auslastung,
   aber nur wenn die gemergte Dim ``>1`` ist.
-* **b/d/e**: e) ist ~2× langsamer als d). Vermutung: ``te=2`` mit
+* **b/d/e**: e) ist ≈ 2,5× langsamer als d). Vermutung: ``te=2`` mit
   ``|e|=4`` halbiert das Grid und bläht den Akkumulator auf
   ``(te, tx, tz)`` – Occupancy sinkt
 
@@ -960,5 +974,5 @@ Beiträge
      - Implementierung Task 2 (Fused-Kontraktions-/Elementwise-Kernel,
        Verifikation und Vergleich gegen den sequentiellen Pfad bei
        2048³-FLOP-Workload) und Task 3 (Kontraktion ``ackm,bcnk->abnm``
-       mit |a|=16, |b|=16, |c|=32, Sweeps über |n| und |k| samt Plots),
-       Sphinx-Report-Abschnitte zu Task 2 und 3
+       mit ``|a|=16, |b|=16, |c|=32``, Sweeps über ``|n|`` und ``|k|`` samt
+       Plots), Sphinx-Report-Abschnitte zu Task 2 und 3

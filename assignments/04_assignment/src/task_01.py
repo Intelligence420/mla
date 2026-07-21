@@ -435,13 +435,20 @@ def benchmark():
        b) vs d): Ein Setting wo b gewinnt, eines wo d gewinnt.
        Quervergleich b/d/e auf mittlerer Konfiguration.
     """
-    # b vs c: 
+    # b vs c:
+    # c) sequentialisiert b -> B-Tile (unabh. von b) wird ueber die b-Schleife
+    # wiederverwendet. Das zahlt sich aber NUR aus, wenn das B-Tensor den 24 MB
+    # L2 der GB10 sprengt: dann kostet b)s Bd-fache B-Nachladung DRAM-Bandbreite,
+    # waehrend c) den B-Tile pro Block aus dem L2 haelt. Bei kleinem B (passt in
+    # L2) bekommt b) denselben Reuse gratis -> c) verliert nur Occupancy.
     print("\n=== Vergleich b) vs c) ===")
+    # b) vorne: kleines B (1 MB, passt in L2), viel Restparallelitaet (a*c=64)
     cfg_bc_b = dict(E=2, A=8, B=2, C=8, K=2, L=2, X=128, Y=64, Z=128)
-    cfg_bc_c = dict(E=1, A=2, B=16, C=2, K=2, L=2, X=128, Y=64, Z=128)
-    res_bc_b = bench_compare("Setting wo b) vorne ist (b klein, a*c gross)",
+    # c) vorne: B = 32 MB > L2, Grid bleibt gross (occupancy-erhaltend)
+    cfg_bc_c = dict(E=8, A=2, B=8, C=8, K=4, L=4, X=128, Y=64, Z=256)
+    res_bc_b = bench_compare("Setting wo b) vorne ist (B klein, passt in L2)",
                              cfg_bc_b, [("b)", run_b), ("c)", run_c)])
-    res_bc_c = bench_compare("Setting wo c) vorne ist (b gross, a*c klein)",
+    res_bc_c = bench_compare("Setting wo c) vorne ist (B = 32 MB > L2)",
                              cfg_bc_c, [("b)", run_b), ("c)", run_c)])
 
     # b vs d:
@@ -462,8 +469,8 @@ def benchmark():
 
     return {
         "bc": [
-            ("b > c (|b|=2, |a|*|c|=64)", cfg_bc_b, res_bc_b),
-            ("c > b (|b|=16, |a|*|c|=4)", cfg_bc_c, res_bc_c),
+            ("b > c (B klein, in L2)", cfg_bc_b, res_bc_b),
+            ("c > b (B = 32 MB > L2)", cfg_bc_c, res_bc_c),
         ],
         "bd": [
             ("d > b (|l|=8, |y|=32)",     cfg_bd_d, res_bd_d),
@@ -568,40 +575,40 @@ Task 1: Benchmark
 
 === Vergleich b) vs c) ===
 
-  Setting wo b) vorne ist (b klein, a*c gross)
+  Setting wo b) vorne ist (B klein, passt in L2)
     dims = {'E': 2, 'A': 8, 'B': 2, 'C': 8, 'K': 2, 'L': 2, 'X': 128, 'Y': 64, 'Z': 128}
     FLOPs = 2.147e+09
-    b)           0.5244 ms     4.095 TFLOPS
-    c)           1.0464 ms     2.052 TFLOPS
+    b)           0.5271 ms     4.074 TFLOPS
+    c)           1.0592 ms     2.028 TFLOPS
 
-  Setting wo c) vorne ist (b gross, a*c klein)
-    dims = {'E': 1, 'A': 2, 'B': 16, 'C': 2, 'K': 2, 'L': 2, 'X': 128, 'Y': 64, 'Z': 128}
-    FLOPs = 5.369e+08
-    b)           0.1605 ms     3.346 TFLOPS
-    c)           0.3624 ms     1.481 TFLOPS
+  Setting wo c) vorne ist (B = 32 MB > L2)
+    dims = {'E': 8, 'A': 2, 'B': 8, 'C': 8, 'K': 4, 'L': 4, 'X': 128, 'Y': 64, 'Z': 256}
+    FLOPs = 6.872e+10
+    b)          44.6730 ms     1.538 TFLOPS
+    c)          40.2975 ms     1.705 TFLOPS
 
 === Vergleich b) vs d) ===
 
   Setting wo d) vorne ist (L gross, Y klein)
     dims = {'E': 2, 'A': 4, 'B': 2, 'C': 4, 'K': 2, 'L': 8, 'X': 128, 'Y': 32, 'Z': 128}
     FLOPs = 1.074e+09
-    b)           0.5002 ms     2.146 TFLOPS
-    d)           0.3859 ms     2.782 TFLOPS
+    b)           0.4882 ms     2.199 TFLOPS
+    d)           0.4030 ms     2.664 TFLOPS
 
   Setting wo b) vorne ist (L=1, Y gross)
     dims = {'E': 2, 'A': 4, 'B': 2, 'C': 4, 'K': 8, 'L': 1, 'X': 128, 'Y': 64, 'Z': 128}
     FLOPs = 1.074e+09
-    b)           0.5284 ms     2.032 TFLOPS
-    d)           0.5382 ms     1.995 TFLOPS
+    b)           0.5357 ms     2.004 TFLOPS
+    d)           0.5281 ms     2.033 TFLOPS
 
 === Variante e) ===
 
   Quervergleich b) / d) / e)
     dims = {'E': 4, 'A': 2, 'B': 2, 'C': 2, 'K': 2, 'L': 2, 'X': 128, 'Y': 64, 'Z': 128}
     FLOPs = 2.684e+08
-    b)           0.0961 ms     2.793 TFLOPS
-    d)           0.0821 ms     3.269 TFLOPS
-    e)           0.2029 ms     1.323 TFLOPS
+    b)           0.0961 ms     2.792 TFLOPS
+    d)           0.0821 ms     3.271 TFLOPS
+    e)           0.2106 ms     1.275 TFLOPS
 
 Task 1: Plot
   Plot: /home/mla08/MLA/mla/assignments/04_assignment/src/task01_bc_vs_bd.png
