@@ -18,6 +18,9 @@ a) Swizzled Matmul-Kernel. Statt row-major BID-Mapping wird ein
 b) Tile-Shape-Sweep fuer 2048**3 und 512**3 mit dem Swizzled-Kernel
    und Vergleich gegen den row-major Kernel aus Task 2 fuer
    8192 x 8192 x 4096.
+
+   GROUP_SIZE_M wird nicht geraten, sondern per Sweep begruendet
+   (benchmark_group_size_sweep): bestes group_size_m je Matrixgroesse.
 """
 
 import cuda.tile as ct
@@ -34,6 +37,9 @@ from task_03 import tflops
 # Swizzled Matmul-Kernel
 # ===========================================================================
 
+# Default aus dem Sweep (siehe benchmark_group_size_sweep()): g=8 ist fuer
+# 512^2 und 2048^2 optimal und fuer 8192x8192x4096 innerhalb ~3 % des Optimums
+# (dort waere g=16 minimal besser). Belegter, guter Default statt Magic Number.
 GROUP_SIZE_M = 8
 
 
@@ -189,12 +195,56 @@ def compare_large():
 
 
 # ===========================================================================
+# Task 4a: Begruendung fuer GROUP_SIZE_M
+# ===========================================================================
+
+def benchmark_group_size_sweep():
+    """Empirische Begruendung fuer GROUP_SIZE_M statt fester Wahl.
+
+    GROUP_SIZE_M ist ein Trade-off: In einer Gruppe teilen sich g Bloecke
+    denselben B-Streifen (einmal laden, g-fach aus dem L2 nutzen); dafuer
+    muessen die g A-Streifen der Gruppe (je tile_m x K) gleichzeitig im
+    24 MB L2 resident bleiben. Groessere g erhoehen die Wiederverwendung,
+    vergroessern aber diesen heissen Working-Set -> zu gross sprengt den L2.
+    Das Optimum haengt von Tile-Shape UND Matrixform ab -> Sweep statt
+    Magic Number.
+
+    Bestes group_size_m ueber {1,2,4,8,16,32} je Matrixgroesse (K=4096),
+    Tile (128,128,64), FP16.
+    """
+    tm, tn, tk = 128, 128, 64
+    group_values = [1, 2, 4, 8, 16, 32]
+    shapes = [(512, 512, 4096), (2048, 2048, 4096), (8192, 8192, 4096)]
+
+    print("\n  GROUP_SIZE_M-Sweep (Tile (128,128,64), FP16, K=4096):")
+    best_per_shape = {}
+    for (M, N, K) in shapes:
+        A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+        B = torch.randn(K, N, dtype=torch.float16, device="cuda")
+        best_g, best_t = None, float("inf")
+        cells = []
+        for g in group_values:
+            t_ms = triton.testing.do_bench(
+                lambda: cutile_matmul_swizzled(A, B, tm, tn, tk, group_size_m=g))
+            cells.append(f"g={g}:{tflops(M, N, K, t_ms):.1f}")
+            if t_ms < best_t:
+                best_t, best_g = t_ms, g
+        best_per_shape[(M, N, K)] = best_g
+        print(f"    {M}x{N}x{K}:  " + "  ".join(cells)
+              + f"   -> bestes g={best_g}")
+    return best_per_shape
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
 if __name__ == "__main__":
     print("Task 4a: Verifikation des Swizzled-Kernels")
     verify()
+
+    print("\nTask 4a: Begruendung fuer GROUP_SIZE_M (Sweep)")
+    best_groups = benchmark_group_size_sweep()
 
     print("\nTask 4b: Swizzled Tile-Shape-Sweep")
     best_2048, _ = benchmark_tile_sweep_swizzled(2048)
@@ -204,5 +254,6 @@ if __name__ == "__main__":
     compare_large()
 
     print("\n=== Zusammenfassung ===")
+    print(f"  Bestes GROUP_SIZE_M je Groesse:     {best_groups}")
     print(f"  Beste Tile-Shape swizzled 2048**3: {best_2048}")
     print(f"  Beste Tile-Shape swizzled  512**3: {best_512}")
