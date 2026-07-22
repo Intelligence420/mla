@@ -195,7 +195,7 @@ def compare_large():
 
 
 # ===========================================================================
-# Task 4a: Begruendung fuer GROUP_SIZE_M (Feedback)
+# Task 4a: Begruendung fuer GROUP_SIZE_M
 # ===========================================================================
 
 def benchmark_group_size_sweep():

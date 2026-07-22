@@ -271,8 +271,7 @@ Matrix. Zwei cuTile-Mechanismen lösen das ohne explizites Masking:
 * ``ct.load(..., padding_mode=ct.PaddingMode.ZERO)`` füllt fehlende
   Elemente am Rand mit ``0``.
 * ``ct.store`` ignoriert out-of-bounds Elemente von Rand-Tiles automatisch
-  (laut cuTile-Doku).
-  -> wir schreiben wir nie über die Grenzen von ``C`` hinaus.
+  (laut cuTile-Doku), daher schreiben wir nie über die Grenzen von ``C`` hinaus.
 
 Verifikation
 -------------
@@ -344,12 +343,12 @@ Der Kernel ist bewusst schlicht gehalten:
 * keine Block-ID-Optimierung für L2-Reuse
 
   * stures Row-Major-Mapping ``pid_m = bid // num_tiles_n``,
-    ``pid_n = bid % num_tiles_n`` –
-  * kein L2-freundliches Swizzling. Nicht so wie in Task 4
+    ``pid_n = bid % num_tiles_n`` ohne L2-freundliches Swizzling,
+    wie es erst in Task 4 eingeführt wird
 
 * keine spezialisierten Tile-Größen pro Shape
 
-  * ``tile_m``, ``tile_n``, ``tile_k`` sind reine Aufruf-Parameter, wird nicht abgleitet aus ``(M, N, K)``
+  * ``tile_m``, ``tile_n``, ``tile_k`` sind reine Aufruf-Parameter und werden nicht aus ``(M, N, K)`` abgeleitet
 
 Task 3: Benchmarking the Matrix Multiplication Kernel
 ======================================================
@@ -605,7 +604,7 @@ Das gewählte Mapping ist eine Super-Grouping-Variante:
 * Bei :math:`K = 4096` durchläuft jeder Block viele K-Iterationen –
   jede zusätzliche L2-Hit-Rate wirkt sich daher direkt auf die
   Laufzeit aus.
-* Randstaendige Gruppen mit weniger als 8 Zeilen werden über
+* Randständige Gruppen mit weniger als 8 Zeilen werden über
   ``min(num_bid_m - first_bid_m, GROUP_SIZE_M)`` korrekt behandelt.
 
 Wahl von ``GROUP_SIZE_M``
@@ -617,7 +616,7 @@ per Sweep belegen. Innerhalb einer Gruppe laufen ``GROUP_SIZE_M`` Blöcke
 geladen und von allen ``GROUP_SIZE_M`` Blöcken aus dem L2 wiederverwendet),
 und beim Spaltenwechsel liegen die zuvor benutzten A-Streifen noch im L2.
 Größere Gruppen erhöhen diese Wiederverwendung, vergrößern aber den
-gleichzeitig „heißen" Working-Set im 24 MB L2 – nämlich die ``GROUP_SIZE_M``
+gleichzeitig „heißen“ Working-Set im 24 MB L2 – nämlich die ``GROUP_SIZE_M``
 A-Tile-Streifen (je ``tile_m × K``), die dafür resident bleiben müssen. Zu
 kleine Gruppen verschenken L2-Reuse, zu große sprengen den L2 und
 verschlechtern zusätzlich die Lastverteilung. Das Optimum hängt damit von
