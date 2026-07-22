@@ -134,8 +134,9 @@ Task 1c: FP16 vs. FP32
 
    ``results/torch_16.png`` — FP16.
 
-Visuell nicht unterscheidbar. Jedoch nach kurzen Pixel vergleich: es gibt unterschiede!
-Man könnte vielleicht in Zukunft einen "Standartisierten" Pixelvergleich / Qualitätsanalyse durchführen.
+Visuell sind FP16 und FP32 nicht zu unterscheiden. Ein genauer Pixelvergleich zeigt
+jedoch geringe Abweichungen. Eine standardisierte Pixel- bzw. Qualitätsanalyse
+(z. B. PSNR/SSIM) wäre ein sinnvoller nächster Schritt.
 
 Task 2: Basic Config
 ====================
@@ -251,9 +252,9 @@ Alle Nicht-Referenz-Kernel folgen der Config: ein 3D-Grid über die PAR-Achsen
 Generischer, config-getriebener Kernel
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``kernel_generic`` setzt den Feedback-Punkt (identisch zu Assignment 05) um:
-die L2-Lokalität kommt aus der **Dimensionsstruktur der Config**, nicht aus
-einer Swizzle-Formel im Kernel. Grid:
+``kernel_generic`` verlagert die L2-Lokalität vollständig in die Config: sie
+entsteht aus der **Dimensionsstruktur der Config**, nicht aus einer
+Swizzle-Formel im Kernel. Grid:
 ``(a·c, b, x_super·y_super·x_group·y_group)``. Die ``bid(2)``-Achse wird per
 verschachteltem divmod über die Super-/Group-Größen (aus ``_extract_par(cfg)``
 gelesen) dekodiert – mit den **Gruppen-Achsen innen**, sodass aufeinander
@@ -275,10 +276,10 @@ Pipeline in ``build_optimized_config``, passt sich das Launch-Layout über
 mma-Reihenfolge und der B-Permute
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Die Output-Tile-Form ist :math:`(y_{\\text{prim}}, x_{\\text{prim}})` —
+Die Output-Tile-Form ist :math:`(y_{\text{prim}}, x_{\text{prim}})` —
 ``y`` ist die äußere, ``x`` die innere (stride-1) Achse von ``tensor_abcyx``.
 ``ct.mma`` ist ``(M, K) @ (K, N) → (M, N)``, also
-:math:`M = y_{\\text{prim}}, N = x_{\\text{prim}}, K = sp_{\\text{prim}}`:
+:math:`M = y_{\text{prim}}, N = x_{\text{prim}}, K = sp_{\text{prim}}`:
 
 .. code-block:: python
 
@@ -327,8 +328,9 @@ und FP16-Rückgabe, ``atol=2e-1, rtol=2e-2``:
 Alle vier Varianten liegen im FP16-Quantisierungsrauschen. Auf den echten
 Light-Field-Daten (kleine Wertebereiche) beträgt der maximale Absolutfehler
 ``0.0010``; auf synthetischen ``randn``-Tensoren gleicher Form ist er
-erwartungsgemäß größer (``≈ 0.25``), weil die K-Dim mit 4096
-FP16-Akkumulationen pro Output-Element tief ist.
+erwartungsgemäß größer (``≈ 0.25``), weil die K-Dim 4096 Terme tief ist und die
+dadurch große Summenmagnitude bei FP16-Ein- und -Ausgabe zu größeren
+Quantisierungsfehlern führt (akkumuliert wird in FP32).
 
 Task 4c: Benchmark
 -------------------
