@@ -304,7 +304,7 @@ def benchmark():
        2 * 2048^3 ≈ 1.717e10 FLOPs.
        Hier: E=2, A=B=C=2, K=8, L=4, X=Y=Z=256 → 2*2*2*2*2*8*4*256^3
                                               ≈ 1.72e10 FLOPs ≈ 2 * 2048^3
-       Speicher (FP16): A ≈ 67 MB, B ≈ 33 MB, C/D ≈ 4 MB jeweils → unkritisch.
+       Speicher (FP16): A ≈ 34 MB, B ≈ 17 MB, C/D ≈ 2 MB jeweils → unkritisch.
     """
     dims = dict(E=2, A=2, B=2, C=2, K=8, L=4, X=256, Y=256, Z=256)
     A, B, D = make_inputs(dims)

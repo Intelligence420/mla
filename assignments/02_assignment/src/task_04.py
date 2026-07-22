@@ -70,12 +70,16 @@ def copy_matrix(src: torch.Tensor, tile_m: int, tile_n: int) -> torch.Tensor:
 # ===========================================================================
 
 def verify():
-    """Verify that the copy kernel produces an exact copy."""
-    M, N = 2048, 64
-    src = torch.randn(M, N, dtype=torch.float16, device="cuda")
-    dst = copy_matrix(src, tile_m=64, tile_n=N)
+    """Verify that the copy kernel produces an exact copy.
 
-    assert torch.equal(src, dst), "Copy mismatch!"
+    Prueft neben der Zweierpotenz N=64 (kein Padding) auch N=65 und N=100,
+    bei denen tile_n auf die naechste Zweierpotenz (128) aufgerundet wird und
+    damit der Padding-/OOB-Maskierungspfad von ct.store ausgeuebt wird.
+    """
+    for N in (64, 65, 100):
+        src = torch.randn(2048, N, dtype=torch.float16, device="cuda")
+        dst = copy_matrix(src, tile_m=64, tile_n=N)
+        assert torch.equal(src, dst), f"Copy mismatch for N={N}!"
     print("  Copy kernel verified.")
 
 

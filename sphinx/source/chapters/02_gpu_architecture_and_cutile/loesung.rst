@@ -26,14 +26,14 @@ Aufgabenstellung
 
 Über ``cp.cuda.Device().attributes.items()`` sollen die Werte für
 ``L2CacheSize``, ``MaxSharedMemoryPerMultiprocessor`` und ``ClockRate``
-auf dem DGX-Spark ausgelesen und berichtet werden.
+auf dem DGX Spark ausgelesen und berichtet werden.
 
 Implementierung
 ---------------
 
 CuPys ``Device().attributes`` gibt ein Dictionary mit **allen** CUDA-Attributen
-zurück. Da ``.items()`` immer alle Schlüssel-Wert-Paare liefert, wird nach der
-Iteration über den gewünschten Teilmenge gefiltert:
+zurück. Da ``.items()`` immer alle Schlüssel-Wert-Paare liefert, wird während der
+Iteration auf die gewünschte Teilmenge gefiltert:
 
 .. code-block:: python
 
