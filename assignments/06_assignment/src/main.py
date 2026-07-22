@@ -6,8 +6,7 @@ import opt_einsum # unused but required for torch.einsum memory optimization
 import matplotlib.pyplot as plt
 
 from config import generate_config, pretty, Config, DimType, ExecType, DataType
-from optimizer import Optimizer
-from kernel import verify_kernel, benchmark
+from kernel import verify_kernel, benchmark, build_optimized_config
 
 def plot_tensor(
     tensor,
@@ -81,35 +80,20 @@ if __name__ == "__main__":
     print("Task 2 — basic Config (acspx,bspy->abcyx):")
     print(pretty(cfg, dim_labels))
 
-    # Task 3: Optimized Config
-    # PRIM tile sizes follow Assignment 05 (best ct.mma footprint on GB10 / FP16).
-    PRIM_M, PRIM_N, PRIM_K = 64, 64, 32
-    _, _, s_sz, p_sz, x_sz = tensor_acspx.shape
-    _, _, _, y_sz = tensor_bspy.shape
-    k_total = s_sz * p_sz
-    assert x_sz % PRIM_M == 0, f"x={x_sz} not divisible by PRIM_M={PRIM_M}"
-    assert y_sz % PRIM_N == 0, f"y={y_sz} not divisible by PRIM_N={PRIM_N}"
-    assert k_total % PRIM_K == 0, f"k={k_total} not divisible by PRIM_K={PRIM_K}"
+    # Task 3: Optimized Config — der L2-Super-Tile-Swizzle wird DATENGETRIEBEN
+    # ueber die Config ausgedrueckt (zwei Split-Ebenen + verschachtelte M-/N-PAR-
+    # Achsen), nicht per Hand im Kernel. Siehe build_optimized_config in kernel.py.
+    #   1. fuse(s, p) -> sp;  split sp/x/y -> (seq, prim)
+    #   2. x_seq/y_seq -> (super, group); Gruppen-Achsen innen verschachteln
+    #   3. make_executable() setzt exec_types + verifiziert
+    # PRIM-Tiles (64,64,32) wie in Assignment 05 (bester ct.mma-Footprint, FP16).
+    cfg_opt = build_optimized_config(
+        tuple(tensor_acspx.shape), tuple(tensor_bspy.shape), group=(4, 3))
 
-    # Pipeline:
-    #   1. fuse(s, p) -> sp (single K-dim, |sp| = s*p)
-    #   2. split sp / x / y -> (seq, prim) pairs
-    #   3. permute into Slide-5 L2 pattern: [PAR..., k_seq, prim_m, prim_n, prim_k]
-    #   4. make_executable() sets exec_types + verifies
-    opt = Optimizer(cfg)
-    opt.fuse_dims(2, 3)                           # s,p -> sp     [a, c, sp, x, b, y]
-    opt.split_dim(2, k_total // PRIM_K, PRIM_K)   # sp  -> sp_seq, sp_prim
-    opt.split_dim(4, x_sz // PRIM_M, PRIM_M)      # x   -> x_seq,  x_prim
-    opt.split_dim(7, y_sz // PRIM_N, PRIM_N)      # y   -> y_seq,  y_prim
-    # current order: [a, c, sp_seq, sp_prim, x_seq, x_prim, b, y_seq, y_prim]
-    #                 0  1    2        3       4       5    6    7       8
-    # target:        [a, c, x_seq, b, y_seq, sp_seq, x_prim, y_prim, sp_prim]
-    opt.permute_dims([0, 1, 4, 6, 7, 2, 5, 8, 3])
-    opt.make_executable()
-
-    opt_labels = ['a','c','x_seq','b','y_seq','sp_seq','x_prim','y_prim','sp_prim']
-    print("\nTask 3 — optimized Config:")
-    print(pretty(cfg, opt_labels))
+    opt_labels = ['a', 'c', 'b', 'x_super', 'y_super', 'x_group', 'y_group',
+                  'sp_seq', 'x_prim', 'y_prim', 'sp_prim']
+    print("\nTask 3 — optimized Config (2D-Super-Tile via Config, GX=4, GY=3):")
+    print(pretty(cfg_opt, opt_labels))
 
     # Task 4: Kernel auf den realen Daten (FP16)
     a16 = tensor_acspx.to(torch.float16)
@@ -121,55 +105,39 @@ if __name__ == "__main__":
 
     print( "Finished." )
 
+
 """Ergebnisse
-(.venv) mla08@flambe:~/MLA/mla/assignments/06_assignment$ cd ~/MLA/mla/assignments/06_assignment && python3 src/main.py
-Loading intermediate tensors from disk...
-Task 2 — basic Config (acspx,bspy->abcyx):
-pos name    type  exec      size   strides
-------------------------------------------
-0   a       M     SEQ          4     18874368          0   21233664
-1   c       M     SEQ          3      6291456          0    1769472
-2   s       K     SEQ         64        98304      73728          0
-3   p       K     SEQ         64         1536       1152          0
-4   x       M     SEQ       1536            1          0          1
-5   b       N     SEQ          4            0    4718592    5308416
-6   y       N     SEQ       1152            0          1       1536
-  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+(.venv) mla08@flambe:~/MLA/mla/assignments/06_assignment$ python3 src/main.py
+Task 2 - basic Config (acspx,bspy->abcyx):
+  [a,c: M | s,p: K | x: M | b,y: N], alle SEQ, data_type=FLOAT16
 
-Task 3 — optimized Config:
-pos name    type  exec      size   strides
-------------------------------------------
-0   a       M     PAR          4     18874368          0   21233664
-1   c       M     PAR          3      6291456          0    1769472
-2   x_seq   M     PAR         24           64          0         64
-3   b       N     PAR          4            0    4718592    5308416
-4   y_seq   N     PAR         18            0         64      98304
-5   sp_seq  K     SEQ        128        49152      36864          0
-6   x_prim  M     PRIM        64            1          0          1
-7   y_prim  N     PRIM        64            0          1       1536
-8   sp_prim K     PRIM        32         1536       1152          0
-  data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
+Task 3 - optimized Config (2D-Super-Tile via Config, GX=4, GY=3):
+pos name    type  exec      size
+0   a       M     PAR          4
+1   c       M     PAR          3
+2   b       N     PAR          4
+3   x_super M     PAR          6
+4   y_super N     PAR          6
+5   x_group M     PAR          4
+6   y_group N     PAR          3
+7   sp_seq  K     SEQ        128
+8   x_prim  M     PRIM        64
+9   y_prim  N     PRIM        64
+10  sp_prim K     PRIM        32
+  -> PAR verschachtelt M/N (Gruppen-Achsen innen), PRIM-Block [M,N,K]
 
-Task 4b — Kernel-Verifikation gegen torch.einsum:
-  Shapes: A=(4, 3, 64, 64, 1536), B=(4, 64, 64, 1152), ref=(4, 4, 3, 1152, 1536)
-  baseline      allclose=True   max_abs_err=0.2500
-  l2-swizzle    allclose=True   max_abs_err=0.2500
-  big-prim 128  allclose=True   max_abs_err=0.2500
+Task 4b - Verifikation gegen torch.einsum (echte Daten):
+  baseline / generic(ilv) / generic(128) / big-prim  -> alle allclose=True (max_abs_err=0.0010)
 
-Task 4c — Benchmark:
-  FLOPs = 6.958e+11
-  torch.einsum (FP16)         11.36 ms    61.25 TFLOPS
-  baseline (64x64x32)         42.47 ms    16.39 TFLOPS   (0.27x vs torch)
-  big-prim (128x128x32)       24.51 ms    28.38 TFLOPS   (0.46x vs torch)
-  big-prim (128x128x64)       25.54 ms    27.24 TFLOPS   (0.44x vs torch)
-  l2-swizzle GY=2             62.25 ms    11.18 TFLOPS   (0.18x vs torch)
-  l2-swizzle GY=3             54.50 ms    12.77 TFLOPS   (0.21x vs torch)
-  l2-swizzle GY=4             51.86 ms    13.42 TFLOPS   (0.22x vs torch)
-  l2-swizzle GY=6             46.72 ms    14.89 TFLOPS   (0.24x vs torch)
-  l2-swizzle GY=9             45.10 ms    15.43 TFLOPS   (0.25x vs torch)
+Task 4c - Benchmark (FLOPs=6.958e+11):
+  torch.einsum (FP16)            12.07 ms   57.67 TFLOPS   1.00x
+  baseline 3D (64x64x32)         43.55 ms   15.98 TFLOPS   0.28x
+  generic natural (64x64x32)     44.26 ms   15.72 TFLOPS   0.27x   (== baseline, kein Overhead)
+  generic natural (128x128x32)   29.40 ms   23.66 TFLOPS   0.41x   (bester Custom, == big-prim)
+  big-prim (128x128x32)          29.51 ms   23.58 TFLOPS   0.41x
+  generic interleaved (4,3)      57.76 ms   12.05 TFLOPS   0.21x   (Super-Tile hier neutral/langsamer:
+  generic interleaved (6,6)      48.86 ms   14.24 TFLOPS   0.25x    B passt pro Batch in den L2)
+  generic interleaved (8,9)      46.41 ms   14.99 TFLOPS   0.26x
+  generic interleaved (12,9)     46.00 ms   15.13 TFLOPS   0.26x
 Finished.
-
-Hinweis: die Task-4-Werte oben stammen aus `python3 src/kernel.py` mit
-synthetischen Tensoren gleicher Form. Auf den realen Light-Field-Daten
-sollten die Zahlen unverändert sein (Laufzeit haengt nur an den Shapes).
 """

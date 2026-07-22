@@ -13,4 +13,3 @@ komplexeren Einsum-Kontraktionen.
 
    aufgabe
    loesung
-   feedback

@@ -135,21 +135,30 @@ vererbt.
 Task 3b: fuse_dims
 -------------------
 
-Adjacency-Check **pro Tensor**, in dem beide Dims auftauchen
-(Stride ≠ 0): entweder ``stride[a] == stride[b] * size[b]`` (a äußere)
-oder ``stride[a] * size[a] == stride[b]`` (b äußere). Tensoren, in denen
-mindestens eine Dim mit Stride 0 fehlt, werden übersprungen — die
-Bedingung „adjacent in jedem Tensor, in dem beide auftauchen" ist
-dort trivial erfüllt.
+Für jeden Tensor, in dem **beide** Dims auftauchen (Stride ≠ 0), müssen zwei
+Bedingungen gelten:
 
-Der neue Stride ist ``min(stride[a], stride[b])`` (innerer Stride),
-bzw. der nicht-null Stride wenn nur einer != 0. Der Eintrag ``b`` wird
-aus allen Listen entfernt; die ``a``-Position behält automatisch
-``dim_type``/``exec_type`` (Vererbung von ``a``).
+1. **Adjazenz:** entweder ``stride[a] == stride[b] * size[b]`` (Reihenfolge
+   ``a,b`` – a außen) oder ``stride[a] * size[a] == stride[b]`` (Reihenfolge
+   ``b,a`` – b außen).
+2. **Konsistente relative Reihenfolge:** Diese Reihenfolge (``a,b`` vs.
+   ``b,a``) muss in *jedem* betroffenen Tensor **dieselbe** sein. Wären ``a``
+   und ``b`` in Tensor X als ``a,b`` und in Tensor Y als ``b,a`` benachbart,
+   sind beide je für sich adjazent, lassen sich aber **nicht** zu einer
+   konsistenten Dimension verschmelzen – der Fusion fehlt eine wohldefinierte
+   Semantik. Wir merken uns die Reihenfolge des ersten Tensors und werfen einen
+   beschreibenden ``ValueError``, sobald ein späterer Tensor abweicht.
 
-Sanity-Check: ``split_dim`` gefolgt von ``fuse_dims`` der erzeugten
-Dims liefert die ursprüngliche Config (verifiziert in
-``optimizer.py``-``__main__``).
+Tensoren, in denen mindestens eine Dim mit Stride 0 fehlt, werden übersprungen
+(die Bedingung ist dort trivial erfüllt). Der neue Stride ist der innere
+(kleinere) Stride ``min(stride[a], stride[b])`` bzw. der nicht-null Stride, wenn
+nur einer ≠ 0 ist. ``b`` wird aus allen Listen entfernt; die ``a``-Position
+erbt ``dim_type``/``exec_type``.
+
+Sanity-Checks in ``optimizer.py``-``__main__``: ``split_dim`` gefolgt von
+``fuse_dims`` liefert die ursprüngliche Config; und eine Config mit
+inkonsistenter Reihenfolge (``a,b`` in einem, ``b,a`` im anderen Tensor) wird
+korrekt abgelehnt.
 
 Task 3c: permute_dims
 ----------------------
@@ -224,77 +233,93 @@ Hardware-Anpassung.
 Task 4b: L2-Optimierung
 ------------------------
 
-Pipeline aus drei Optimizer-Calls plus ``make_executable()``:
+**Der Schlüssel:** Ein reiner ``(l2, prim)``-Split ist noch *keine*
+Optimierung. Das PAR-Layout ``[c, m_l2, n_l2]`` als Grid enumeriert genau wie
+die Baseline (zeilenweise über ``n_l2``) – die 2D-Lokalität fehlt. Diese
+entsteht erst durch eine **zweite Split-Ebene**: ``m_l2`` und ``n_l2`` werden
+nochmals in ``(super, group)`` zerlegt und die *Gruppen*-Achsen nach innen
+permutiert. Weil die Grid-Enumeration die inneren Achsen zuerst durchläuft,
+sweept sie ein ``group_m × group_n`` Super-Tile, bevor sie zum nächsten
+Super-Block springt – **das ist der Swizzle, rein datengetrieben in der
+Config**, ohne Index-Arithmetik im Kernel.
 
 .. code-block:: python
 
    cfg = build_basic_config()
    opt = Optimizer(cfg)
-   opt.split_dim(m_id, 64, 64)              # m -> (m_l2, m_prim)
-   opt.split_dim(n_id, 64, 64)              # n -> (n_l2, n_prim)
-   opt.permute_dims([0, 1, 4, 2, 5, 3])     # Spec-Layout
+   # 1) mma-Tile abspalten
+   opt.split_dim(m_id, 64, 64)              # m -> (m_l2=64, m_prim=64)
+   opt.split_dim(n_id, 64, 64)              # n -> (n_l2=64, n_prim=64)
+   # 2) Super-Tile abspalten (GROUP_M = GROUP_N = 8)
+   opt.split_dim(m_l2_id, 8, 8)             # m_l2 -> (m_super=8, m_group=8)
+   opt.split_dim(n_l2_id, 8, 8)             # n_l2 -> (n_super=8, n_group=8)
+   # 3) Gruppen-Achsen nach innen: PAR=[c, m_super, n_super, m_group, n_group]
+   opt.permute_dims([0, 1, 5, 2, 6, 3, 7, 4])
    opt.make_executable()
 
-Resultat:
+Resultat (GROUP = 8):
 
 .. code-block:: text
 
-   pos name    type  exec      size     stride_A    stride_B    stride_C
-   ----------------------------------------------------------------------
-   0   c       C     PAR          4     16777216    16777216    16777216
-   1   m_l2    M     PAR         64       262144           0      262144
-   2   n_l2    N     PAR         64            0          64          64
-   3   m_prim  M     PRIM        64         4096           0        4096
-   4   n_prim  N     PRIM        64            0           1           1
-   5   k       K     PRIM      4096            1        4096           0
+   pos name     type  exec      size     stride_A    stride_B    stride_C
+   -----------------------------------------------------------------------
+   0   c        C     PAR          4     16777216    16777216    16777216
+   1   m_super  M     PAR          8      2097152           0     2097152
+   2   n_super  N     PAR          8            0         512         512
+   3   m_group  M     PAR          8       262144           0      262144
+   4   n_group  N     PAR          8            0          64          64
+   5   m_prim   M     PRIM        64         4096           0        4096
+   6   n_prim   N     PRIM        64            0           1           1
+   7   k        K     PRIM      4096            1        4096           0
 
-**Wahl der Tile-Größen.** ``m_prim = n_prim = 64``, ``k_prim = 32`` —
-direkt aus dem Peak von Assignment 04 Task 3 übernommen. Auf GB10 mit
-FP16-Inputs sind das die belegt-besten ``ct.mma``-Tile-Größen.
+**Wahl der Tile-Größen.** ``m_prim = n_prim = 64``, ``k_prim = 32`` – direkt
+aus dem Peak von Assignment 04 Task 3 übernommen (belegt-beste
+``ct.mma``-Tile-Größen auf GB10, FP16).
 
-**L2-Reuse-Argument.** Die Aufteilung in PAR-Achsen ``(c, m_l2, n_l2)``
-und PRIM-Achsen ``(m_prim, n_prim, k)`` ist nur die *deklarative* Seite
-— die tatsächliche L2-Optimierung kommt aus einem Super-Tile-Swizzle
-im Kernel, der benachbarte BIDs in 2D-Gruppen der Größe
-``GROUP_M × GROUP_N`` (in mma-Tile-Einheiten) zusammenfasst. Working-Set
-pro Super-Tile (FP16, K=4096):
+**Wahl der Gruppengröße.** ``GROUP_M = GROUP_N = 8`` (empirisch, siehe
+Benchmark). Working-Set pro 2D-Super-Tile (FP16, K=4096): ``GROUP_M`` A-Streifen
+plus ``GROUP_N`` B-Streifen à je ``64 · 4096 · 2 B``:
 
 .. math::
 
-   W(\text{GROUP}) \approx \text{GROUP} \cdot 64 \cdot 4096 \cdot 2 \cdot 2 \;\text{B}
+   W(\text{GROUP}) \approx 2 \cdot \text{GROUP} \cdot 64 \cdot 4096 \cdot 2 \;\text{B}
                         = \text{GROUP} \cdot 1\,\text{MB}
 
-Bei DGX Spark (GB10, L2 ≈ 30 MB) sollte ein Super-Tile vollständig in
-den L2 passen, idealerweise mit Platz für mehrere parallel laufende
-Super-Tiles.
+Bei ``GROUP = 8`` sind das ≈ 8 MB – passt in den 24 MB L2 der GB10 und lässt
+Platz für mehrere gleichzeitig aktive Super-Tiles.
 
 Kernel-Design
 -------------
 
-**Baseline.** 3D-Grid ``(Cd, num_m_tiles, num_n_tiles)`` mit
-mma-Tile ``(64, 64, 32)``; jeder Block berechnet ein Output-Tile mit
-einer K-Schleife. BIDs in der cuTile-Default-Reihenfolge (z innermost).
-Damit teilen Wave-Mitglieder zwar dieselbe ``m_tile``-Zeile (gut für
-A-Reuse), die B-Spalten sind aber alle unterschiedlich.
+**Baseline.** 3D-Grid ``(Cd, num_m_tiles, num_n_tiles)`` mit mma-Tile
+``(64, 64, 32)``; jeder Block berechnet ein Output-Tile mit einer K-Schleife.
+BIDs in der cuTile-Default-Reihenfolge (n innermost). Wave-Mitglieder teilen
+dieselbe ``m_tile``-Zeile (gut für A-Reuse), die B-Spalten sind aber alle
+verschieden – B wird kaum aus dem L2 wiederverwendet.
 
-**L2-optimiert.** Identische per-Block-Arbeit, aber **2D-Grid**
-``(Cd, num_m_tiles * num_n_tiles, 1)`` mit BID-Swizzle drin
-(klassisches Triton/CUTLASS-Pattern):
+**L2-optimiert (config-getrieben).** Der Kernel ist **generisch**: ein flaches
+1D-Grid über die PAR-Achsen der Config, GEMM über die PRIM-Achsen. Er enthält
+**keine** Swizzle-Formel mehr, sondern dekodiert den BID per verschachteltem
+divmod über die PAR-Größen (aus der Config gelesen) und rekonstruiert die
+Tile-Indizes aus Super- und Group-Anteil:
 
 .. code-block:: python
 
-   blocks_per_group = group_m * num_n_tiles
-   group_id         = pid_id // blocks_per_group
-   in_group         = pid_id %  blocks_per_group
-   first_m_in_group = group_id * group_m
-   group_size_m     = min(num_m_tiles - first_m_in_group, group_m)
-   pid_m            = first_m_in_group + (in_group % group_size_m)
-   pid_n            = in_group // group_size_m
+   # Decode in Config-Reihenfolge [c, m_super, n_super, m_group, n_group],
+   # innerste Achse (n_group) zuerst:
+   n_grp = bid %  NG;  t = bid // NG
+   m_grp = t %  MG;    t = t // MG
+   n_sup = t %  NS;    t = t // NS
+   m_sup = t %  MS;    pid_c = t // MS
+   pid_m = m_sup * MG + m_grp     # m_l2-Tile-Index
+   pid_n = n_sup * NG + n_grp     # n_l2-Tile-Index
 
-Wirkung: BIDs ``0..GROUP_M*GROUP_N-1`` fallen in eine 2D-Super-Tile.
-Eine Wave aus 48 SMs deckt eine ganze (oder mehrere kleine)
-Super-Tile(s) ab → A- *und* B-Tiles werden über den L2-Cache geteilt,
-nicht nur die A-Seite wie im Baseline.
+Die Größen ``MS, NS, MG, NG`` liefert ``_extract_l2_params(cfg)`` – ändert man
+die Split-/Permute-Pipeline in ``build_l2_config``, ändert sich das
+Launch-Layout automatisch, ohne den Kernel anzufassen. Wirkung: Weil
+``m_group``/``n_group`` die innersten PAR-Achsen sind, fallen aufeinander
+folgende BIDs in ein ``GROUP_M × GROUP_N`` Super-Tile → **A- und B-Tiles**
+werden über den L2 geteilt, nicht nur die A-Seite wie im Baseline.
 
 Verifikation
 -------------
@@ -332,78 +357,83 @@ GROUP-Sweep (Quadrat-Super-Tile ``GROUP_M = GROUP_N``):
      - vs. Baseline
    * - Baseline
      - —
-     - 42,00
-     - 13,1
+     - 46,62
+     - 11,8
      - 1,00×
-   * - L2-Swizzle
+   * - L2 (config)
      - 4
-     - **13,43**
-     - **40,9**
-     - **3,13×**
-   * - L2-Swizzle
+     - 14,91
+     - 36,9
+     - 3,13×
+   * - L2 (config)
      - 8
-     - 15,07
-     - 36,5
-     - 2,79×
-   * - L2-Swizzle
+     - **13,11**
+     - **41,9**
+     - **3,56×**
+   * - L2 (config)
      - 32
-     - 42,48
-     - 12,9
-     - 1,01×
+     - 14,02
+     - 39,2
+     - 3,33×
+
+Die Absolutwerte schwanken zwischen ``do_bench``-Läufen um einige Prozent;
+die *relative* Ordnung – Baseline ≈ 4× langsamer, ``GROUP = 8`` als Optimum –
+ist über alle Läufe stabil.
 
 .. figure:: ../../../../assignments/05_assignment/src/task04_l2_vs_baseline_GROUP-4-4.png
    :align: center
    :alt: L2-Swizzle (GROUP=4) vs. Baseline
    :width: 90%
 
-   Beste Konfiguration ``GROUP_M = GROUP_N = 4``: Laufzeit links,
-   Durchsatz rechts.
+   ``GROUP_M = GROUP_N = 4``: bereits 3,13× Speedup, aber kleinere
+   Super-Tiles teilen weniger A/B-Streifen als GROUP=8.
 
 .. figure:: ../../../../assignments/05_assignment/src/task04_l2_vs_baseline_GROUP-8-8.png
    :align: center
    :alt: L2-Swizzle (GROUP=8) vs. Baseline
    :width: 90%
 
-   ``GROUP_M = GROUP_N = 8``: weiterhin klarer Speedup, aber leicht
-   schwächer als GROUP=4 (Wave-Quantisierung).
+   ``GROUP_M = GROUP_N = 8``: beste Konfiguration mit 3,56× Speedup
+   (41,9 TFLOPS), ≈ 8 MB Working-Set im L2.
 
 .. figure:: ../../../../assignments/05_assignment/src/task04_l2_vs_baseline_GROUP-32-32.png
    :align: center
    :alt: L2-Swizzle (GROUP=32) vs. Baseline
    :width: 90%
 
-   ``GROUP_M = GROUP_N = 32``: Working-Set sprengt L2, Swizzle
-   wirkungslos — Laufzeiten praktisch identisch zur Baseline.
+   ``GROUP_M = GROUP_N = 32``: bleibt mit 3,33× stark — das echte
+   2D-Super-Tile hält den gleichzeitig aktiven Working-Set kompakt.
 
 Beobachtungen und Vermutungen
 ------------------------------
 
-* **GROUP=4 ist Sweet Spot.** 3,13× Speedup, 40,9 TFLOPS — die
-  Hardware-Auslastung springt auf das Niveau einer optimierten GEMM
+* **GROUP=8 ist der Sweet Spot.** 3,56× Speedup, 41,9 TFLOPS — die
+  Hardware-Auslastung springt auf das Niveau einer optimierten GEMM. Ein
+  2D-Super-Tile aus 8×8 mma-Tiles hält ≈ 8 MB Working-Set im L2.
 
-* **GROUP=8 leicht schlechter.** Erwartet hätten wir 8×8 als Optimum
-  (48 SMs ≈ 64 Super-Tile-Tiles). Vermutung: Wave-Quantisierung —
-  48 SMs decken nur 75 % einer 64-tile-Super-Tile ab, der Rest hängt
-  in der Folgewave und fragmentiert das Reuse-Muster. Man könnte nochmal ein
-  (``GROUP_M=8, GROUP_N=4``) machen. (Aber Cisco-Secure-Client nervt mich.)
+* **GROUP=4 etwas schwächer (3,13×).** Kleinere Super-Tiles teilen weniger
+  A/B-Streifen pro Gruppe → geringere L2-Wiederverwendung.
 
-* **GROUP=32 kollabiert auf Baseline.** 1,01× — der Swizzle ist
-  effektiv neutralisiert → Cache-Lines werden weggeräumt, bevor sie wiederverwendet werden. Bestätigt die
-  L2-Größe als härtesten Constraint.
+* **GROUP=32 bleibt stark (3,33×), kollabiert NICHT.** Das ist der Unterschied
+  zum naiven 1D-„Banding" (eine ganze M-Zeile × *alle* N-Spalten, deren
+  B-Working-Set den L2 sprengt): Hier bildet die Config ein *echtes 2D*-
+  Super-Tile, sodass der gleichzeitig aktive Working-Set kompakt bleibt (die
+  48 SMs decken immer nur einen Ausschnitt ab). Die L2-Lokalität überlebt
+  damit auch große Gruppen.
 
-* **L2-Swizzle ist eine reine Indexierungs-Optimierung.** Auch hier wieder die bestätigung: Beide
-  Kernels führen exakt dieselbe Anzahl an ``ct.mma``-Calls und
-  ``ct.load``-Operationen aus — der Performance-Unterschied kommt
-  ausschließlich aus der *Reihenfolge*, in der die BIDs auf die SMs
-  fallen. Das ist die kompakteste Demonstration des Vorlesungs-Mottos
+* **L2-Optimierung ist eine reine Reihenfolge-Frage.** Baseline und L2-Variante
+  führen exakt dieselbe Anzahl ``ct.mma``- und ``ct.load``-Operationen aus —
+  der Unterschied kommt ausschließlich aus der *Reihenfolge*, in der die BIDs
+  auf die SMs fallen. Kompakteste Demonstration des Vorlesungs-Mottos
   *„memory access patterns dominate over compute"*.
 
-* **Config-Interface vs. Kernel-Implementierung.** Die optimierte
-  Config beschreibt den *Plan* (``[c, m_l2, n_l2, m_prim, n_prim, k]``
-  mit den passenden ``exec_types``), die Swizzle-Logik selbst ist
-  aber nicht aus der Config ableitbar — sie steht als handgeschriebene
-  Index-Arithmetik im Kernel. Eine Code-Generierung aus dem Config
-  könnte ein nächstes Ziel sein?
+* **Swizzle datengetrieben in der Config.** Die Super-Tile-Struktur entsteht
+  vollständig aus den ``split_dim``/``permute_dims``-Operationen (zwei
+  Split-Ebenen, Gruppen-Achsen innen); der Kernel ist generisch und liest die
+  PAR-/PRIM-Größen per ``_extract_l2_params`` aus der Config. Ändert man die
+  Gruppengröße oder die Achsen-Reihenfolge in der Config, ändert sich das
+  Verhalten **ohne** Kernel-Änderung — genau der Sinn des
+  ``Config``/``Optimizer``-Interfaces.
 
 Beiträge
 =========
@@ -422,6 +452,7 @@ Beiträge
        Sphinx-Report.
    * - Oliver Dietzel
      - Implementierung Task 4 (Basis- und L2-Config-Pipeline,
-       ``kernel_baseline`` und ``kernel_l2_optimized`` mit
-       BID-Swizzle, Verifikation gegen ``torch.einsum``,
-       Benchmark + GROUP-Sweep auf DGX Spark, Plot).
+       ``kernel_baseline`` und der generische, config-getriebene
+       ``kernel_l2_optimized`` mit 2D-Super-Tile aus der Config,
+       Verifikation gegen ``torch.einsum``, Benchmark + GROUP-Sweep
+       auf DGX Spark, Plot).

@@ -134,8 +134,9 @@ Task 1c: FP16 vs. FP32
 
    ``results/torch_16.png`` — FP16.
 
-Visuell nicht unterscheidbar. Jedoch nach kurzen Pixel vergleich: es gibt unterschiede!
-Man könnte vielleicht in Zukunft einen "Standartisierten" Pixelvergleich / Qualitätsanalyse durchführen.
+Visuell sind FP16 und FP32 nicht zu unterscheiden. Ein genauer Pixelvergleich zeigt
+jedoch geringe Abweichungen. Eine standardisierte Pixel- bzw. Qualitätsanalyse
+(z. B. PSNR/SSIM) wäre ein sinnvoller nächster Schritt.
 
 Task 2: Basic Config
 ====================
@@ -172,66 +173,70 @@ Task 3: Optimized Config
 Strategie
 ----------
 
-**Plan C**: Task-3-Config bleibt Single-PRIM mit Slide-5-L2-Pattern
-(klar, deklarativ); Task-4a-Kernel nutzt **Pre-Loading via
-``ct.extract``** (Slide 11) — direkt motiviert durch die fehlende
-Stride-1-K-Dim. Multi-PRIM-K (Slide 7) bleibt für den optionalen Task.
+Die L2-Optimierung wird **datengetrieben über die Config** ausgedrückt –
+nicht per Hand im Kernel. Wie in Assignment 05 (Task 4) entsteht ein
+2D-Super-Tile durch eine **zusätzliche Split-Ebene** und eine Permutation, die
+die parallelen **M- und N-PAR-Achsen verschachtelt** (Gruppen-Achsen innen).
+Der Kernel bleibt dadurch generisch (Grid über die PAR-Achsen, GEMM über die
+PRIM-Achsen) und braucht keine eigene Swizzle-Arithmetik.
 
 PRIM-Tile-Größen aus A05 übernommen (auf GB10/FP16 die belegt-besten
 ``ct.mma``-Footprints): :math:`|x_{\text{prim}}| = |y_{\text{prim}}| = 64,
 \; |s\!p_{\text{prim}}| = 32`.
 
-Pipeline
---------
+Pipeline (``build_optimized_config``)
+-------------------------------------
 
 .. code-block:: python
 
    opt = Optimizer(cfg)
-   opt.fuse_dims(2, 3)                           # s,p -> sp
-   opt.split_dim(2, k_total // PRIM_K, PRIM_K)   # sp -> sp_seq, sp_prim
-   opt.split_dim(4, x_sz   // PRIM_M, PRIM_M)    # x  -> x_seq,  x_prim
-   opt.split_dim(7, y_sz   // PRIM_N, PRIM_N)    # y  -> y_seq,  y_prim
-   opt.permute_dims([0, 1, 4, 6, 7, 2, 5, 8, 3]) # ins Slide-5-Layout
+   # 1) K fusen + mma-Tile abspalten
+   opt.fuse_dims(2, 3)                     # s,p -> sp
+   opt.split_dim(2, k_total // 32, 32)     # sp -> sp_seq, sp_prim
+   opt.split_dim(4, x_seq, 64)             # x  -> x_seq,  x_prim
+   opt.split_dim(7, y_seq, 64)             # y  -> y_seq,  y_prim
+   # 2) Super-Tile abspalten (Gruppengröße GX, GY)
+   opt.split_dim(4, x_seq // GX, GX)       # x_seq -> x_super, x_group
+   opt.split_dim(8, y_seq // GY, GY)       # y_seq -> y_super, y_group
+   # 3) M-/N-PAR-Achsen verschachteln, Gruppen-Achsen innen
+   opt.permute_dims([0, 1, 7, 4, 8, 5, 9, 2, 6, 10, 3])
    opt.make_executable()
 
-* Nur ``s``/``p`` lassen sich fusen — in A und B beide adjazent
-  (``p`` innerer, ``s`` outer in beiden). Andere Paare (``a``+``c``,
-  ``b``+``y``, ``x``+``y``) scheitern an der Adjazenz im Output.
-* Explizites ``permute_dims`` vor ``make_executable`` erzwingt
-  PRIM-Block ``[M, N, K]`` (sonst landet ``sp_prim`` links von
-  ``x_prim``/``y_prim`` durch die stabile Default-Sortierung).
+* Nur ``s``/``p`` lassen sich fusen — in A und B beide adjazent **und in
+  gleicher relativer Reihenfolge** (``p`` innen, ``s`` außen). Andere Paare
+  scheitern an der Adjazenz/Reihenfolge im Output.
+* Die Permutation zieht ``x_group`` und ``y_group`` nach innen, sodass die
+  Grid-Enumeration ein ``GX × GY``-Super-Tile abläuft, bevor sie zum nächsten
+  Super-Block springt — das *ist* der Swizzle, rein deklarativ in der Config.
 * ``make_executable`` setzt PAR/SEQ/PRIM und schließt mit ``verify()``.
 
 Ergebnis
 --------
 
+Optimierte Config (``GX = 4, GY = 3``):
+
 .. code-block:: text
 
-   pos name    type  exec      size   stride_A   stride_B   stride_C
-   ------------------------------------------------------------------
-   0   a       M     PAR          4   18874368          0   21233664
-   1   c       M     PAR          3    6291456          0    1769472
-   2   x_seq   M     PAR         24         64          0         64
-   3   b       N     PAR          4          0    4718592    5308416
-   4   y_seq   N     PAR         18          0         64      98304
-   5   sp_seq  K     SEQ        128      49152      36864          0
-   6   x_prim  M     PRIM        64          1          0          1
-   7   y_prim  N     PRIM        64          0          1       1536
-   8   sp_prim K     PRIM        32       1536       1152          0
+   pos name     type  exec      size   stride_A   stride_B   stride_C
+   -------------------------------------------------------------------
+   0   a        M     PAR          4   18874368          0   21233664
+   1   c        M     PAR          3    6291456          0    1769472
+   2   b        N     PAR          4          0    4718592    5308416
+   3   x_super  M     PAR          6        256          0        256
+   4   y_super  N     PAR          6          0        192     294912
+   5   x_group  M     PAR          4         64          0         64
+   6   y_group  N     PAR          3          0         64      98304
+   7   sp_seq   K     SEQ        128      49152      36864          0
+   8   x_prim   M     PRIM        64          1          0          1
+   9   y_prim   N     PRIM        64          0          1       1536
+   10  sp_prim  K     PRIM        32       1536       1152          0
 
    data_type=FLOAT16  prim_main=GEMM  prim_last=NONE  prim_first=ZERO
 
-Layout: 5× PAR (3M, 2N) | 1× SEQ-K | PRIM-Block ``[M, N, K]``.
-
-**Tile-Geometrie im PRIM-Block.** A: ``x_prim`` Stride 1, ``sp_prim``
-Stride 1536 → A-Tile ist memory-(K, M) statt (M, K). B: ``y_prim``
-Stride 1, ``sp_prim`` Stride 1152 → klassisches (K, N)-Layout. Genau
-diese A-Asymmetrie motiviert das Pre-Loading in Task 4a.
-
-L2-Working-Set (FP16, GB10 ~30 MB L2):
-:math:`m_{l2} = a \cdot c \cdot x_{\text{seq}} = 288,
-\; n_{l2} = b \cdot y_{\text{seq}} = 72`.
-Volle K-Schiene: A ≈ 2,3 MB, B ≈ 0,6 MB — passt locker.
+Layout: 7× PAR mit **verschachtelten** M-/N-Achsen (``x_group``, ``y_group``
+innen) | 1× SEQ-K | PRIM-Block ``[M, N, K]``. Das komplette Super-Tiling steckt
+in der Dimensionsstruktur; der Kernel liest sie nur aus. ``GX = x_{seq}`` bzw.
+``GY = y_{seq}`` (super = 1) ergäbe wieder die natürliche Enumeration.
 
 Task 4: cuTile Kernel
 ======================
@@ -239,92 +244,73 @@ Task 4: cuTile Kernel
 Task 4a: Kernel-Design
 -----------------------
 
-Der Baseline-Kernel ist die wörtliche Umsetzung der Task-3-Config: ein
-3D-Grid über die fünf PAR-Achsen (zu drei ``ct.bid``-Achsen gefaltet,
-weil cuTile nur drei Block-IDs hat), eine innere ``for sp_seq``-Schleife
-über die einzige SEQ-K-Achse, und im Schleifenrumpf genau ein
+Alle Nicht-Referenz-Kernel folgen der Config: ein 3D-Grid über die PAR-Achsen
+(auf drei ``ct.bid`` gefaltet, da cuTile nur drei Block-IDs hat), eine innere
+``for sp_seq``-Schleife über die einzige SEQ-K-Achse und im Rumpf genau ein
 ``ct.mma`` auf dem PRIM-Block ``(x_prim, y_prim, sp_prim)``.
 
-Grid-Faltung
-^^^^^^^^^^^^
+Generischer, config-getriebener Kernel
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Insgesamt :math:`|a| \cdot |c| \cdot |x_{\text{seq}}| \cdot |b| \cdot
-|y_{\text{seq}}| = 4 \cdot 3 \cdot 24 \cdot 4 \cdot 18 = 20\,736`
-Blöcke. Auf drei ``ct.bid``-Achsen geklappt:
+``kernel_generic`` verlagert die L2-Lokalität vollständig in die Config: sie
+entsteht aus der **Dimensionsstruktur der Config**, nicht aus einer
+Swizzle-Formel im Kernel. Grid:
+``(a·c, b, x_super·y_super·x_group·y_group)``. Die ``bid(2)``-Achse wird per
+verschachteltem divmod über die Super-/Group-Größen (aus ``_extract_par(cfg)``
+gelesen) dekodiert – mit den **Gruppen-Achsen innen**, sodass aufeinander
+folgende BIDs ein ``GX × GY``-Super-Tile abdecken:
 
-.. code-block:: text
+.. code-block:: python
 
-   bid(0) = a · c            range  12   →  (pid_a, pid_c)
-   bid(1) = b                range   4   →   pid_b
-   bid(2) = x_seq · y_seq    range 432   →  (pid_x, pid_y)
+   g = ct.bid(2)
+   y_grp = g %  GY;  g = g // GY
+   x_grp = g %  GX;  g = g // GX
+   y_sup = g %  YS;  x_sup = g // YS
+   pid_x = x_sup * GX + x_grp     # x_seq-Tile-Index
+   pid_y = y_sup * GY + y_grp     # y_seq-Tile-Index
 
-Dadurch teilen ``YSEQ`` konsekutive BIDs (``bid(2) // YSEQ = x_seq``)
-denselben ``x_seq``-Streifen — die A-Tile-Spalte wird über bis zu 18
-Blöcke wiederverwendet, ohne dass es eine eigene Swizzle-Logik braucht.
+Keine ``// blocks_per_group``-Arithmetik mehr. Ändert man die Split-/Permute-
+Pipeline in ``build_optimized_config``, passt sich das Launch-Layout über
+``_extract_par`` automatisch an – der Kernel bleibt unverändert.
 
 mma-Reihenfolge und der B-Permute
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Die Output-Tile-Form ist :math:`(y_{\text{prim}}, x_{\text{prim}})` —
-``y`` ist die äußere, ``x`` die innere (stride-1) Achse von
-``tensor_abcyx``. ``ct.mma`` ist ``(M, K) @ (K, N) → (M, N)``, also
-mappen wir :math:`M = y_{\text{prim}}, N = x_{\text{prim}},
-K = sp_{\text{prim}}`. Daraus ergibt sich:
-
-* A-Tile aus ``tensor_acspx``: ``shape=(1, 1, 1, tk, 1, tx)`` →
-  Reshape auf :math:`(K, N)` direkt verwendbar – kein Permute.
-* B-Tile aus ``tensor_bspy``: ``shape=(1, 1, tk, 1, ty)`` →
-  Reshape auf :math:`(K, M)`, **muss** auf :math:`(M, K)` permutiert
-  werden, bevor es als erstes mma-Argument geht. Genau einmal pro
-  Schleifeniteration, also 128 ``ct.permute``-Calls pro Block. Die
-  Permute kann der Compiler auf Tile-Fragment-Ebene mit der nächsten
-  mma-Operation fusionieren – im Profil kein eigener Posten.
-
-Kernel-Rumpf
-^^^^^^^^^^^^
+``y`` ist die äußere, ``x`` die innere (stride-1) Achse von ``tensor_abcyx``.
+``ct.mma`` ist ``(M, K) @ (K, N) → (M, N)``, also
+:math:`M = y_{\text{prim}}, N = x_{\text{prim}}, K = sp_{\text{prim}}`:
 
 .. code-block:: python
 
    acc = ct.full((ty, tx), 0, dtype=ct.float32)
    for sp_seq in range(SPSEQ):
        a_tile = ct.load(A, index=(pid_a, pid_c, sp_seq, 0, pid_x, 0),
-                        shape=(1, 1, 1, tk, 1, tx),
-                        padding_mode=ct.PaddingMode.ZERO)
+                        shape=(1, 1, 1, tk, 1, tx), padding_mode=ct.PaddingMode.ZERO)
        b_tile = ct.load(B, index=(pid_b, sp_seq, 0, pid_y, 0),
-                        shape=(1, 1, tk, 1, ty),
-                        padding_mode=ct.PaddingMode.ZERO)
-       a_kx = ct.reshape(a_tile, (tk, tx))      # (sp_prim, x_prim) = (K, N)
-       b_ky = ct.reshape(b_tile, (tk, ty))      # (sp_prim, y_prim) = (K, M)
-       b_yk = ct.permute(b_ky, (1, 0))          # (y_prim, sp_prim) = (M, K)
-       acc = ct.mma(b_yk, a_kx, acc)            # (M, N) = (y_prim, x_prim)
+                        shape=(1, 1, tk, 1, ty), padding_mode=ct.PaddingMode.ZERO)
+       a_kx = ct.reshape(a_tile, (tk, tx))                       # (K, N)
+       b_yk = ct.permute(ct.reshape(b_tile, (tk, ty)), (1, 0))   # (M, K)
+       acc = ct.mma(b_yk, a_kx, acc)                             # (M, N)=(y_prim,x_prim)
 
-Reshape vs. Kernel-Indexing
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Reshape-Views (gratis)
+^^^^^^^^^^^^^^^^^^^^^^^
 
-Die Eingabe-Tensoren werden auf Host-Seite **als Views** in die
-Kernel-erwartete Form gebracht (``.view`` ist O(1), keine Kopie):
+Die Eingabe-Tensoren werden host-seitig als **Views** in die Kernel-Form
+gebracht (``.view`` ist O(1), keine Kopie) — möglich, weil ``s, p`` adjazent
+im Speicher liegen (genau der ``fuse_dims``-Check aus Assignment 05):
 
 .. code-block:: python
 
    A = tensor_acspx.contiguous().view(Ad, Cd, SPSEQ, PRIM_K, XSEQ, PRIM_M)
    B = tensor_bspy.contiguous().view(Bd,         SPSEQ, PRIM_K, YSEQ, PRIM_N)
-   C_view = C.view(Ad, Bd, Cd, YSEQ, PRIM_N, XSEQ, PRIM_M)
 
-Diese Reshapes sind *gratis*, weil ``s,p`` adjazent im Speicher liegen
-(``stride_s = stride_p · |p|``) — genau der ``fuse_dims``-Check aus
-Assignment 05, der hier nicht mehr explizit gebraucht wird.
+Vergleichs-Kernel
+^^^^^^^^^^^^^^^^^^
 
-Pre-Loading via ``ct.extract``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-In Task 3 hatten wir das Pre-Loading-Pattern (Slide 11) als Plan
-notiert: einen größeren A-Tile global laden und per ``ct.extract``
-im Schleifenrumpf in mma-Größe schneiden. Im Profiling-Test brachte
-das auf den vorliegenden Shapes **keinen** Gewinn — der Engpass war
-nicht die A-Bandbreite, sondern die per-Block-Arbeit (siehe Task 4c:
-große PRIM-Tiles helfen, Pre-Loading nicht). Daher zeigt der eingereichte
-Kernel die schlichte Variante ohne ``ct.extract`` – Slide 11 wäre
-relevant bei einem K-dominanten Workload mit kleinen PRIM-M/N.
+* ``kernel_baseline`` — dieselbe Rechnung mit dem einfachen 3D-Grid
+  ``(a·c, b, x_seq·y_seq)`` (natürliche Enumeration, kein Super-Tile).
+* ``kernel_big`` — Baseline-Layout mit größeren PRIM-Tiles ``128 × 128``.
 
 Task 4b: Verifikation
 ----------------------
@@ -334,14 +320,17 @@ und FP16-Rückgabe, ``atol=2e-1, rtol=2e-2``:
 
 .. code-block:: text
 
-   baseline      allclose=True   max_abs_err=0.2500
-   l2-swizzle    allclose=True   max_abs_err=0.2500
-   big-prim 128  allclose=True   max_abs_err=0.2500
+   baseline      allclose=True   max_abs_err=0.0010
+   generic(ilv)  allclose=True   max_abs_err=0.0010
+   generic(128)  allclose=True   max_abs_err=0.0010
+   big-prim 128  allclose=True   max_abs_err=0.0010
 
-Alle Varianten liegen im FP16-Quantisierungsrauschen (max 0,25 absolute
-Abweichung — die K-Dim ist mit 4096 FP16-Akkumulationen pro Output-Element
-deutlich tiefer als in den vorherigen Assignments, daher der etwas
-größere Fehler als die üblichen ``0.0078 = 2⁻⁷``).
+Alle vier Varianten liegen im FP16-Quantisierungsrauschen. Auf den echten
+Light-Field-Daten (kleine Wertebereiche) beträgt der maximale Absolutfehler
+``0.0010``; auf synthetischen ``randn``-Tensoren gleicher Form ist er
+erwartungsgemäß größer (``≈ 0.25``), weil die K-Dim 4096 Terme tief ist und die
+dadurch große Summenmagnitude bei FP16-Ein- und -Ausgabe zu größeren
+Quantisierungsfehlern führt (akkumuliert wird in FP32).
 
 Task 4c: Benchmark
 -------------------
@@ -355,9 +344,12 @@ FLOPs der Kontraktion:
    \;=\; 2 \cdot 4 \cdot 4 \cdot 3 \cdot 64 \cdot 64 \cdot 1536 \cdot 1152
    \;\approx\; 6{,}96 \cdot 10^{11}
 
+Alle Custom-Varianten laufen über den generischen Kernel bzw. das
+Baseline-Layout; nur die **Config** (Tile-Größe, Super-Tile) unterscheidet sie:
+
 .. list-table::
    :header-rows: 1
-   :widths: 32 17 17 17 17
+   :widths: 38 16 14 14 18
 
    * - Variante
      - Tile (M,N,K)
@@ -366,92 +358,76 @@ FLOPs der Kontraktion:
      - vs. ``torch``
    * - ``torch.einsum`` (Referenz)
      - —
-     - 11,36
-     - **61,25**
+     - 12,07
+     - **57,67**
      - 1,00×
-   * - ``baseline`` (Task 4a)
+   * - ``baseline`` 3D
      - (64, 64, 32)
-     - 42,47
-     - 16,39
+     - 43,55
+     - 15,98
+     - 0,28×
+   * - ``generic`` natural
+     - (64, 64, 32)
+     - 44,26
+     - 15,72
      - 0,27×
+   * - ``generic`` natural
+     - (128, 128, 32)
+     - **29,40**
+     - **23,66**
+     - **0,41×**
    * - ``big-prim``
      - (128, 128, 32)
-     - **24,51**
-     - **28,38**
-     - **0,46×**
-   * - ``big-prim`` (PRIM_K=64)
-     - (128, 128, 64)
-     - 25,54
-     - 27,24
-     - 0,44×
-   * - ``l2-swizzle`` GY=9
+     - 29,51
+     - 23,58
+     - 0,41×
+   * - ``generic`` interleaved GX,GY=(4,3)
      - (64, 64, 32)
-     - 45,10
-     - 15,43
-     - 0,25×
+     - 57,76
+     - 12,05
+     - 0,21×
+   * - ``generic`` interleaved GX,GY=(12,9)
+     - (64, 64, 32)
+     - 46,00
+     - 15,13
+     - 0,26×
 
 **Beobachtungen.**
 
-* Der **Baseline-Kernel mit der unveränderten Task-3-Config** erreicht
-  **16,4 TFLOPS** — eine Größenordnung über dem, was naive
-  Python-Schleifen erlauben würden, aber klar unter den ~75 TFLOPS aus
-  Assignment 05. Begründung: die PRIM-Tiles aus Task 3 sind mit
-  ``(64, 64, 32)`` für *kleine* GEMM-Dims optimiert (Assignment 04
-  Task 3 Sweep) — bei :math:`x = 1536, y = 1152` macht ein einzelnes
-  Output-Tile von ``64×64`` nur ``1/(24·18) = 0{,}23 %`` des Outputs
-  aus, und der Per-Block-Overhead wird sichtbar.
+* **Der generische, config-getriebene Kernel hat keinen Overhead.** In
+  natürlicher Ordnung erreicht er exakt die Baseline (15,7 vs. 16,0 TFLOPS bei
+  ``64²``; 23,7 vs. 23,6 bei ``128²``) — der Ansatz *Grid über PAR / GEMM über
+  PRIM* kostet nichts, das gesamte Mapping steckt in der Config.
 
-* **``big-prim`` mit (128, 128, 32) erreicht 28,4 TFLOPS** — Faktor
-  1,73× gegenüber Baseline ohne sonstige Änderungen. Hardware-Begründung
-  identisch zur Heatmap aus Assignment 03 Task 3b: bei großen Problemen
-  liegt der Sweet Spot bei ``128×128`` (mehr Arbeit pro Issue, bessere
-  Tensor-Core-Auslastung). Größeres ``PRIM_K = 64`` bringt **nichts**
-  zusätzlich, weil bereits ``PRIM_K = 32`` die K-Schleife auf 128
-  Iterationen drückt — der Tensor-Core ist nicht K-issue-bound.
+* **Größere PRIM-Tiles sind der eigentliche Hebel.** ``128 × 128`` statt
+  ``64 × 64`` bringt ~1,5× (15,7 → 23,7 TFLOPS) — konsistent mit der Heatmap aus
+  Assignment 03: bei großen GEMM-Dims (``x = 1536, y = 1152``) amortisieren
+  große Tiles den Per-Block-Overhead und lasten die Tensor Cores besser aus.
 
-* **``l2-swizzle`` *verschlechtert* den Durchsatz konsistent**, je
-  kleiner ``GY`` desto schlimmer. Erklärung: das natürliche Grid-Mapping
-  ``pid_x = bid_xy // YSEQ`` lässt ``YSEQ = 18`` konsekutive BIDs
-  denselben A-Streifen teilen — dort kommt der A-Reuse *gratis*.
-  Jedes ``GY < 18`` bricht genau diesen impliziten Streifen auf,
-  bevor B-Reuse einen Gewinn bringen könnte. Lehre: vor manuellem
-  Swizzling immer das Default-Mapping nachrechnen.
-
-* Erst bei ``GY = 9`` (also halbe y-Spalte pro Gruppe) nähern wir uns
-  wieder dem Baseline-Durchsatz, ohne ihn zu erreichen. Bei ``GY = YSEQ
-  = 18`` wäre der Kernel mathematisch äquivalent zum Baseline.
+* **Der 2D-Super-Tile-Swizzle hilft hier NICHT** (interleaved 12–15 TFLOPS,
+  unter der Baseline). Grund — dieselbe Lehre wie in Assignment 04/05: Das
+  B-Tensor passt **pro Batch** in den L2
+  (:math:`|s\,p\,y| \cdot 2\,\text{B} \approx 9` MB < 24 MB), sodass die
+  Baseline ihr B ohnehin aus dem L2 zieht. Der Swizzle spart also keine
+  DRAM-Bandbreite, bricht aber die *natürliche* A-Reuse (``YSEQ`` konsekutive
+  BIDs teilen bei natürlicher Ordnung dasselbe ``x_seq``) und kostet dadurch
+  Durchsatz. Anders als in Assignment 05, wo B den L2 sprengte und der
+  Super-Tile ~4× brachte. Wichtig: Die Config drückt den Swizzle jetzt
+  **korrekt deklarativ** aus — auf Shapes mit L2-sprengendem B würde er greifen.
 
 Optionaler Task: Beat ``torch.einsum``?
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Auch mit allen oben gezeigten Optimierungen bleiben wir bei
-**0,46×** gegenüber ``torch.einsum``. Vermutlich passiert dort:
+Der beste Custom-Kernel (``generic`` bzw. ``big-prim`` bei ``128²``) erreicht
+**≈ 0,41×** von ``torch.einsum``. torch nutzt ``opt_einsum``-Routing plus cuBLAS
+mit ausgereiften Tile-Cascades und Software-Pipelining, die ein
+handgeschriebener cuTile-Kernel ohne erheblichen Aufwand nicht erreicht.
+Offene Beat-Path-Ideen: Multi-PRIM-K (mehrere ``ct.mma`` pro Iteration),
+Persistent Kernel mit Load/Compute-Overlap, oder die Kontraktion als zwei
+batched GEMMs zerlegen (dann aber kein einzelner cuTile-Kernel mehr).
 
-1. **opt_einsum**-Routing: das Modul ist explizit als
-   ``import opt_einsum`` im Boilerplate enthalten — torch nutzt das
-   für die optimale Kontraktions-Reihenfolge und/oder die Übersetzung
-   in mehrere ``torch.matmul`` / cuBLAS-Calls.
-2. **cuBLAS GEMM** mit ausgereiften Tile-Cascades, Software-Pipelining,
-   warp-level Speculative Prefetch usw., die ein handgeschriebener
-   cuTile-Kernel ohne signifikanten Aufwand nicht erreicht.
-
-Beat-Path-Ideen, die im Rahmen dieses Assignments nicht mehr verfolgt
-wurden:
-
-* **Multi-PRIM-K** (Slide 7): zwei oder mehr ``ct.mma``-Calls pro
-  Schleifeniteration, jeder mit unterschiedlichem K-Slice – mehr
-  Tensor-Core-Issue-Rate.
-* **Persistent Kernel + Producer/Consumer**: ein Block bedient mehrere
-  Output-Tiles und überlappt Load mit Compute (Slide 12 / Cooperative
-  Groups). cuTile bietet kein direktes Pipelining-Primitiv.
-* **opt_einsum-äquivalentes Splitting**: die Kontraktion vorher als
-  zwei batched GEMMs zerlegen (``a c (sp) x`` × ``b (sp) y`` →
-  ``(a c) b (sp) y x`` Pfad). Dann ist das aber kein einzelner
-  cuTile-Kernel mehr.
-
-Stand der Abgabe: **Kernel verifiziert, 28,4 TFLOPS (best)**,
-``torch.einsum`` nicht geschlagen — der optionale Task bleibt offen,
-mit dokumentierten nächsten Schritten.
+Stand: **Kernel verifiziert, 23,7 TFLOPS (best), vollständig config-getrieben**;
+``torch.einsum`` nicht geschlagen — der optionale Task bleibt offen.
 
 Beiträge
 =========
@@ -468,7 +444,8 @@ Beiträge
        FP32-vs-FP16-Vergleich (Task 1c), Basis- und optimierte
        Config-Pipeline (Task 2, 3), Report-Abschnitte zu Task 1–3.
    * - Oliver Dietzel
-     - cuTile-Kernel ``kernel_baseline`` strikt nach Task-3-Config,
-       Verifikation gegen ``torch.einsum``, Benchmark + Sweep über
-       PRIM-Tile-Größen und Y-Swizzle (Task 4a–c sowie optionaler Task);
-       Report-Abschnitt zu Task 4.
+     - cuTile-Kernel: ``kernel_baseline`` sowie der generische,
+       config-getriebene ``kernel_generic`` (2D-Super-Tile aus der Config,
+       kein Hand-Swizzle), Verifikation gegen ``torch.einsum``, Benchmark +
+       Sweep über PRIM-Tile-Größen und Gruppengröße (Task 4a–c sowie
+       optionaler Task); Report-Abschnitt zu Task 4.

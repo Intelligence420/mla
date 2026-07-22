@@ -26,14 +26,14 @@ Aufgabenstellung
 
 Über ``cp.cuda.Device().attributes.items()`` sollen die Werte für
 ``L2CacheSize``, ``MaxSharedMemoryPerMultiprocessor`` und ``ClockRate``
-auf dem DGX-Spark ausgelesen und berichtet werden.
+auf dem DGX Spark ausgelesen und berichtet werden.
 
 Implementierung
 ---------------
 
 CuPys ``Device().attributes`` gibt ein Dictionary mit **allen** CUDA-Attributen
-zurück. Da ``.items()`` immer alle Schlüssel-Wert-Paare liefert, wird nach der
-Iteration über den gewünschten Teilmenge gefiltert:
+zurück. Da ``.items()`` immer alle Schlüssel-Wert-Paare liefert, wird während der
+Iteration auf die gewünschte Teilmenge gefiltert:
 
 .. code-block:: python
 
@@ -268,8 +268,11 @@ aufeinanderfolgende ``L``-Elemente direkt nebeneinander; dann kommen die
 * **Variante 2** tiled über ``(M, N)`` – die äußeren Dimensionen. Für eine
   feste ``(k, l)``-Position sind die ``M × N``-Elemente im Speicher mit
   einem Stride von ``K × L`` verteilt. Diese nicht-zusammenhängenden Zugriffe
-  können nicht gecached werden und führen zu vielen separaten Speichertransaktionen
-  (uncoalesced accesses), was den Durchsatz erheblich reduziert.
+  kann die Hardware nicht zu wenigen breiten Speichertransaktionen
+  **zusammenfassen** (kein Coalescing): Die Zugriffe laufen zwar weiterhin über
+  den L1-/L2-Cache, ein Warp löst aber statt weniger breiter viele kleine
+  Transaktionen aus. Das senkt die Bus-Auslastung und damit den Durchsatz
+  erheblich (uncoalesced accesses).
 
 Task 4: Benchmarking Bandwidth
 ==============================
@@ -331,58 +334,92 @@ Verifikation
 Erkenntnisse: Bandwidth-Messungen
 -----------------------------------
 
-Gemessene Werte (M=2048, tile_M=64, tile_N=N, FP16):
+Gemessen wurde die **volle Range** ``N = 16 … 128`` (Schrittweite 1, also 113
+Messpunkte; M=2048, tile_M=64, tile_N=N, FP16). Die folgende Tabelle zeigt
+repräsentative Punkte: jeweils die Zweierpotenzen (lokaler Peak, kein Padding)
+und den direkt darauffolgenden Wert (Einbruch, weil sich ``tile_N`` verdoppelt):
 
 .. list-table::
    :header-rows: 1
-   :widths: 15 25 25
+   :widths: 10 20 20 20 30
 
    * - N
+     - tile_N (2er-Potenz)
      - Laufzeit (ms)
      - Bandbreite (GB/s)
+     - Charakter
    * - 16
-     - 0,0048
-     - 27,48
-   * - 32
+     - 16
+     - 0,0047
+     - 27,9
+     - Zweierpotenz, kein Padding (Peak)
+   * - 17
+     - 32
      - 0,0065
-     - 40,24
-   * - 48
-     - 0,0063
-     - 62,25
+     - 21,5
+     - ``tile_N`` verdoppelt → ~½ Padding (Einbruch)
+   * - 32
+     - 32
+     - 0,0069
+     - 38,2
+     - Zweierpotenz (Peak)
+   * - 33
+     - 64
+     - 0,0085
+     - 31,7
+     - ``tile_N`` verdoppelt → Einbruch
    * - 64
-     - 0,0081
-     - 64,49
-   * - 80
+     - 64
      - 0,0082
-     - 80,06
-   * - 96
-     - 0,0105
-     - 75,14
-   * - 112
-     - 0,0106
-     - 86,67
+     - 64,1
+     - Zweierpotenz (Peak)
+   * - 65
+     - 128
+     - 0,0116
+     - 45,8
+     - ``tile_N`` verdoppelt → Einbruch
    * - 128
-     - 0,0109
-     - 96,17
+     - 128
+     - 0,0119
+     - 88,2
+     - Zweierpotenz, kein Padding (Peak)
 
 .. figure:: ../../../../assignments/02_assignment/bandwidth_plot.png
    :align: center
-   :alt: Effective Bandwidth vs. N
+   :alt: Effective Bandwidth vs. N über die volle Range N=16…128
 
-   Effektive Speicherbandbreite des Copy-Kernels in Abhängigkeit von N.
+   Effektive Speicherbandbreite des Copy-Kernels über die volle Range
+   ``N = 16 … 128`` (Schrittweite 1). Deutlich sichtbar ist das Sägezahn-Muster.
 
 **Beobachtungen:**
 
-* Die Bandbreite steigt von 27 GB/s (N=16) auf 96 GB/s (N=128) mit
-  wachsendem N, weil größere Tiles den Overhead pro Speichertransaktion
-  amortisieren und der Speicherbus besser ausgelastet wird.
-* Bei N=96 (nicht Zweierpotenz) sinkt die Bandbreite leicht gegenüber N=80,
-  da ``tile_N`` auf 128 aufgerundet wird. Die 32 zusätzlichen Padding-Elemente
-  pro Zeile werden geladen und gespeichert, tragen aber nicht zur nützlichen
-  Datenmenge bei, was die effektive Bandbreite drückt.
-* Die höchste gemessene Bandbreite (≈ 96 GB/s bei N=128) entspricht einem
-  Bruchteil der theoretischen Spitzenbandbreite des DGX Spark, was zeigt,
-  dass einfache Copy-Workloads noch nicht den Speicher sättigen.
+* **Grundtrend:** Über die gesamte Range steigt die effektive Bandbreite mit
+  wachsendem N (von ≈ 22 GB/s am unteren Ende auf ≈ 88 GB/s bei N=128), weil
+  breitere zusammenhängende Transfers den Overhead pro Speichertransaktion
+  besser amortisieren und den Speicherbus höher auslasten.
+* **Sägezahn durch Padding:** Der Kernel rundet ``tile_N`` auf die nächste
+  Zweierpotenz auf. Innerhalb eines Bandes (z. B. ``33 ≤ N ≤ 64`` mit
+  ``tile_N = 64``) wächst der Nutzanteil ``N / tile_N`` mit N, sodass die
+  effektive Bandbreite ansteigt und an der Zweierpotenz ihr lokales Maximum
+  erreicht (kein Padding). Beim nächsten Schritt (``N → N+1``) verdoppelt sich
+  ``tile_N``, und fast die Hälfte des geladenen und gespeicherten Tiles ist
+  Padding, das nicht zur Nutzdatenmenge zählt. Genau dort bricht die effektive
+  Bandbreite scharf ein – am deutlichsten bei ``N = 17, 33, 65`` (direkt über
+  den Zweierpotenzen 16, 32, 64). Erst die volle Range macht dieses Muster
+  sichtbar; eine grobe 16er-Abtastung würde daran vorbeimessen.
+* **Sekundär-Spitzen an Vielfachen von 16:** Dem Grundtrend überlagert zeigt
+  der Plot zusätzlich regelmäßige Spitzen bei Vielfachen von 16 (``N = 48, 80,
+  96, 112``); bei ``N = 48`` wird z. B. fast derselbe Wert wie am Band-Peak
+  ``N = 64`` erreicht. Ursache ist die Ausrichtung an der Transaktions-
+  Granularität: Bei FP16 (2 Byte) entspricht ein Vielfaches von 16 Elementen
+  genau einer 32-Byte-Grenze, sodass jede Zeile sauber am Speicher-Sektor
+  ausgerichtet beginnt und weniger Teil-Transaktionen anfallen. Zwischen diesen
+  Vielfachen driften die Zeilenanfänge aus der Ausrichtung, was ein paar
+  Prozent Bandbreite kostet.
+* **Absolutwerte:** Die höchste gemessene Bandbreite (≈ 88 GB/s bei N=128) ist
+  nur ein Bruchteil der theoretischen Spitzenbandbreite des DGX Spark – ein
+  einfacher Copy-Workload mit schmalen Tiles sättigt den Speicher also noch
+  nicht.
 
 Verifikation – Gesamtübersicht
 ===============================
@@ -416,9 +453,9 @@ Verifikation – Gesamtübersicht
      - ``torch.equal``
      - ✓ exakte Kopie
    * - 4b
-     - Bandwidth-Sweep N=16…128
+     - Bandwidth-Sweep N=16…128 (Schritt 1, 113 Punkte)
      - —
-     - 27–96 GB/s, steigend
+     - ≈ 22–88 GB/s, steigend (Sägezahn durch Padding)
 
 Beiträge
 =========

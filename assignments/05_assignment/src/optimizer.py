@@ -54,18 +54,34 @@ class Optimizer:
         size_a = cfg.dim_sizes[dim_id_a]
         size_b = cfg.dim_sizes[dim_id_b]
 
+        # Adjazenz UND konsistente relative Reihenfolge ueber alle Tensoren,
+        # in denen beide Dims auftauchen. "ab" = a aussen/b innen (Reihenfolge
+        # a,b), "ba" = b aussen/a innen. Waere die Reihenfolge in Tensor X "ab"
+        # und in Tensor Y "ba", sind beide je fuer sich benachbart, lassen sich
+        # aber nicht zu EINER konsistenten Dimension verschmelzen.
+        order = None
         for t, strides in enumerate(cfg.strides):
             stra, strb = strides[dim_id_a], strides[dim_id_b]
             if stra == 0 or strb == 0:
                 # Mindestens eine Dim fehlt in diesem Tensor -> Adjacency
                 # ist trivial erfuellt (sie sind nicht beide hier).
                 continue
-            adjacent = (stra == strb * size_b) or (stra * size_a == strb)
-            if not adjacent:
+            if stra == strb * size_b:
+                this = "ab"
+            elif stra * size_a == strb:
+                this = "ba"
+            else:
                 raise ValueError(
                     f"fuse_dims({dim_id_a}, {dim_id_b}): dims not adjacent "
                     f"in tensor {t} (stride_a={stra}, size_a={size_a}, "
                     f"stride_b={strb}, size_b={size_b})")
+            if order is None:
+                order = this
+            elif order != this:
+                raise ValueError(
+                    f"fuse_dims({dim_id_a}, {dim_id_b}): dims adjacent but "
+                    f"relative order differs in tensor {t} ({order} vs {this}) "
+                    f"- fusion not well-defined")
 
         new_strides = []
         for strides in cfg.strides:
@@ -263,6 +279,29 @@ if __name__ == "__main__":
     except ValueError as e:
         print(f"  SEQ left of PRIM violated: {e}")
 
+    # ----- fuse_dims: benachbart, aber inkonsistente relative Reihenfolge
+    print()
+    print("=" * 70)
+    print("fuse_dims(): adjazent, aber Reihenfolge unterschiedlich -> abgelehnt")
+    print("=" * 70)
+    from config import DataType, PrimType, LastType, FirstType
+    # Dims a (size 2), b (size 3). Tensor 0: Reihenfolge a,b (stra=3, strb=1).
+    # Tensor 1: Reihenfolge b,a (strb=2, stra=1). Beide je fuer sich benachbart,
+    # aber nicht konsistent -> fuse muss scheitern.
+    cfg4 = Config(
+        data_type=DataType.FLOAT16, prim_main=PrimType.GEMM,
+        prim_last=LastType.NONE, prim_first=FirstType.ZERO,
+        dim_types=[DimType.M, DimType.N],
+        exec_types=[ExecType.SEQ, ExecType.SEQ],
+        dim_sizes=[2, 3],
+        strides=[[3, 1], [1, 2]],
+    )
+    opt4 = Optimizer(cfg4)
+    try:
+        opt4.fuse_dims(0, 1)
+        print("  FEHLER: fuse haette scheitern muessen!")
+    except ValueError as e:
+        print(f"  inkonsistente Reihenfolge abgelehnt: {e}")
 
 
 """Ergebnisse

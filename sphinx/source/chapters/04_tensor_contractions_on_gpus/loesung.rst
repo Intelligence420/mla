@@ -155,8 +155,7 @@ dasselbe – eine M-Dim wandert vom Grid in eine innere Schleife.
 **Mapping**
 
 * GEMM-Dimensionen: ``x``, ``y``, ``z`` (wie b)
-* Sequentialisiert: ``k``, ``l``, Tiles entlang ``y``, **zusätzlich
-  ``b``**
+* Sequentialisiert: ``k``, ``l``, Tiles entlang ``y``, zusätzlich ``b``
 * Parallelisiert: ``e``, ``a``, ``c`` sowie Tiles entlang ``x``, ``z``
 
 Das Grid schrumpft um den Faktor ``|b|``: ``(E·A, C, ⌈X/tx⌉·⌈Z/tz⌉)``.
@@ -187,21 +186,29 @@ wiederverwendet.
        out = ct.reshape(ct.astype(acc, C.dtype), (1, 1, 1, 1, tx, tz))
        ct.store(C, index=(pid_e, pid_a, bb, pid_c, pid_x, pid_z), tile=out)
 
-**Vermutung & Tests**
+**Trade-off & Konfigurationswahl**
 
-Trade-off: c) gewinnt B-Tile-Reuse über die b-Schleife, verliert
-aber den b-Faktor im Grid – c) vorne erwartet bei großem ``|b|``,
-b) vorne bei kleinem ``|b|``. Getestet:
+c) gewinnt den B-Tile-Reuse über die b-Schleife (das B-Tile
+``B[e,c,k,l,y,z]`` hängt nicht von ``b`` ab), verliert aber den ``b``-Faktor
+im Grid. Der Reuse zahlt sich jedoch **nur dann aus, wenn das B-Tensor den
+24 MB L2 der GB10 sprengt**: Erst dann kostet b)s ``|b|``-fache Nachladung
+derselben B-Tiles echte DRAM-Bandbreite, während c) sie pro Block aus dem L2
+hält. Passt ``B`` dagegen in den L2 (kleine Dimensionen), bekommt b) exakt
+denselben Reuse gratis – dann bleibt c) nur der Occupancy-Nachteil des
+kleineren Grids. Zweite Bedingung: c)s Grid muss trotz sequentialisiertem
+``b`` groß genug bleiben, um die 48 SMs zu sättigen. Getestet:
 
-* ``|b|=2``, ``|a|·|c|=64`` → Erwartung b) vorne.
-* ``|b|=16``, ``|a|·|c|=4`` → Erwartung c) vorne.
+* **b) vorne:** ``B ≈ 1 MB`` (passt in L2), viel Restparallelität
+  (``|a|·|c| = 64``).
+* **c) vorne:** ``B ≈ 32 MB > L2`` (``E=8, C=8, K=4, L=4, Y=64, Z=256``), Grid
+  bleibt mit ``(E·A, C, ⌈X/tx⌉·⌈Z/tz⌉) = (16, 8, 32) = 4096`` Blöcken groß.
 
 Task 1d: GEMM = (x, y·l, z), l und y gemerged
 ----------------------------------------------
 
 *dritte* Skizze: ``# Matmul shape = (x, z, y * l)``
-mit nur noch einer äußeren ``for k``-Schleife. Wir greifen das volle Merging
-(Variante 4) hier nicht auf ``(x, z, y·l·k)``.
+mit nur noch einer äußeren ``for k``-Schleife. Das vollständige Merging bis
+``(x, z, y·l·k)`` (also inklusive ``k``) treiben wir hier bewusst nicht weiter.
 
 **Mapping**
 
@@ -274,7 +281,7 @@ mma-Aufrufs statt über das Grid verteilt.
 * Sequentialisiert: ``k``, ``l``, Tiles entlang ``y``
 * Parallelisiert: ``a``, ``b``, ``c`` sowie Tiles entlang ``e``, ``x``, ``z``
 
-Batch-Dim direkt über mehrere SM-Lanes / Mma-Instructions abgedeckt, statt ``e``
+Die Batch-Dim wird direkt über mehrere mma-Instruktionen abgedeckt, statt ``e``
 in den Grid-Index zu falten. Akkumulator ist 3D:
 
 .. code-block:: python
@@ -330,25 +337,25 @@ FP32-Akkumulator, GEMM-Tile ``(32, 32, 32)``:
      - ms
      - TFLOPS
      - Schneller
-   * - ``|b|=2, |a|·|c|=64, X=Y=Z=128`` (FLOPs ≈ 2.15·10⁹)
+   * - ``B ≈ 1 MB (in L2), |a|·|c|=64`` (FLOPs ≈ 2.15·10⁹)
      - b)
-     - 0.524
-     - **4.10**
-     - **b) (2.0×)**
+     - 0.559
+     - **3.84**
+     - **b) (1.9×)**
    * -
      - c)
-     - 1.046
-     - 2.05
+     - 1.065
+     - 2.02
      -
-   * - ``|b|=16, |a|·|c|=4, X=Y=Z=128`` (FLOPs ≈ 5.37·10⁸)
+   * - ``B ≈ 32 MB (> L2), Grid 4096`` (FLOPs ≈ 6.87·10¹⁰)
      - b)
-     - 0.161
-     - **3.35**
-     - **b) (2.3×)**
+     - 45.44
+     - 1.51
+     - **c) (1.08×)**
    * -
      - c)
-     - 0.362
-     - 1.48
+     - 42.10
+     - **1.63**
      -
 
 .. list-table:: b) vs d)
@@ -362,23 +369,23 @@ FP32-Akkumulator, GEMM-Tile ``(32, 32, 32)``:
      - Schneller
    * - ``|l|=8, |y|=32, X=Z=128`` (FLOPs ≈ 1.07·10⁹)
      - b)
-     - 0.500
-     - 2.15
-     - **d) (1.30×)**
+     - 0.492
+     - 2.18
+     - **d) (1.17×)**
    * -
      - d)
-     - 0.386
-     - **2.78**
+     - 0.420
+     - **2.55**
      -
    * - ``|l|=1, |y|=64, X=Z=128`` (FLOPs ≈ 1.07·10⁹)
      - b)
-     - 0.528
-     - **2.03**
-     - b) (≈)
+     - 0.551
+     - 1.95
+     - ≈ (Gleichstand)
    * -
      - d)
-     - 0.538
-     - 2.00
+     - 0.565
+     - 1.90
      -
 
 .. list-table:: Quervergleich b) / d) / e), ``|e|=4``
@@ -390,16 +397,16 @@ FP32-Akkumulator, GEMM-Tile ``(32, 32, 32)``:
      - TFLOPS
      - vs b)
    * - b)
-     - 0.096
-     - 2.79
+     - 0.107
+     - 2.52
      - 1.00×
    * - d)
-     - 0.082
-     - **3.27**
-     - 1.17×
+     - 0.085
+     - **3.14**
+     - 1.25×
    * - e)
-     - 0.203
-     - 1.32
+     - 0.226
+     - 1.19
      - 0.47×
 
 .. figure:: ../../../../assignments/04_assignment/src/task01_bc_vs_bd.png
@@ -422,15 +429,21 @@ FP32-Akkumulator, GEMM-Tile ``(32, 32, 32)``:
 Beobachtungen und Vermutungen
 ------------------------------
 
-* **b) vs c)**: b) gewinnt in *beiden* Konfigurationen – bei
-  ``|b|=16`` läuft das Gegenteil der Erwartung (3.35 vs 1.48 TFLOPS).
-  Vermutung: der L2-Reuse-Gewinn wird vom Occupancy-Verlust
-  überkompensiert. 
-* **b) vs d)**: wie erwartet. d) mit ~30 % vorne bei ``|l|=8``,
+* **b) vs c)**: Der Ausgang hängt daran, ob das B-Tensor in den L2 passt.
+  Bei kleinem ``B`` (≈ 1 MB) gewinnt b) klar (3.84 vs 2.02 TFLOPS): b) zieht
+  dieselben B-Tiles gratis aus dem L2, sodass c)s sequentialisiertem ``b`` nur
+  der Occupancy-Nachteil des kleineren Grids bleibt. Sobald ``B`` den 24 MB L2
+  überschreitet (hier ≈ 32 MB), dreht sich das Bild: c) ist ~8 % schneller
+  (1.63 vs 1.51 TFLOPS), weil b)s ``|b|``-fache B-Nachladung nun echte
+  DRAM-Bandbreite kostet, während c) das B-Tile pro Block über die b-Schleife
+  im L2 hält. Der L2-Reuse-Vorteil von c) ist also real, aber an ein großes,
+  nicht-cachebares ``B`` gebunden – bei kleinen, L2-residenten Tensoren
+  existiert er schlicht nicht.
+* **b) vs d)**: wie erwartet. d) mit ~17 % vorne bei ``|l|=8``,
   Vorteil verschwindet bei ``|l|=1``. So wie wir es in VL angesprochen hatten: mehr
   K-Merging → größere innere GEMM-K → bessere Tensor-Core-Auslastung,
   aber nur wenn die gemergte Dim ``>1`` ist.
-* **b/d/e**: e) ist ~2× langsamer als d). Vermutung: ``te=2`` mit
+* **b/d/e**: e) ist ≈ 2,6× langsamer als d). Vermutung: ``te=2`` mit
   ``|e|=4`` halbiert das Grid und bläht den Akkumulator auf
   ``(te, tx, tz)`` – Occupancy sinkt
 
@@ -524,8 +537,8 @@ Damit die Kontraktion ``≈ 2 · 2048³`` FLOPs hat, wählen wir
 
 und damit :math:`2 \cdot 2 \cdot 2 \cdot 2 \cdot 2 \cdot 8 \cdot 4
 \cdot 256^3 \approx 1{,}72 \cdot 10^{10}` FLOPs – exakt der
-2048³-Matmul-Workload. Speicher (FP16): :math:`A \approx 67` MB,
-:math:`B \approx 33` MB, :math:`C, D \approx 4` MB jeweils, also unkritisch.
+2048³-Matmul-Workload. Speicher (FP16): :math:`A \approx 34` MB,
+:math:`B \approx 17` MB, :math:`C, D \approx 2` MB jeweils, also unkritisch.
 
 Tile-Geometrie ``(tx, ty, tz) = (64, 32, 64)``.
 
@@ -809,7 +822,7 @@ Auszug:
   gleichbleibender Arbeit), brechen am Stufen-Übergang abrupt ein
   (gleicher Zähler, doppelte Arbeit) und wachsen dann wieder linear.
 * Der Peak knapp vor :math:`|n| = 64` (≈ 33 TFLOPS) ist ähnlich hoch
-  wie der Peak knapp vor :math:`|n| = 128` (≈ 43 TFLOPS) – die zweite
+  wie der Peak knapp vor :math:`|n| = 128` (≈ 38 TFLOPS) – die zweite
   Stufe ist sogar etwas effizienter, weil der Launch-Overhead konstant
   bleibt, die Arbeit aber doppelt so groß ist.
 * Zweierpotenzen sind in dieser Konfiguration **nicht besser**, sondern
@@ -918,7 +931,7 @@ Erkenntnisse: Sweep über ``|k|`` (Task 3b.2)
   Zweierpotenz-Bonus, sondern die direkte Folge davon, dass diese
   Werte zufälligerweise auch Vielfache von ``tk = 32`` sind. Würde
   man ``tk = 64`` wählen, wären 32 und 96 plötzlich schlechte Werte.
-* Die maximalen TFLOPS dieses Kernels (~36 TFLOPS bei kleinem Setup)
+* Die maximalen TFLOPS in diesem :math:`|k|`-Sweep (~36 TFLOPS)
   liegen klar unter dem Matmul-Peak aus Assignment 03 (~75 TFLOPS).
   Grund: das Grid hat hier nur :math:`|a| \cdot |b| \cdot
   \lceil n/64 \rceil \cdot \lceil m/64 \rceil = 16 \cdot 16 = 256`
@@ -939,9 +952,14 @@ Praktische Konsequenz
   *autotuning* der Tile-Shapes oder *Padding der Eingaben* auf
   Vielfache der Tile-Größe (das verschiebt die Verlust-Periodizität,
   beseitigt sie aber nicht).
-* Die Sägezahn-Charakteristik im :math:`|k|`-Sweep ist genau das
-  Symptom, das in der Vorlesung als *Wave Quantization* angesprochen
-  wurde – nur eben innerhalb eines Blocks statt zwischen Blocks.
+* Die Sägezahn-Charakteristik im :math:`|k|`-Sweep ist das Symptom der
+  *Tile-Quantisierung*: die K-Dimension wird durch ``⌈|k|/tk⌉`` K-Tiles
+  auf ein Vielfaches von ``tk = 32`` gepaddet, und die Arbeit auf den
+  Padding-Werten fließt nicht in nutzbare FLOPs. Da :math:`|m|` und
+  :math:`|n|` hier fix sind, bleibt die Blockzahl (256) über den ganzen
+  Sweep konstant – der Effekt ist rein blockintern und nicht mit der
+  *Wave Quantization* (Auslastungsverlust, wenn die Gesamtzahl der Blöcke
+  kein Vielfaches der gleichzeitig laufenden Wave ist) zu verwechseln.
 
 Beiträge
 =========
@@ -960,5 +978,5 @@ Beiträge
      - Implementierung Task 2 (Fused-Kontraktions-/Elementwise-Kernel,
        Verifikation und Vergleich gegen den sequentiellen Pfad bei
        2048³-FLOP-Workload) und Task 3 (Kontraktion ``ackm,bcnk->abnm``
-       mit |a|=16, |b|=16, |c|=32, Sweeps über |n| und |k| samt Plots),
-       Sphinx-Report-Abschnitte zu Task 2 und 3
+       mit ``|a|=16, |b|=16, |c|=32``, Sweeps über ``|n|`` und ``|k|`` samt
+       Plots), Sphinx-Report-Abschnitte zu Task 2 und 3
