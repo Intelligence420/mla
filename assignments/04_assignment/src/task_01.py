@@ -457,7 +457,7 @@ def benchmark():
     cfg_bd_b = dict(E=2, A=4, B=2, C=4, K=8, L=1, X=128, Y=64, Z=128)
     res_bd_d = bench_compare("Setting wo d) vorne ist (L gross, Y klein)",
                              cfg_bd_d, [("b)", run_b), ("d)", run_d)])
-    res_bd_b = bench_compare("Setting wo b) vorne ist (L=1, Y gross)",
+    res_bd_b = bench_compare("Setting L=1: b) und d) sind algorithmisch identisch (Gleichstand)",
                              cfg_bd_b, [("b)", run_b), ("d)", run_d)])
 
     # e) - Quervergleich auf einer mittleren Konfiguration
@@ -474,7 +474,7 @@ def benchmark():
         ],
         "bd": [
             ("d > b (|l|=8, |y|=32)",     cfg_bd_d, res_bd_d),
-            ("b > d (|l|=1, |y|=64)",     cfg_bd_b, res_bd_b),
+            ("b ≈ d (|l|=1: identisch)",  cfg_bd_b, res_bd_b),
         ],
         "e":  [("Quervergleich b/d/e",    cfg_e,    res_e)],
     }
@@ -578,37 +578,37 @@ Task 1: Benchmark
   Setting wo b) vorne ist (B klein, passt in L2)
     dims = {'E': 2, 'A': 8, 'B': 2, 'C': 8, 'K': 2, 'L': 2, 'X': 128, 'Y': 64, 'Z': 128}
     FLOPs = 2.147e+09
-    b)           0.5271 ms     4.074 TFLOPS
-    c)           1.0592 ms     2.028 TFLOPS
+    b)           0.5588 ms     3.843 TFLOPS
+    c)           1.0648 ms     2.017 TFLOPS
 
   Setting wo c) vorne ist (B = 32 MB > L2)
     dims = {'E': 8, 'A': 2, 'B': 8, 'C': 8, 'K': 4, 'L': 4, 'X': 128, 'Y': 64, 'Z': 256}
     FLOPs = 6.872e+10
-    b)          44.6730 ms     1.538 TFLOPS
-    c)          40.2975 ms     1.705 TFLOPS
+    b)          45.4407 ms     1.512 TFLOPS
+    c)          42.1018 ms     1.632 TFLOPS
 
 === Vergleich b) vs d) ===
 
   Setting wo d) vorne ist (L gross, Y klein)
     dims = {'E': 2, 'A': 4, 'B': 2, 'C': 4, 'K': 2, 'L': 8, 'X': 128, 'Y': 32, 'Z': 128}
     FLOPs = 1.074e+09
-    b)           0.4882 ms     2.199 TFLOPS
-    d)           0.4030 ms     2.664 TFLOPS
+    b)           0.4916 ms     2.184 TFLOPS
+    d)           0.4204 ms     2.554 TFLOPS
 
-  Setting wo b) vorne ist (L=1, Y gross)
+  Setting L=1: b) und d) sind algorithmisch identisch (Gleichstand)
     dims = {'E': 2, 'A': 4, 'B': 2, 'C': 4, 'K': 8, 'L': 1, 'X': 128, 'Y': 64, 'Z': 128}
     FLOPs = 1.074e+09
-    b)           0.5357 ms     2.004 TFLOPS
-    d)           0.5281 ms     2.033 TFLOPS
+    b)           0.5505 ms     1.950 TFLOPS
+    d)           0.5647 ms     1.901 TFLOPS
 
 === Variante e) ===
 
   Quervergleich b) / d) / e)
     dims = {'E': 4, 'A': 2, 'B': 2, 'C': 2, 'K': 2, 'L': 2, 'X': 128, 'Y': 64, 'Z': 128}
     FLOPs = 2.684e+08
-    b)           0.0961 ms     2.792 TFLOPS
-    d)           0.0821 ms     3.271 TFLOPS
-    e)           0.2106 ms     1.275 TFLOPS
+    b)           0.1065 ms     2.521 TFLOPS
+    d)           0.0854 ms     3.141 TFLOPS
+    e)           0.2255 ms     1.190 TFLOPS
 
 Task 1: Plot
   Plot: /home/mla08/MLA/mla/assignments/04_assignment/src/task01_bc_vs_bd.png
