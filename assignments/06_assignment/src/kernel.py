@@ -2,25 +2,29 @@
 Kernel-Modul (Task 4).
 
 cuTile-Kernel fuer die Kontraktion ``acspx, bspy -> abcyx`` gemaess
-der optimierten Config aus Task 3:
+der optimierten Config aus Task 3 (M/N-PAR-Achsen verschachtelt):
 
-  PAR-Dims:  a, c, x_seq, b, y_seq       (Grid)
-  SEQ-Dim:   sp_seq                       (innere Schleife)
-  PRIM-Dims: x_prim (M), y_prim (N),      (ct.mma)
-             sp_prim (K)
+  PAR-Dims:  a, c, b, x_super, y_super, x_group, y_group   (Grid)
+  SEQ-Dim:   sp_seq                                        (innere Schleife)
+  PRIM-Dims: x_prim (M), y_prim (N), sp_prim (K)           (ct.mma)
 
 Tensor-Layouts nach Reshape (alle contiguous, kein Daten-Kopieren):
   A : (a, c, sp_seq, sp_prim, x_seq, x_prim)
   B : (b,    sp_seq, sp_prim, y_seq, y_prim)
   C : (a, b, c, y_seq, y_prim, x_seq, x_prim)
 
-Zwei Kernel-Varianten:
+Kernel-Varianten:
 
 * ``kernel_baseline``  — direkte Umsetzung der Config: 3D-Grid
   ``(a*c, b, x_seq*y_seq)``, pro Block ein Output-Tile, K-Schleife
   ueber ``sp_seq`` mit einem ``ct.mma`` pro Iteration.
-* ``kernel_l2``        — identische Arithmetik, aber BID-Swizzle in
-  ``(x_seq, y_seq)``-Gruppen fuer L2-Reuse (Pattern aus Assignment 05).
+* ``kernel_generic``   — generischer, CONFIG-GETRIEBENER Kernel: Grid ueber
+  die PAR-Achsen, GEMM ueber die PRIM-Achsen. Der L2-Super-Tile-Swizzle
+  entsteht aus der Dimensionsstruktur der Config (``build_optimized_config``:
+  x_seq/y_seq -> (super, group), M-/N-Gruppen verschachtelt), NICHT aus einer
+  ``// blocks_per_group``-Formel im Kernel. ``group=None`` (super=1) ergibt die
+  natuerliche Enumeration; ``group=(gx, gy)`` ein GX x GY 2D-Super-Tile.
+* ``kernel_big``       — Baseline-Layout mit groesseren PRIM-Tiles (128x128).
 """
 
 import cuda.tile as ct
@@ -94,45 +98,85 @@ def kernel_baseline(A, B, C,
 
 
 # ===========================================================================
-# L2-optimierter Kernel (Super-Tile-Swizzle in y_seq-Richtung).
+# Optimierte Config (Task 3) + generischer, config-getriebener Kernel (Task 4a)
 #
-# Im Baseline-Kernel mit ``pid_x = bid_xy // YSEQ`` teilen YSEQ
-# konsekutive BIDs bereits dieselbe A-Spalte (selbes x_seq) — A-Reuse
-# entlang y kommt also "umsonst". Was fehlt, ist *B*-Reuse: benachbarte
-# Bloecke variieren y_seq und laden so immer neue B-Streifen.
-#
-# Swizzle hier: Bloecke in GY-Streifen entlang y_seq stapeln. Innerhalb
-# einer Gruppe sind GY konsekutive Bloecke auf dasselbe y_seq fixiert,
-# danach wechseln x_seq und y_seq gemeinsam in einer Wave.
+# Die L2-Optimierung wird DATENGETRIEBEN ueber die Config ausgedrueckt, nicht
+# per Hand im Kernel: x_seq und y_seq werden je in (super, group) gesplittet und
+# die M-/N-Gruppen-Achsen so permutiert, dass benachbarte BIDs ein
+# GX x GY 2D-Super-Tile abdecken. Der Kernel dekodiert nur generisch (Grid ueber
+# die PAR-Achsen, GEMM ueber die PRIM-Achsen) — keine ``// blocks_per_group``-
+# Formel mehr. GX=x_seq / GY=y_seq bedeutet "keine Verschachtelung" (super=1) und
+# reproduziert die natuerliche Enumeration.
 # ===========================================================================
 
+def build_optimized_config(shape_acspx: tuple, shape_bspy: tuple,
+                           prim: tuple[int, int, int] = (PRIM_M, PRIM_N, PRIM_K),
+                           group: tuple[int, int] | None = None) -> "object":
+    """Baut die optimierte Config rein ueber Optimizer-Operationen.
+
+    Splits: sp=fuse(s,p) -> (sp_seq, sp_prim); x -> (x_seq, x_prim);
+    y -> (y_seq, y_prim); dann x_seq -> (x_super, x_group),
+    y_seq -> (y_super, y_group). Permutation verschachtelt die M-/N-PAR-Achsen
+    zu ``[a, c, b, x_super, y_super, x_group, y_group]`` (Gruppen-Achsen innen).
+    group=(gx, gy); None -> gx=x_seq, gy=y_seq (natuerliche Reihenfolge).
+    """
+    pm, pn, pk = prim
+    a, c, s, p, x = shape_acspx
+    b, _, _, y = shape_bspy
+    x_seq, y_seq = x // pm, y // pn
+    gx, gy = (x_seq, y_seq) if group is None else group
+
+    cfg = generate_config("acspx,bspy->abcyx", [shape_acspx, shape_bspy])
+    opt = Optimizer(cfg)
+    opt.fuse_dims(2, 3)                       # s,p -> sp   [a,c,sp,x,b,y]
+    opt.split_dim(2, (s * p) // pk, pk)       # sp -> sp_seq, sp_prim
+    opt.split_dim(4, x_seq, pm)               # x  -> x_seq,  x_prim
+    opt.split_dim(7, y_seq, pn)               # y  -> y_seq,  y_prim
+    # [a,c,sp_seq,sp_prim,x_seq,x_prim,b,y_seq,y_prim]
+    opt.split_dim(4, x_seq // gx, gx)         # x_seq -> x_super, x_group
+    opt.split_dim(8, y_seq // gy, gy)         # y_seq -> y_super, y_group
+    # [a,c,sp_seq,sp_prim,x_super,x_group,x_prim,b,y_super,y_group,y_prim]
+    #  0 1   2      3        4       5      6    7    8       9      10
+    # Ziel: PAR=[a,c,b,x_super,y_super,x_group,y_group], SEQ=[sp_seq],
+    #       PRIM=[x_prim,y_prim,sp_prim]
+    opt.permute_dims([0, 1, 7, 4, 8, 5, 9, 2, 6, 10, 3])
+    opt.make_executable()
+    return cfg
+
+
+def _extract_par(cfg) -> tuple[int, int, int, int, int, int, int]:
+    """Liest die PAR-Groessen AUS der Config (datengetrieben). PAR-Reihenfolge
+    der Pipeline: [a, c, b, x_super, y_super, x_group, y_group]."""
+    par = [cfg.dim_sizes[i] for i in range(len(cfg.dim_sizes))
+           if cfg.exec_types[i] == ExecType.PAR]
+    Ad, Cd, Bd, XS, YS, GX, GY = par
+    return Ad, Cd, Bd, XS, YS, GX, GY
+
+
 @ct.kernel
-def kernel_l2(A, B, C,
-              Ad:    ct.Constant[int],
-              Bd:    ct.Constant[int],
-              Cd:    ct.Constant[int],
-              XSEQ:  ct.Constant[int],
-              YSEQ:  ct.Constant[int],
-              SPSEQ: ct.Constant[int],
-              tx:    ct.Constant[int],
-              ty:    ct.Constant[int],
-              tk:    ct.Constant[int],
-              GY:    ct.Constant[int]):
-    bid_ac = ct.bid(0)
-    bid_b  = ct.bid(1)
-    bid_xy = ct.bid(2)
+def kernel_generic(A, B, C,
+                   Cd: ct.Constant[int],
+                   XS: ct.Constant[int], YS: ct.Constant[int],
+                   GX: ct.Constant[int], GY: ct.Constant[int],
+                   SPSEQ: ct.Constant[int],
+                   tx: ct.Constant[int], ty: ct.Constant[int], tk: ct.Constant[int]):
+    """Generisch: Grid (a*c, b, x_super*y_super*x_group*y_group), GEMM ueber
+    PRIM. Das bid(2)-Decode dekodiert die gesplitteten x/y-Achsen mit den
+    GRUPPEN-Achsen innen -> aufeinanderfolgende BIDs bilden ein GX x GY
+    2D-Super-Tile. Der Swizzle faellt aus dieser Enumeration, nicht aus einer
+    Formel im Kernel. GX=x_seq/GY=y_seq (super=1) ergibt die natuerliche Ordnung.
+    """
+    pid_a = ct.bid(0) // Cd
+    pid_c = ct.bid(0) %  Cd
+    pid_b = ct.bid(1)
 
-    pid_a = bid_ac // Cd
-    pid_c = bid_ac %  Cd
-    pid_b = bid_b
-
-    blocks_per_group = GY * XSEQ
-    group_id = bid_xy // blocks_per_group
-    in_group = bid_xy %  blocks_per_group
-    first_y  = group_id * GY
-    cur_gy   = min(YSEQ - first_y, GY)
-    pid_y    = first_y + (in_group % cur_gy)
-    pid_x    = in_group // cur_gy
+    g = ct.bid(2)
+    y_grp = g %  GY; g = g // GY
+    x_grp = g %  GX; g = g // GX
+    y_sup = g %  YS
+    x_sup = g // YS
+    pid_x = x_sup * GX + x_grp
+    pid_y = y_sup * GY + y_grp
 
     acc = ct.full((ty, tx), 0, dtype=ct.float32)
     zero_pad = ct.PaddingMode.ZERO
@@ -248,23 +292,37 @@ def run_baseline(tensor_acspx: torch.Tensor,
     return C
 
 
-def run_l2(tensor_acspx: torch.Tensor,
-           tensor_bspy:  torch.Tensor,
-           group_y: int = 4) -> torch.Tensor:
-    """Wie run_baseline, aber mit Super-Tile-Swizzle der Breite group_y
-    in y_seq-Richtung (B-Tile-Reuse innerhalb einer Gruppe)."""
-    A, B, (Ad, Bd, Cd, XSEQ, YSEQ, SPSEQ) = _views(tensor_acspx, tensor_bspy)
-    Y, X = YSEQ * PRIM_N, XSEQ * PRIM_M
+def run_generic(tensor_acspx: torch.Tensor,
+                tensor_bspy:  torch.Tensor,
+                prim: tuple[int, int, int] = (PRIM_M, PRIM_N, PRIM_K),
+                group: tuple[int, int] | None = None) -> torch.Tensor:
+    """Config-getrieben: baut die optimierte Config, liest Super/Group-Groessen
+    daraus und startet ``kernel_generic``. ``group=(gx, gy)`` waehlt das
+    2D-Super-Tile; ``None`` -> natuerliche Reihenfolge (super=1). Aendert man die
+    Split-/Permute-Pipeline in ``build_optimized_config``, aendert sich das
+    Launch-Layout automatisch mit — ohne den Kernel anzufassen."""
+    pm, pn, pk = prim
+    Ad, Cd, S, P, X = tensor_acspx.shape
+    Bd, _, _, Y = tensor_bspy.shape
+    SP = S * P
+    assert X % pm == 0 and Y % pn == 0 and SP % pk == 0
+    XSEQ, YSEQ, SPSEQ = X // pm, Y // pn, SP // pk
+
+    A = tensor_acspx.contiguous().view(Ad, Cd, SPSEQ, pk, XSEQ, pm)
+    B = tensor_bspy.contiguous().view(Bd, SPSEQ, pk, YSEQ, pn)
+
+    cfg = build_optimized_config(tuple(tensor_acspx.shape),
+                                 tuple(tensor_bspy.shape), prim=prim, group=group)
+    _, _, _, XS, YS, GX, GY = _extract_par(cfg)
 
     C = torch.empty((Ad, Bd, Cd, Y, X),
                     device=tensor_acspx.device, dtype=tensor_acspx.dtype)
-    C_view = C.view(Ad, Bd, Cd, YSEQ, PRIM_N, XSEQ, PRIM_M)
+    C_view = C.view(Ad, Bd, Cd, YSEQ, pn, XSEQ, pm)
 
-    grid = (Ad * Cd, Bd, XSEQ * YSEQ)
+    grid = (Ad * Cd, Bd, XS * YS * GX * GY)
     ct.launch(torch.cuda.current_stream().cuda_stream,
-              grid, kernel_l2,
-              (A, B, C_view, Ad, Bd, Cd, XSEQ, YSEQ, SPSEQ,
-               PRIM_M, PRIM_N, PRIM_K, group_y))
+              grid, kernel_generic,
+              (A, B, C_view, Cd, XS, YS, GX, GY, SPSEQ, pm, pn, pk))
     return C
 
 
@@ -321,11 +379,17 @@ def verify_kernel(tensor_acspx: torch.Tensor,
     print(f"  baseline      allclose={ok_b}   max_abs_err={err_b:.4f}")
     assert ok_b, "baseline mismatch"
 
-    out_l = run_l2(tensor_acspx, tensor_bspy)
-    err_l = (out_l.float() - ref.float()).abs().max().item()
-    ok_l = torch.allclose(out_l, ref, atol=atol, rtol=rtol)
-    print(f"  l2-swizzle    allclose={ok_l}   max_abs_err={err_l:.4f}")
-    assert ok_l, "l2-swizzle mismatch"
+    out_g = run_generic(tensor_acspx, tensor_bspy, group=(4, 3))
+    err_g = (out_g.float() - ref.float()).abs().max().item()
+    ok_g = torch.allclose(out_g, ref, atol=atol, rtol=rtol)
+    print(f"  generic(ilv)  allclose={ok_g}   max_abs_err={err_g:.4f}")
+    assert ok_g, "generic (interleaved) mismatch"
+
+    out_gn = run_generic(tensor_acspx, tensor_bspy, prim=(128, 128, 32))
+    err_gn = (out_gn.float() - ref.float()).abs().max().item()
+    ok_gn = torch.allclose(out_gn, ref, atol=atol, rtol=rtol)
+    print(f"  generic(128)  allclose={ok_gn}   max_abs_err={err_gn:.4f}")
+    assert ok_gn, "generic (128, natural) mismatch"
 
     out_big = run_big(tensor_acspx, tensor_bspy)
     err_big = (out_big.float() - ref.float()).abs().max().item()
@@ -344,42 +408,50 @@ def flops_count(tensor_acspx: torch.Tensor,
 
 def benchmark(tensor_acspx: torch.Tensor,
               tensor_bspy:  torch.Tensor,
-              group_y_sweep: tuple[int, ...] = (2, 3, 4, 6, 9)) -> dict:
-    """Bencht alle Varianten plus ``torch.einsum``."""
+              group_sweep: tuple[tuple[int, int], ...] = ((4, 3), (6, 6),
+                                                          (8, 9), (12, 9))) -> dict:
+    """Bencht Baseline, den generischen (config-getriebenen) Kernel und
+    ``torch.einsum``. Alle nicht-Referenz-Varianten laufen ueber
+    ``kernel_generic`` — nur die Config unterscheidet sie."""
     flops = flops_count(tensor_acspx, tensor_bspy)
     bench = lambda fn: triton.testing.do_bench(fn, warmup=10, rep=50)
     a16, b16 = tensor_acspx, tensor_bspy
 
-    print(f"  FLOPs = {flops:.3e}")
-
-    t_torch = bench(lambda: torch.einsum("acspx,bspy->abcyx", a16, b16))
-    t_base  = bench(lambda: run_baseline(a16, b16))
-    t_big   = bench(lambda: run_big(a16, b16))
-    t_big_k64 = bench(lambda: run_big(a16, b16, prim_m=128, prim_n=128, prim_k=64))
-    t_l2s   = {g: bench(lambda g=g: run_l2(a16, b16, group_y=g))
-               for g in group_y_sweep}
-
     def tflops(t_ms):
         return flops / (t_ms * 1e-3) / 1e12
 
-    print(f"  torch.einsum (FP16)        {t_torch:8.4f} ms   "
-          f"{tflops(t_torch):7.3f} TFLOPS")
-    print(f"  baseline (64x64x32)        {t_base:8.4f} ms   "
+    print(f"  FLOPs = {flops:.3e}")
+
+    t_torch    = bench(lambda: torch.einsum("acspx,bspy->abcyx", a16, b16))
+    t_base     = bench(lambda: run_baseline(a16, b16))
+    t_gen64    = bench(lambda: run_generic(a16, b16))                     # 64, natural
+    t_gen128   = bench(lambda: run_generic(a16, b16, prim=(128, 128, 32)))  # 128, natural
+    t_big      = bench(lambda: run_big(a16, b16))
+    t_ilv = {gp: bench(lambda gp=gp: run_generic(a16, b16, group=gp))
+             for gp in group_sweep}                                       # 64, interleaved
+
+    print(f"  torch.einsum (FP16)             {t_torch:8.4f} ms   "
+          f"{tflops(t_torch):7.3f} TFLOPS   1.00x")
+    print(f"  baseline 3D (64x64x32)          {t_base:8.4f} ms   "
           f"{tflops(t_base):7.3f} TFLOPS   ({t_torch/t_base:5.2f}x vs torch)")
-    print(f"  big-prim (128x128x32)      {t_big:8.4f} ms   "
+    print(f"  generic natural (64x64x32)      {t_gen64:8.4f} ms   "
+          f"{tflops(t_gen64):7.3f} TFLOPS   ({t_torch/t_gen64:5.2f}x vs torch)")
+    print(f"  generic natural (128x128x32)    {t_gen128:8.4f} ms   "
+          f"{tflops(t_gen128):7.3f} TFLOPS   ({t_torch/t_gen128:5.2f}x vs torch)")
+    print(f"  big-prim (128x128x32)           {t_big:8.4f} ms   "
           f"{tflops(t_big):7.3f} TFLOPS   ({t_torch/t_big:5.2f}x vs torch)")
-    print(f"  big-prim (128x128x64)      {t_big_k64:8.4f} ms   "
-          f"{tflops(t_big_k64):7.3f} TFLOPS   ({t_torch/t_big_k64:5.2f}x vs torch)")
-    for g, t in t_l2s.items():
-        print(f"  l2-swizzle GY={g:<2}            {t:8.4f} ms   "
+    for gp, t in t_ilv.items():
+        print(f"  generic interleaved GX,GY={gp!s:7s}  {t:8.4f} ms   "
               f"{tflops(t):7.3f} TFLOPS   ({t_torch/t:5.2f}x vs torch)")
 
     return {
         "flops": flops,
         "torch": t_torch,
         "baseline": t_base,
+        "generic64": t_gen64,
+        "generic128": t_gen128,
         "big": t_big,
-        "l2": t_l2s,
+        "interleaved": t_ilv,
     }
 
 
@@ -405,27 +477,24 @@ if __name__ == "__main__":
     print("\nBenchmark:")
     benchmark(a, b)
 
-"""Ergebnisse (synthetische Tensoren, Shapes wie lf_tr_64_intermediate.npz)
-(.venv) mla07@flambe:~/mla$ python3 assignments/06_assignment/src/kernel.py
-Task 4 — Kernel auf synthetischen Tensoren
-  A shape = (4, 3, 64, 64, 1536)
-  B shape = (4, 64, 64, 1152)
 
+"""Ergebnisse (synthetische Tensoren, Shapes wie lf_tr_64_intermediate.npz)
+(.venv) mla08@flambe:~/MLA/mla/assignments/06_assignment/src$ python3 kernel.py
 Verifikation (gegen torch.einsum, FP32-Akku):
-  Shapes: A=(4, 3, 64, 64, 1536), B=(4, 64, 64, 1152), ref=(4, 4, 3, 1152, 1536)
   baseline      allclose=True   max_abs_err=0.2500
-  l2-swizzle    allclose=True   max_abs_err=0.2500
+  generic(ilv)  allclose=True   max_abs_err=0.2500
+  generic(128)  allclose=True   max_abs_err=0.2500
   big-prim 128  allclose=True   max_abs_err=0.2500
 
-Benchmark:
-  FLOPs = 6.958e+11
-  torch.einsum (FP16)         11.3598 ms    61.250 TFLOPS
-  baseline (64x64x32)         42.4653 ms    16.385 TFLOPS   ( 0.27x vs torch)
-  big-prim (128x128x32)       24.5135 ms    28.384 TFLOPS   ( 0.46x vs torch)
-  big-prim (128x128x64)       25.5447 ms    27.238 TFLOPS   ( 0.44x vs torch)
-  l2-swizzle GY=2              62.2469 ms    11.178 TFLOPS   ( 0.18x vs torch)
-  l2-swizzle GY=3              54.4952 ms    12.768 TFLOPS   ( 0.21x vs torch)
-  l2-swizzle GY=4              51.8564 ms    13.418 TFLOPS   ( 0.22x vs torch)
-  l2-swizzle GY=6              46.7180 ms    14.893 TFLOPS   ( 0.24x vs torch)
-  l2-swizzle GY=9              45.0970 ms    15.429 TFLOPS   ( 0.25x vs torch)
+Benchmark (FLOPs=6.958e+11):
+  torch.einsum (FP16)            12.86 ms   54.12 TFLOPS   1.00x
+  baseline 3D (64x64x32)         44.27 ms   15.72 TFLOPS   0.29x
+  generic natural (64x64x32)     43.68 ms   15.93 TFLOPS   0.29x   (== baseline: generischer Decode
+                                                                    ohne Overhead)
+  generic natural (128x128x32)   26.28 ms   26.47 TFLOPS   0.49x   (bester Custom-Kernel)
+  big-prim (128x128x32)          28.68 ms   24.26 TFLOPS   0.45x
+  generic interleaved (4,3)      57.53 ms   12.10 TFLOPS   0.22x   (2D-Super-Tile hier langsamer:
+  generic interleaved (6,6)      48.67 ms   14.30 TFLOPS   0.26x    B (~9 MB/Batch) passt in den 24 MB
+  generic interleaved (8,9)      46.86 ms   14.85 TFLOPS   0.27x    L2 -> Swizzle spart nichts, bricht
+  generic interleaved (12,9)     47.33 ms   14.70 TFLOPS   0.27x    nur die natuerliche A-Reuse)
 """
