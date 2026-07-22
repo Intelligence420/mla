@@ -44,10 +44,13 @@ def tflops(dims: dict, time_ms: float) -> float:
 
 
 def bench(runner, A, B, dims: dict,
-          n_warmup: int = 10, n_runs: int = 50, **kwargs) -> float:
+          warmup_ms: int = 200, rep_ms: int = 1000, **kwargs) -> float:
+    # warmup/rep sind bei triton.testing.do_bench Zeitbudgets in Millisekunden,
+    # keine Iterationszahlen. Grosszuegig gewaehlt, damit auch die ~45 ms teure
+    # Baseline ueber mehrere Iterationen gemittelt wird statt aus einem Einzel-Sample.
     return triton.testing.do_bench(
         lambda: runner(A, B, dims=dims, **kwargs),
-        warmup=n_warmup, rep=n_runs,
+        warmup=warmup_ms, rep=rep_ms,
     )
 
 
@@ -190,12 +193,11 @@ Task 4c - Verifikation gegen torch.einsum
 Task 4d - Benchmark  (C=4, M=N=K=4096, FLOPs=5.498e+11)
   kernel                 ms     TFLOPS    vs baseline
   --------------------------------------------------
-  baseline          45.9479     11.965          1.00x
-  l2_g4             13.6336     40.324          3.37x
-  l2_g8             11.5555     47.575          3.98x   <- Sweet Spot
-  l2_g32            13.0304     42.190          3.53x
+  baseline          46.6179     11.793          1.00x
+  l2_g4             14.9133     36.863          3.13x
+  l2_g8             13.1076     41.942          3.56x   <- Sweet Spot
+  l2_g32            14.0163     39.223          3.33x
 
-Hinweis: do_bench-Absolutwerte schwanken je Lauf um einige Prozent (kurzes
-Mess-Budget bei ~45 ms Baseline); die relative Ordnung (Baseline ~4x langsamer,
-GROUP=8 optimal) ist stabil.
+Hinweis: do_bench-Absolutwerte schwanken je Lauf um einige Prozent; die
+relative Ordnung (Baseline ~4x langsamer, GROUP=8 optimal) ist stabil.
 """

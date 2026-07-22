@@ -357,35 +357,35 @@ GROUP-Sweep (Quadrat-Super-Tile ``GROUP_M = GROUP_N``):
      - vs. Baseline
    * - Baseline
      - —
-     - 45,95
-     - 12,0
+     - 46,62
+     - 11,8
      - 1,00×
    * - L2 (config)
      - 4
-     - 13,63
-     - 40,3
-     - 3,37×
+     - 14,91
+     - 36,9
+     - 3,13×
    * - L2 (config)
      - 8
-     - **11,56**
-     - **47,6**
-     - **3,98×**
+     - **13,11**
+     - **41,9**
+     - **3,56×**
    * - L2 (config)
      - 32
-     - 13,03
-     - 42,2
-     - 3,53×
+     - 14,02
+     - 39,2
+     - 3,33×
 
-Die Absolutwerte schwanken zwischen ``do_bench``-Läufen um einige Prozent
-(kurzes Mess-Budget bei ~45 ms Baseline-Laufzeit); die *relative* Ordnung –
-Baseline ≈ 4× langsamer, ``GROUP = 8`` als Optimum – ist über alle Läufe stabil.
+Die Absolutwerte schwanken zwischen ``do_bench``-Läufen um einige Prozent;
+die *relative* Ordnung – Baseline ≈ 4× langsamer, ``GROUP = 8`` als Optimum –
+ist über alle Läufe stabil.
 
 .. figure:: ../../../../assignments/05_assignment/src/task04_l2_vs_baseline_GROUP-4-4.png
    :align: center
    :alt: L2-Swizzle (GROUP=4) vs. Baseline
    :width: 90%
 
-   ``GROUP_M = GROUP_N = 4``: bereits 3,37× Speedup, aber kleinere
+   ``GROUP_M = GROUP_N = 4``: bereits 3,13× Speedup, aber kleinere
    Super-Tiles teilen weniger A/B-Streifen als GROUP=8.
 
 .. figure:: ../../../../assignments/05_assignment/src/task04_l2_vs_baseline_GROUP-8-8.png
@@ -393,28 +393,28 @@ Baseline ≈ 4× langsamer, ``GROUP = 8`` als Optimum – ist über alle Läufe 
    :alt: L2-Swizzle (GROUP=8) vs. Baseline
    :width: 90%
 
-   ``GROUP_M = GROUP_N = 8``: beste Konfiguration mit 3,98× Speedup
-   (47,6 TFLOPS), ≈ 8 MB Working-Set im L2.
+   ``GROUP_M = GROUP_N = 8``: beste Konfiguration mit 3,56× Speedup
+   (41,9 TFLOPS), ≈ 8 MB Working-Set im L2.
 
 .. figure:: ../../../../assignments/05_assignment/src/task04_l2_vs_baseline_GROUP-32-32.png
    :align: center
    :alt: L2-Swizzle (GROUP=32) vs. Baseline
    :width: 90%
 
-   ``GROUP_M = GROUP_N = 32``: bleibt mit 3,53× stark — das echte
+   ``GROUP_M = GROUP_N = 32``: bleibt mit 3,33× stark — das echte
    2D-Super-Tile hält den gleichzeitig aktiven Working-Set kompakt.
 
 Beobachtungen und Vermutungen
 ------------------------------
 
-* **GROUP=8 ist der Sweet Spot.** 3,98× Speedup, 47,6 TFLOPS — die
+* **GROUP=8 ist der Sweet Spot.** 3,56× Speedup, 41,9 TFLOPS — die
   Hardware-Auslastung springt auf das Niveau einer optimierten GEMM. Ein
   2D-Super-Tile aus 8×8 mma-Tiles hält ≈ 8 MB Working-Set im L2.
 
-* **GROUP=4 etwas schwächer (3,37×).** Kleinere Super-Tiles teilen weniger
+* **GROUP=4 etwas schwächer (3,13×).** Kleinere Super-Tiles teilen weniger
   A/B-Streifen pro Gruppe → geringere L2-Wiederverwendung.
 
-* **GROUP=32 bleibt stark (3,53×), kollabiert NICHT.** Das ist der Unterschied
+* **GROUP=32 bleibt stark (3,33×), kollabiert NICHT.** Das ist der Unterschied
   zum naiven 1D-„Banding" (eine ganze M-Zeile × *alle* N-Spalten, deren
   B-Working-Set den L2 sprengt): Hier bildet die Config ein *echtes 2D*-
   Super-Tile, sodass der gleichzeitig aktive Working-Set kompakt bleibt (die
