@@ -4,6 +4,7 @@
 
    self
    chapters/installation_und_benutzung
+   chapters/ki_einsatz
 
 .. toctree::
    :hidden:
