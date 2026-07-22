@@ -3,7 +3,7 @@
    :maxdepth: 2
 
    self
-   chapters/build_and_benutzung
+   chapters/installation_und_benutzung
 
 .. toctree::
    :hidden:
