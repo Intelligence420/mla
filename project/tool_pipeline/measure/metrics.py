@@ -110,17 +110,27 @@ def _finish(flops: int, nbytes: Optional[int], run_ms: float,
 
 
 def compute_metrics(M: int, N: int, K: int, run_ms: float,
-                    dtype: str, acc_dtype: str, B: int = 1) -> dict[str, Any]:
+                    dtype: str, acc_dtype: str, B: int = 1,
+                    epilog: Optional[str] = None) -> dict[str, Any]:
     """Kennzahlen-dict für eine **Kontraktion** (GEMM).
 
     `B` (Batch, Default 1 → Plain-GEMM unverändert) skaliert **FLOPs und Bytes
     gemeinsam** ⇒ ``tflops``/``gbps`` wachsen mit B, die arithmetische Intensität
     (FLOP/Byte) bleibt batch-**unabhängig** (B kürzt sich heraus) — physikalisch
     korrekt, damit batched Punkte auf der Roofline richtig sitzen.
+
+    ``epilog`` (TZ 9, Fusion): ``"bias"`` liest zusätzlich den Operanden D in voller
+    Ausgabe-Form (B·M·N Elemente, Compute-``dtype``) ⇒ dieser Extra-Traffic geht in
+    die Bytes des **fusionierten** Kernels ein. ``"relu"``/``None`` bringen keinen
+    Extra-Operanden. Die Fusion spart gegenüber dem sequentiellen Pfad den DRAM-Umweg
+    des Zwischentensors (2·out·M·N·B Bytes, in ``measure/fusion.py`` beziffert) — hier
+    steht die (höhere) AI des fused-Punkts; der sequentielle Punkt sitzt links davon.
     """
     flops = gemm_flops(M, N, K, B)
     try:
         nbytes: Optional[int] = gemm_bytes(M, N, K, dtype, acc_dtype, B)
+        if epilog == "bias":
+            nbytes += dtype_bytes(dtype) * B * M * N   # D-Read (Compute-dtype)
     except KeyError:
         nbytes = None
     return _finish(flops, nbytes, run_ms, dtype)

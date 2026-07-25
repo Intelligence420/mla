@@ -129,6 +129,8 @@ def _format_label(result) -> str:
     if cfg.get("swizzle"):
         gm = int(cfg.get("group_m", 8) or 8)
         base += " · sw" + (f" G{gm}" if gm != 8 else "")   # einheitlich '· sw' (Tab/Badge/Legende)
+    if cfg.get("epilog"):        # TZ 9: fused-Läufe im Tab/in der Legende erkennbar
+        base += f" · ep {cfg.get('epilog')}"
     return base
 
 
@@ -201,7 +203,7 @@ def render_comparison(results) -> list:
 def execute_run(expr, dim_sizes, selection, family="contraction", op=None,
                 tm=None, tn=None, tk=None, swizzle=False, group_m=8,
                 tiles=None, swizzle_configs=None, baselines=None,
-                warmup=None, iters=None, progress=None) -> list:
+                warmup=None, iters=None, progress=None, epilog=None) -> list:
     """Reine Ablauflogik des Batch-Vergleichs (Dash-frei, headless testbar):
     validieren → RunConfig je Format → EIN GPU-Lock → ``run()`` je Format → rendern.
 
@@ -227,6 +229,10 @@ def execute_run(expr, dim_sizes, selection, family="contraction", op=None,
     Kreuzprodukt Format × Tile × Swizzle-Konfig. Sind sie ``None``, gilt der obige
     Skalar-Rückfall (``tm/tn/tk`` + ``swizzle``/``group_m`` — für Tests/CLI). Ab
     ``_SOFT_CONFIG_WARN`` Configs erscheint eine **weiche** Warnung (keine Sperre).
+
+    TZ 9 (Fusion): ``epilog`` (``None``/``"bias"``/``"relu"``) gilt für **alle** Configs
+    des Kreuzprodukts und nur bei ``family="contraction"``; ``None`` (Default) ⇒
+    unveränderter Pfad wie TZ 1-8.
     """
     def _set(pct: int, text: str) -> None:
         # Füllbreite (Style des inneren Balkens) + Statustext in EINEM set_progress.
@@ -248,6 +254,11 @@ def execute_run(expr, dim_sizes, selection, family="contraction", op=None,
     err = controls.validate_baselines(baselines)
     if err:
         return [_alert("Ungültige Baseline-Auswahl", err, "warning")]
+    # TZ 9: Epilog nur bei der Kontraktion und nur für 2-Operanden-Ausdrücke — VOR
+    # dem GPU-Lauf abfangen (run() würde sonst mit einem Compile-Fehler-Tab antworten).
+    err = controls.validate_epilog(epilog, family, expr)
+    if err:
+        return [_alert("Ungültiger Epilog", err, "warning")]
     # --- Tile-Konfiguration(en) (TZ 7.5-2: eine ODER mehrere Zeilen) ------------
     # GUI-Pfad: `tiles` = Liste von Roh-Tile-dicts (aus den dynamischen +/-Zeilen).
     # Rückfall/Skalarpfad (Tests/CLI): einzelnes tm/tn/tk ⇒ eine Zeile; nichts ⇒ Default.
@@ -301,7 +312,7 @@ def execute_run(expr, dim_sizes, selection, family="contraction", op=None,
         configs = controls.configs_from_selection(expr, dim_sizes, selection,
                                                    tiles=tile_list, swizzle_configs=sw_list,
                                                    baselines=baselines, bench=bench,
-                                                   family=family, op=op)
+                                                   family=family, op=op, epilog=epilog)
         # TZ 7.5-4: EINE Batch-Identität je „Vergleichen"-Klick (uuid4 + Default-Name +
         # Zeitstempel), an jedes run() dieses Batches durchgereicht → ein benannter,
         # wieder-ansehbarer Lauf. created_at EINMAL außen (nicht je Zeile via now()).
@@ -386,6 +397,8 @@ def register(app) -> None:
         Output(controls.ID_PRESET, "options"),
         Output(controls.ID_PRESET, "value"),
         Output(controls.ID_OP_WRAP, "style"),
+        Output(controls.ID_EPILOG_WRAP, "style"),
+        Output(controls.ID_EPILOG, "value"),
         Output(controls.ID_DTYPES, "options"),
         Output(controls.ID_DTYPES, "value"),
         Input(controls.ID_FAMILY, "value"),
@@ -395,9 +408,15 @@ def register(app) -> None:
         family = family or "contraction"
         op_style = ({"display": "block", "marginTop": "10px"}
                     if family == "elementwise" else {"display": "none"})
+        # TZ 9: Epilog-Fusion ist ein Kontraktions-Konzept → nur dort sichtbar; beim
+        # Wechsel auf memory-bound wird die Auswahl zurückgesetzt, damit kein
+        # unsichtbarer Epilog im Zustand hängt (er würde ohnehin abgelehnt).
+        ep_style = ({"display": "block", "marginTop": "10px"}
+                    if family == "contraction" else {"display": "none"})
+        ep_value = no_update if family == "contraction" else ""
         return (controls.preset_options(family),
                 controls.family_default_preset(family),
-                op_style,
+                op_style, ep_style, ep_value,
                 controls.dtype_options_for_family(family),
                 controls.default_selection_for_family(family))
 
@@ -476,6 +495,7 @@ def register(app) -> None:
         State(controls.ID_BASELINES, "value"),
         State(controls.ID_BENCH_WARMUP, "value"),
         State(controls.ID_BENCH_ITERS, "value"),
+        State(controls.ID_EPILOG, "value"),          # TZ 9: Epilog-Fusion (nur Kontraktion)
         background=True,
         running=[
             (Output(controls.ID_RUN, "disabled"), True, False),
@@ -492,7 +512,8 @@ def register(app) -> None:
         prevent_initial_call=True,
     )
     def _on_run(set_progress, n_clicks, family, op, expr, size_ids, size_vals, selection,
-                tm_vals, tn_vals, tk_vals, swizzle_cfg_vals, baselines, warmup, iters):
+                tm_vals, tn_vals, tk_vals, swizzle_cfg_vals, baselines, warmup, iters,
+                epilog):
         # Rohe Swizzle-Konfig-Auswahl früh laut prüfen (statt ungültige Werte in
         # swizzle_configs_from_state still zu verwerfen) — die Checkliste liefert zwar
         # nur gültige Optionen, aber ein Loud-Fail bleibt konsistent mit dem übrigen
@@ -506,7 +527,7 @@ def register(app) -> None:
         return execute_run(expr, dim_sizes, selection, family=family, op=op,
                            tiles=tiles, swizzle_configs=swizzle_configs,
                            baselines=baselines, warmup=warmup, iters=iters,
-                           progress=set_progress)
+                           progress=set_progress, epilog=epilog)
 
     # 4) Nach jedem Lauf im Browser prüfen: ist die Kopfmeldung im Main eine Warnung,
     #    ein Fehler oder ein Hinweis (dbc.Alert vom Typ warning/danger/info — ein

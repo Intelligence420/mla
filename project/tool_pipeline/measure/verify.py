@@ -89,11 +89,37 @@ def _reference(config: RunConfig, operands: list) -> torch.Tensor:
             return ops_f[0] * ops_f[1]
         if op == "copy":
             return ops_f[0]
+        if op == "relu":
+            return ops_f[0].clamp(min=0)
         raise NotImplementedError(
             f"Elementwise-Op {op!r} hat keine verify-Referenz."
         )
-    # Reduktion (Summe) + Kontraktion: einsum deckt beide ab.
+    # Kontraktion mit Epilog-Fusion (TZ 9): die Referenz ist die Kontraktion
+    # GEFOLGT vom Epilog (torch.einsum(...) dann +bias / relu). Die ersten
+    # len(inputs) Operanden speisen das einsum; etwaige weitere sind Epilog-Operanden
+    # (bias: D in Ausgabe-Form). Nur der 2-Op-Kontraktions-Pfad setzt epilog; n-är
+    # und reine Kontraktion (epilog=None) fallen unverändert auf das einsum unten.
+    if config.family == "contraction" and config.epilog:
+        n_in = len(config.inputs or [])
+        base = torch.einsum(config.expr, *ops_f[:n_in])
+        return _apply_epilog_reference(config.epilog, base, ops_f[n_in:])
+    # Reduktion (Summe) + Kontraktion (ohne Epilog): einsum deckt beide ab.
     return torch.einsum(config.expr, *ops_f)
+
+
+def _apply_epilog_reference(epilog: str, base: torch.Tensor,
+                            extra_ops: list) -> torch.Tensor:
+    """fp32-Referenz des Kontraktions-Epilogs auf dem einsum-Ergebnis ``base``.
+
+    ``bias`` addiert den (einzigen) Extra-Operanden D (Ausgabe-Form); ``relu``
+    schneidet bei 0 ab (operandenlos). Exakt die Ops, die der fusionierte Kernel
+    auf dem Akku-Tile ausführt — nur hier in voller fp32-Präzision.
+    """
+    if epilog == "bias":
+        return base + extra_ops[0]
+    if epilog == "relu":
+        return base.clamp(min=0)
+    raise NotImplementedError(f"Epilog {epilog!r} hat keine verify-Referenz.")
 
 
 def verify(output: torch.Tensor, operands: list, config: RunConfig) -> dict[str, Any]:

@@ -256,6 +256,208 @@ def test_group_m_invalid_rejected():
         assert raised, f"kein ValueError bei group_m={bad}"
 
 
+# ---------------------------------------------------------------------------
+# Epilog-Fusion (TZ 9) — headless: Byte-Identität bei epilog=None, Struktur der
+# beiden Epiloge, Loud-Fail. Die GPU-Korrektheit steckt in den Verify-Tests
+# weiter unten (test_gemm_epilog_*).
+# ---------------------------------------------------------------------------
+
+def test_epilog_none_byte_identical():
+    """`epilog=None` ⇒ der emittierte Quelltext ist BYTE-identisch zur Variante
+    ohne Epilog-Argument (Anti-Drift: die git-getrackten results/kernels/*.py
+    dürfen durch TZ 9 NICHT umgeschrieben werden).
+
+    Geprüft wird nicht nur Gleichheit der beiden Aufrufe (das wäre trivial),
+    sondern auch die **Einfügestelle** byte-exakt: zwischen mma-Loop und
+    ct.store-Kommentar steht genau eine Leerzeile, kein Epilog-Block."""
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    for swizzle in (False, True):
+        plain = build_gemm_module(tile, "fp16", "fp32", swizzle=swizzle)
+        assert build_gemm_module(tile, "fp16", "fp32", swizzle=swizzle,
+                                 epilog=None) == plain
+        # Keine Epilog-Spur im Text (Doc-Zeile, Block, D-Operand).
+        assert "Epilog" not in plain, plain
+        assert "ct.maximum(" not in plain and " D," not in plain, plain
+        # Die Einfügestelle selbst: mma-Loop → EINE Leerzeile → Store-Kommentar.
+        assert ("        acc = ct.mma(a, b, acc)\n\n"
+                "    # (TM, TN)-Ergebnis") in plain, plain
+        # Arity 3 überall (Kernel-Signatur, launch, ct.launch-Tuple).
+        assert "def gemm(A, B, C,\n" in plain, plain
+        assert "def launch(A, B, C):" in plain, plain
+        assert "(A, B, C, M, N, K)" in plain, plain
+    # Auch über emit(): der Header trägt KEINE Epilog-Zeile.
+    assert "# Epilog" not in emit(RunConfig()), emit(RunConfig())
+
+
+def test_epilog_bias_emit_structure():
+    """`epilog="bias"`: D-Kachel wird geladen, auf den Akku-dtype gecastet und
+    VOR ct.store elementweise addiert; der Operand D wandert in Kernel-Signatur,
+    launch und ct.launch-Tuple (Arity 4). Das ist die A04-Fusions-Form."""
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    src = build_gemm_module(tile, "fp16", "fp32", epilog="bias")
+    # Vierter Operand konsistent an allen drei Stellen (sonst TypeError beim Launch).
+    assert "def gemm(A, B, D, C,\n" in src, src
+    assert "def launch(A, B, D, C):" in src, src
+    assert "(A, B, D, C, M, N, K)" in src, src
+    # D-Kachel laden (ZERO-Padding am ragged Rand) + Cast auf den Akku-dtype.
+    assert "ct.load(D, index=(bb, i, j), shape=(1, TM, TN)," in src, src
+    assert "padding_mode=ct.PaddingMode.ZERO)" in src, src
+    assert "acc = acc + ct.astype(d, ct.float32)" in src, src
+    # Der Epilog liegt VOR dem Store — das ist der ganze Punkt der Fusion.
+    assert src.index("acc = acc + ct.astype") < src.index("ct.store(C"), src
+    # ... und NACH dem mma-Loop (auf dem fertigen Akkumulator, nicht je K-Schritt).
+    assert src.index("acc = ct.mma(a, b, acc)") < src.index("acc = acc + ct.astype"), src
+    # Die mma-Orientierung bleibt unangetastet (Risiko ①).
+    assert "acc = ct.mma(a, b, acc)" in src, src
+    # Header (emit-Ebene) trägt die Epilog-Zeile — nur wenn gesetzt.
+    head = emit(RunConfig(epilog="bias")).split("import cuda.tile")[0]
+    assert "# Epilog   : bias" in head, head
+
+
+def test_epilog_relu_emit_structure():
+    """`epilog="relu"`: `acc = ct.maximum(acc, 0)` VOR ct.store, operandenlos ⇒
+    die launch-Arity bleibt 3 (kein D) — nur der Epilog-Block kommt hinzu."""
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    src = build_gemm_module(tile, "fp16", "fp32", epilog="relu")
+    assert "acc = ct.maximum(acc, 0)" in src, src
+    assert src.index("ct.maximum(acc, 0)") < src.index("ct.store(C"), src
+    assert src.index("acc = ct.mma(a, b, acc)") < src.index("ct.maximum(acc, 0)"), src
+    # Operandenlos: Arity unverändert, kein D irgendwo.
+    assert "def gemm(A, B, C,\n" in src, src
+    assert "def launch(A, B, C):" in src, src
+    assert "(A, B, C, M, N, K)" in src, src
+    assert "ct.load(D" not in src, src
+    head = emit(RunConfig(epilog="relu")).split("import cuda.tile")[0]
+    assert "# Epilog   : relu" in head, head
+
+
+def test_epilog_unknown_rejected():
+    """Unbekannter Epilog ⇒ ValueError (loud-fail) statt still ignoriertem Epilog —
+    ein durchgerutschter Tippfehler würde sonst eine unfusionierte Messung als
+    'fused' ausgeben."""
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    for bad in ("gelu", "bias_add", "", "RELU"):
+        raised = False
+        try:
+            build_gemm_module(tile, "fp16", "fp32", epilog=bad)
+        except ValueError:
+            raised = True
+        assert raised, f"kein ValueError bei epilog={bad!r}"
+
+
+def test_epilog_variants_differ():
+    """bias ≠ relu ≠ plain: die drei Varianten erzeugen wirklich verschiedenen
+    Quelltext (⇒ verschiedene Slugs, kein stiller Cache-Treffer untereinander)."""
+    tile = {"TM": 128, "TN": 128, "TK": 64}
+    srcs = [build_gemm_module(tile, "fp16", "fp32", epilog=e)
+            for e in (None, "bias", "relu")]
+    assert len(set(srcs)) == 3, "Epilog-Varianten sind nicht unterscheidbar"
+
+
+def _run_gemm_epilog(M: int, N: int, K: int, epilog: str, dtype: str = "fp16",
+                     acc: str = "fp32", D_override=None):
+    """Wie `_run_gemm`, aber mit Epilog-Fusion (TZ 9) → gibt (A, B, D, C) zurück.
+
+    `bias` braucht einen vierten Operanden D in Ausgabe-Form (M,N) im Compute-dtype
+    (genau wie `run._build_operand(config.dtype, canonical.c_shape)`); `relu` ist
+    operandenlos ⇒ D ist None. `D_override` erlaubt ein deterministisches D-Muster
+    (Index-Orientierungs-Wächter statt Zufall)."""
+    cfg = RunConfig(dim_sizes={"i": M, "k": K, "j": N}, dtype=dtype,
+                    acc_dtype=acc, epilog=epilog)
+    launch = load_kernel(cfg, emit(cfg)).launch
+    torch.manual_seed(0)
+    A = _rand_operand(M, K, dtype).reshape(1, M, K)
+    B = _rand_operand(K, N, dtype).reshape(1, K, N)
+    C = torch.empty(1, M, N, dtype=_TORCH[acc], device="cuda")
+    if epilog == "bias":
+        D = (_rand_operand(M, N, dtype) if D_override is None
+             else D_override.to(_TORCH[dtype])).reshape(1, M, N)
+        launch(A, B, D, C)
+    else:
+        D = None
+        launch(A, B, C)
+    torch.cuda.synchronize()
+    return (A.reshape(M, K), B.reshape(K, N),
+            None if D is None else D.reshape(M, N), C.reshape(M, N))
+
+
+def _assert_epilog_matches_fp32(M: int, N: int, K: int, epilog: str,
+                                dtype: str = "fp16", acc: str = "fp32"):
+    """verify-before-trust für die Fusion: die Referenz ist die fp32-Kontraktion
+    **gefolgt vom** Epilog (nicht die Kontraktion allein) — mit der Produktions-
+    Toleranz des Formats."""
+    atol, rtol = _TOLERANCES[(dtype, acc)]
+    A, B, D, C = _run_gemm_epilog(M, N, K, epilog, dtype, acc)
+    ref = torch.einsum("ik,kj->ij", A.float(), B.float())
+    ref = ref + D.float() if epilog == "bias" else ref.clamp(min=0)
+    assert C.shape == (M, N), f"{epilog} {(M, N, K)}: Shape {tuple(C.shape)}"
+    err = (C.float() - ref).abs().max().item()
+    assert torch.allclose(C.float(), ref, atol=atol, rtol=rtol), \
+        (f"epilog={epilog} {dtype}->{acc} {(M, N, K)} weicht ab: "
+         f"max_abs_err={err:.3e} (atol={atol}, rtol={rtol})")
+
+
+def test_gemm_epilog_bias_correct_across_sizes():
+    """Fusion `bias` stimmt gegen fp32(einsum)+D — glatt UND ragged. Ragged ist der
+    interessante Fall: die D-Kachel wird am Rand ZERO-gepaddet, der Store clippt —
+    beide Pfade müssen zusammenpassen, sonst addiert der Rand Müll."""
+    for (M, N, K) in [(512, 512, 512), (256, 384, 128),
+                      (130, 100, 70), (129, 127, 65), (1, 1, 1)]:
+        _assert_epilog_matches_fp32(M, N, K, "bias")
+
+
+def test_gemm_epilog_relu_correct_across_sizes():
+    """Fusion `relu` stimmt gegen max(fp32(einsum), 0) — glatt UND ragged."""
+    for (M, N, K) in [(512, 512, 512), (256, 384, 128),
+                      (130, 100, 70), (129, 127, 65), (1, 1, 1)]:
+        _assert_epilog_matches_fp32(M, N, K, "relu")
+
+
+def test_gemm_epilog_ragged_dtypes():
+    """Beide Epiloge über die Formate hinweg auf einer ragged Größe: der Epilog
+    rechnet auf dem **Akkumulator** (fp32), darf also an keinem Format-Pfad
+    (fp16/bf16/tf32-Eingaben) die Genauigkeit kippen."""
+    for dtype in ("fp16", "bf16", "tf32"):
+        for epilog in ("bias", "relu"):
+            _assert_epilog_matches_fp32(129, 127, 65, epilog, dtype, "fp32")
+
+
+def test_gemm_epilog_relu_actually_clips():
+    """Der Epilog darf nicht still WIRKUNGSLOS sein: mit denselben Eingaben hat der
+    unfusionierte Kernel negative Werte, der relu-fusionierte KEINE. Ohne diesen
+    Wächter würde ein nicht angewandter Epilog als 'fused' gemessen und die
+    Fusions-Story wäre wertlos."""
+    M = N = K = 256
+    _, _, _, C_fused = _run_gemm_epilog(M, N, K, "relu")
+    A, B, C_plain = _run_gemm(M, N, K)          # gleicher Seed ⇒ gleiche Operanden
+    assert (C_plain < 0).any(), "Testdaten ohne negative Werte — relu wäre trivial"
+    assert not (C_fused < 0).any(), "relu-Epilog hat negative Werte durchgelassen"
+    # Positive Werte bleiben unangetastet (relu ist kein Skalierer).
+    pos = C_plain > 0
+    assert torch.allclose(C_fused[pos].float(), C_plain[pos].float(),
+                          atol=1e-3, rtol=1e-3), "relu hat positive Werte verändert"
+
+
+def test_gemm_epilog_bias_index_orientation():
+    """Orientierungs-Wächter für die D-Kachel (Risiko ① auf den Epilog übertragen):
+    ein deterministisches D[i,j] = i + j/1000 würde bei vertauschten Indizes
+    (D transponiert geladen) exakt auffallen — bei quadratischem D ist das sonst
+    shape-legal und damit ein stiller Fehler."""
+    M = N = K = 256
+    ii = torch.arange(M, device="cuda", dtype=torch.float32).reshape(M, 1)
+    jj = torch.arange(N, device="cuda", dtype=torch.float32).reshape(1, N)
+    D_pat = (ii + jj / 1000.0).expand(M, N).contiguous()    # asymmetrisch in (i,j)
+    A, B, D, C = _run_gemm_epilog(M, N, K, "bias", D_override=D_pat)
+    ref = torch.einsum("ik,kj->ij", A.float(), B.float()) + D.float()
+    ref_T = torch.einsum("ik,kj->ij", A.float(), B.float()) + D.float().T
+    atol, rtol = _TOLERANCES[("fp16", "fp32")]
+    assert torch.allclose(C.float(), ref, atol=atol, rtol=rtol), \
+        f"bias-Epilog weicht ab: {(C.float() - ref).abs().max().item():.3e}"
+    # Der transponierte Doppelgänger muss DEUTLICH schlechter passen.
+    assert (C.float() - ref_T).abs().max().item() > 10.0, \
+        "D transponiert geladen? Doppelgänger liegt zu nah"
+
+
 def test_reduction_emit_structure():
     """Headless: das Reduktions-Template ist memory-bound — ct.sum-Idiom, KEIN
     ct.mma/kein GEMM-K-Loop-Reshape; beide Pfade (single-shot + markierter
@@ -304,12 +506,13 @@ def test_elementwise_emit_structure():
 
 
 def test_elementwise_emit_rejects_bad_op():
-    """Unbekannte Op ⇒ ValueError (loud-fail)."""
+    """Unbekannte Op ⇒ ValueError (loud-fail). (relu ist seit TZ 9 bekannt → hier
+    ein weiterhin unbekannter Op als Loud-Fail-Probe.)"""
     try:
-        build_elementwise_module({"TM": 128, "TN": 128, "TK": 64}, "fp16", "fp32", "relu")
+        build_elementwise_module({"TM": 128, "TN": 128, "TK": 64}, "fp16", "fp32", "gelu")
     except ValueError:
         return
-    raise AssertionError("erwartete ValueError für op='relu'")
+    raise AssertionError("erwartete ValueError für op='gelu'")
 
 
 # ---------------------------------------------------------------------------

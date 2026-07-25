@@ -68,6 +68,14 @@ def config_slug(config: Union[RunConfig, dict[str, Any]]) -> str:
     op = d.get("op")
     if op:
         slug += f"__{op}"
+    # ``epilog`` (TZ 9) folgt exakt dem bedingten ``op``-Muster: nur wenn gesetzt wird
+    # ``__ep_<epilog>`` angehängt, damit der fusionierte Kontraktions-Kernel (z. B.
+    # ``bias``) eine EIGENE kernels/<slug>.py bekommt und nicht still das gecachte
+    # reine-Kontraktions-Artefakt trifft. ``epilog=None`` ⇒ Slug byte-identisch zu
+    # TZ 1-8. Steht vor ``__sw`` (fused+swizzle ⇒ ``…__ep_bias__sw``).
+    epilog = d.get("epilog")
+    if epilog:
+        slug += f"__ep_{epilog}"
     if d.get("swizzle"):
         # GROUP_M (TZ 7.5) nur BEDINGT: Default 8 ⇒ bares "__sw" (byte-identisch zu
         # TZ 1-6); abweichender Wert ⇒ "__sw_g<N>", damit verschiedene GROUP_M nicht
