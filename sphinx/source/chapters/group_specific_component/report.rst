@@ -243,10 +243,21 @@ Tuning-Raum: Kachelung und Swizzle
      - 29,6
 
 Die Kachelwahl ist der stärkste Hebel: ein ungünstiges Tile (256/128/64) bricht auf
-**5,6 TFLOP/s** ein, während 128/128/64 mehr als das Fünffache erreicht. Der L2-Swizzle ist
-eine reine Block-Umordnung (numerisch identisch, per GPU-Test bewiesen) und verändert
-den Durchsatz bei dieser Größe kaum — die Gruppengröße ``GROUP_M`` ist einstellbar
-(8/16/32) und geht nur bei Abweichung vom Default in den Kernel-Slug ein.
+**5,6 TFLOP/s** ein, während 128/128/64 mehr als das Fünffache erreicht. Der L2-Swizzle
+ist eine reine Block-Umordnung (numerisch identisch, per GPU-Test bewiesen) und
+verbessert den Durchsatz hier nur leicht (29,0 → 30,0 TFLOP/s).
+
+Bei der Gruppengröße ``GROUP_M`` ist eine Einschränkung wichtig, damit die Tabelle nicht
+mehr behauptet, als sie zeigt: Sie ist einstellbar (8/16/32) und geht nur bei Abweichung
+vom Default in den Kernel-Slug ein — bei **dieser** Größe bleibt sie aber wirkungslos, und
+das ist keine Messaussage, sondern Struktur. :math:`1024^3` mit ``TM = TN = 128`` ergibt
+ein 8×8-Blockgitter; die Rasterung begrenzt die Gruppe auf
+``min(num_pid_m - first_pid_m, GROUP_M)``, also auf 8, und es entsteht nur eine einzige
+Gruppe. Für jedes ``GROUP_M ≥ 8`` ist die Block-Permutation daher **identisch**. Die drei
+Swizzle-Zeilen sind damit faktisch eine *Reproduzierbarkeitsprobe* desselben Kernels —
+ihre Streuung von unter 1,5 % ist die Messgenauigkeit, nicht ein ``GROUP_M``-Effekt.
+Messbar würde diese Achse erst bei deutlich größeren Gittern (:math:`4096^2` ergäbe
+32×32 Blöcke und damit vier bzw. zwei echte Gruppen).
 
 Memory-bound: Bandbreite als Primärmetrik
 -----------------------------------------
