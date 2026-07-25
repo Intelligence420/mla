@@ -16,7 +16,9 @@ gespiegelt aus ``contraction.build_gemm_module`` — nur ohne Tensor-Core.
 **Zwei Pfade im erzeugten Modul (verify-before-trust!):**
   * **single-shot** (A02-bewiesen): passt die reduzierte Achse in EINE Kachel
     (``TILE_K`` = next-pow2(K), als Launch-Constant → Quelltext groessen-unabhaengig
-    ⇒ slug-sicher), dann ein einziges ``ct.sum(tile, axis=1)``.
+    ⇒ slug-sicher), dann ein einziges ``ct.sum(...)`` — auf dem in den Akku-dtype
+    gecasteten Tile, damit ``acc_dtype`` hier genauso wirkt wie im Loop-Pfad
+    (siehe unten: **beide** Pfade summieren in ``acc_dtype``).
   * **K-Loop-Fallback** (NICHT in A02 bewiesen, klar markiert): reduzierte Achse
     groesser als eine Kachel → GEMM-artiger Akku-Loop ``acc += ct.sum(chunk)`` mit
     festem Chunk ``LOOP_TILE`` (= ``tile["TK"]``, steht im Slug). ``launch`` waehlt
@@ -90,11 +92,14 @@ LOOP_TILE = {loop_tile}
 @ct.kernel
 def row_sum_single(mat, out, TILE_K: ct.Constant[int]):
     """single-shot (A02 task_02): ganze reduzierte Achse in EINE (1, TILE_K)-Kachel.
-    ZERO-Padding ist fuer die Summe neutral (addiert 0)."""
+    ZERO-Padding ist fuer die Summe neutral (addiert 0). Summiert in {acc_ct}
+    (Cast VOR ct.sum, wie im Loop-Pfad) — sonst liefe die Summe im Eingabeformat
+    und {acc_dtype} waere auf diesem Pfad wirkungslos."""
     pid = ct.bid(0)   # ein Block je (behaltener) Zeile
     tile = ct.load(mat, index=(pid, 0), shape=(1, TILE_K),
                    padding_mode=ct.PaddingMode.ZERO)
-    ct.store(out, index=(pid,), tile=ct.astype(ct.sum(tile, axis=1), out.dtype))
+    acc = ct.sum(ct.astype(tile, {acc_ct}), axis=1)
+    ct.store(out, index=(pid,), tile=ct.astype(acc, out.dtype))
 
 
 @ct.kernel

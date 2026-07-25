@@ -2,7 +2,7 @@ name: Build and deploy Sphinx docs
 
 on:
   push:
-    branches: [main, group-specific-component]
+    branches: [main]
 
 permissions:
   contents: read

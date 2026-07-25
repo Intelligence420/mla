@@ -29,9 +29,21 @@ import argparse
 import uuid
 from datetime import datetime
 
-from .app.components import controls   # torch-frei (nur schema + parse + dash) → headless
 from .schema import STATUS_OK, RunConfig
 from .store import store
+
+# ``app.components.controls`` liefert die Validierungs-/Config-Bau-Helfer, die GUI und CLI
+# teilen (ein Kreuzprodukt, ein Slug, ein Cache). Es zieht aber ``dash`` +
+# ``dash_bootstrap_components`` auf Modulebene — ein Import auf Modulebene würde die
+# headless-CLI an den GUI-Stack koppeln (Batch-Node/CI ohne Dash: ModuleNotFoundError).
+# Deshalb LAZY, in den Funktionen, die die Helfer wirklich brauchen: der Modul-Import von
+# ``tool_pipeline.cli`` bleibt dash- UND torch-frei.
+
+
+def _controls():
+    """Lazy-Zugriff auf die geteilten Controls-Helfer (zieht dash nach — s. oben)."""
+    from .app.components import controls
+    return controls
 
 # ---------------------------------------------------------------------------
 # Report-Sweep — Größen (klein & deterministisch; geteilte 32-GiB-Maschine).
@@ -90,6 +102,7 @@ def build_config(args: argparse.Namespace) -> RunConfig:
     memory-bound-Familie oder einer n-ären Kette wird hier laut abgelehnt (statt still
     verworfen zu werden), spiegelbildlich zur GUI-Validierung.
     """
+    controls = _controls()
     idx = controls.expr_indices(args.expr)
     sizes = {d: args.size for d in idx}
     for d, v in (("i", args.M), ("j", args.N), ("k", args.K)):
@@ -125,6 +138,7 @@ def sweep_configs(size_c: int = _SWEEP_SIZE_CONTRACTION,
     laufen auf allen drei Formen ⇒ der Fusions-Gewinn wird als **Trend** über die AI
     sichtbar, nicht als Einzelbefund.
     """
+    controls = _controls()
     ck = controls.combo_key
     cfgs: list[RunConfig] = []
     dims_c = {"i": size_c, "k": size_c, "j": size_c}

@@ -184,33 +184,33 @@ Durchsatz und Genauigkeit je Format
      - max. abs. Fehler
      - GB/s
    * - fp16 → fp32
-     - 28,0
-     - 36,8
-     - 76 %
+     - 29,0
+     - 39,7
+     - 73 %
      - 3,2·10⁻⁴
-     - 109
+     - 113
    * - bf16 → fp32
-     - 29,6
+     - 28,4
      - 39,6
-     - 75 %
+     - 72 %
      - 2,1·10⁻⁴
-     - 116
+     - 111
    * - tf32 → fp32
-     - 8,0
-     - 20,0
+     - 8,1
+     - 20,4
      - 40 %
      - 4,6·10⁻²
-     - 47
+     - 48
    * - fp8 e4m3 → fp16
-     - 46,6
+     - 43,8
      - —
      - —
      - 3,4·10⁻¹
-     - 91
+     - 86
 
-Der einfache f-String-Codegen erreicht bei fp16/bf16 rund **drei Viertel** von cuBLAS —
-ohne Autotuning bemerkenswert nah. fp8 ist mit Abstand am schnellsten (46,6 TFLOP/s),
-zahlt das aber mit dem größten Fehler; fp16/bf16 sind praktisch exakt.
+Der einfache f-String-Codegen erreicht bei fp16/bf16 **knapp drei Viertel** von cuBLAS
+(72–73 %) — ohne Autotuning bemerkenswert nah. fp8 ist mit Abstand am schnellsten
+(43,8 TFLOP/s), zahlt das aber mit dem größten Fehler; fp16/bf16 sind praktisch exakt.
 
 Tuning-Raum: Kachelung und Swizzle
 ----------------------------------
@@ -230,20 +230,20 @@ Tuning-Raum: Kachelung und Swizzle
    * - Konfiguration
      - Durchsatz [TFLOP/s]
    * - Tile 256/128/64
-     - 5,2
+     - 5,6
    * - Tile 64/64/32
-     - 26,6
+     - 25,6
    * - Tile 128/128/64
-     - 28,0
+     - 29,0
    * - + Swizzle G8
      - 30,0
    * - + Swizzle G16
-     - 29,8
+     - 30,0
    * - + Swizzle G32
-     - 29,9
+     - 29,6
 
 Die Kachelwahl ist der stärkste Hebel: ein ungünstiges Tile (256/128/64) bricht auf
-**5,2 TFLOP/s** ein, während 128/128/64 mehr als das Fünffache erreicht. Der L2-Swizzle ist
+**5,6 TFLOP/s** ein, während 128/128/64 mehr als das Fünffache erreicht. Der L2-Swizzle ist
 eine reine Block-Umordnung (numerisch identisch, per GPU-Test bewiesen) und verändert
 den Durchsatz bei dieser Größe kaum — die Gruppengröße ``GROUP_M`` ist einstellbar
 (8/16/32) und geht nur bei Abweichung vom Default in den Kernel-Slug ein.
@@ -262,22 +262,27 @@ Memory-bound: Bandbreite als Primärmetrik
      - AI
    * - Elementwise · add
      - fp16 → fp32
-     - 224
-     - 82 %
+     - 220
+     - 81 %
      - 0,12
    * - Elementwise · add
      - bf16 → fp32
-     - 223
-     - 82 %
+     - 222
+     - 81 %
      - 0,12
    * - Elementwise · add
      - fp32 → fp32
-     - 225
-     - 83 %
+     - 224
+     - 82 %
      - 0,08
    * - Reduktion · sum
      - fp16 → fp32
-     - 171
+     - 170
+     - 62 %
+     - 0,50
+   * - Reduktion · sum
+     - bf16 → fp32
+     - 173
      - 63 %
      - 0,50
    * - Reduktion · sum
@@ -286,17 +291,24 @@ Memory-bound: Bandbreite als Primärmetrik
      - 79 %
      - 0,25
 
-Die elementweise Addition erreicht rund **82 % der theoretischen Bandbreite**
-(273 GB/s) — nahe am praktisch Erreichbaren. Die Reduktion ist bandbreiten-effizient
-in fp32/fp16; ihr niedrigerer AI-Wert und Durchsatz spiegeln das Verhältnis von
-gelesenen Eingaben zu geschriebenen Ergebnissen.
+Die elementweise Addition erreicht rund **81–82 % der theoretischen Bandbreite**
+(273 GB/s) — nahe am praktisch Erreichbaren. Die Reduktion läuft in **allen drei
+Formaten** verifiziert durch und ist mit maximalen absoluten Fehlern um 3·10⁻⁵
+formatunabhängig genau — sie summiert unabhängig vom Eingabeformat im fp32-Akkumulator
+(siehe *verify-before-trust in Aktion*). In fp32 ist sie mit 79 % der Bandbreite
+nahezu so effizient wie die Addition; in fp16/bf16 bleibt sie bei 62–63 %, weil dort
+nur halb so viele Bytes je Element zu lesen sind und die Kernel-Laufzeit nicht mehr
+allein von der Bandbreite bestimmt wird. Der niedrigere AI-Wert spiegelt das
+Verhältnis von gelesenen Eingaben zu geschriebenen Ergebnissen.
 
 Die n-äre Kette als ein Punkt
 -----------------------------
 
 Die Kette ``ij,jk,kl->il`` (:math:`256^4`) wird in zwei paarweise GEMMs zerlegt
-(Pfad ``ij,jk->ik`` dann ``kl,ik->il``), gegen ``torch.einsum`` (fp32) verifiziert
-und als **ein** aggregierter Roofline-Punkt gemessen: 1,64 TFLOP/s bei einer
+(Pfad ``ij,jk->ik`` dann ``kl,ik->il`` — per Links-nach-rechts-Zerlegung geplant; ist
+``opt_einsum`` installiert, kann der Planer eine andere und damit auch anders
+gemessene Zerlegung wählen), gegen ``torch.einsum`` (fp32) verifiziert
+und als **ein** aggregierter Roofline-Punkt gemessen: 1,63 TFLOP/s bei einer
 arithmetischen Intensität von 64 FLOP/Byte. Dass ihre Intensität **unter** der eines
 einzelnen GEMMs liegt, ist erwartbar — die Zwischentensoren erzeugen zusätzlichen
 Speicherverkehr.
@@ -344,44 +356,44 @@ die schmale und die quadratische Form haben mit 2,15 GFLOP dieselbe FLOP-Zahl:
    * - 4096·4096·64
      - bias
      - 21
-     - 0,496
-     - 1,101
-     - **2,22×**
+     - 0,498
+     - 1,099
+     - **2,21×**
      - 128 MiB
    * - 4096·4096·64
      - relu
      - 32
-     - 0,348
-     - 0,946
-     - **2,72×**
+     - 0,350
+     - 0,943
+     - **2,69×**
      - 128 MiB
    * - 1024·1024·1024
      - bias
      - 205
-     - 0,083
-     - 0,103
-     - 1,25×
+     - 0,084
+     - 0,104
+     - 1,24×
      - 8 MiB
    * - 1024·1024·1024
      - relu
      - 256
-     - 0,072
-     - 0,095
-     - 1,33×
+     - 0,075
+     - 0,094
+     - 1,26×
      - 8 MiB
    * - 1024·1024·8192
      - bias
      - 431
-     - 0,364
-     - 0,385
+     - 0,362
+     - 0,383
      - 1,06×
      - 8 MiB
    * - 1024·1024·8192
      - relu
      - 455
      - 0,362
-     - 0,373
-     - 1,03×
+     - 0,371
+     - 1,02×
      - 8 MiB
 
 .. figure:: /_static/gsc/fusion.png
@@ -395,11 +407,11 @@ die schmale und die quadratische Form haben mit 2,15 GFLOP dieselbe FLOP-Zahl:
 
 Das Ergebnis ist ein klarer Trend statt eines Einzelbefunds: Bei der **schmalen,
 memory-bound** Form ist der fusionierte Kernel mehr als **doppelt so schnell**
-(2,22× bzw. 2,72×) — dort dominiert der gesparte 128-MiB-Roundtrip die Laufzeit, und
-der fused Kernel erreicht mit 196–205 GB/s rund **drei Viertel der Peak-Bandbreite**.
-Bei der **tiefen, compute-dominierten** Form schrumpft der Gewinn auf 1,03–1,06×: die
-Kontraktion braucht dort 0,36 ms, der gesparte 8-MiB-Roundtrip nur etwa 0,03 ms — er
-verschwindet im Rauschen der Rechenzeit.
+(2,21× bzw. 2,69×) — dort dominiert der gesparte 128-MiB-Roundtrip die Laufzeit, und
+der fused Kernel erreicht mit 195–204 GB/s rund **drei Viertel der Peak-Bandbreite**.
+Bei der **tiefen, compute-dominierten** Form schrumpft der Gewinn auf 1,02–1,06×: die
+Kontraktion braucht dort 0,36 ms, der gesparte 8-MiB-Roundtrip nur etwa 0,01–0,02 ms —
+er verschwindet im Rauschen der Rechenzeit.
 
 Damit ordnet sich auch der Befund aus Assignment 04 ein, der dieses Teil-Ziel
 motiviert hat: Dort war die Fusion mit **0,984×** minimal *langsamer* als der
@@ -424,14 +436,48 @@ fehl, verliert der Lauf nur den Vergleich, nicht sein eigenes Ergebnis.
 verify-before-trust in Aktion
 -----------------------------
 
-Der Sweep umfasste 24 Konfigurationen; **23** bestanden, **eine** nicht — und genau
-das ist der Wert des Prinzips. Die bf16-Reduktion über 4096 Elemente überschritt die
-Toleranz (max. abs. Fehler 1,57), weil sich der bf16-Rundungsfehler über Millionen
-Summanden aufaddiert; sie erscheint deshalb **nicht** in den Figuren. Dasselbe gilt
-für tiefere n-äre fp16-Ketten: ab :math:`384^4` summiert sich der Fehler beider
-GEMM-Schritte über die Toleranz, weshalb der Report die Kette bewusst bei
-:math:`256^4` zeigt. Das Tool meldet solche Fälle laut, statt still eine falsche Zahl
-zu liefern — dieselbe Verifikation, die auch die Kernel-Erzeugung absichert.
+Der abgebildete Sweep umfasst 24 Konfigurationen, und **alle 24** bestehen die
+fp32-Verifikation. Dieser saubere Stand ist allerdings selbst das Ergebnis des
+Prinzips — denn eine Charge vorher tat er es nicht, und der eine Fehlschlag war
+lehrreich genug, um hier ausführlich zu stehen.
+
+**Der Fund.** Die bf16-Reduktion über :math:`4096^2` überschritt die Toleranz
+deutlich: maximaler absoluter Fehler **1,574** bei einem ``atol`` von 1,0. Der Lauf
+bekam ``verify_failed``, **keine** Durchsatz-Zahl und erschien in keiner Figur. Die
+naheliegende Erklärung wäre gewesen, dass bf16 mit seinen 8 Mantissenbits über 4096
+Summanden schlicht zu grob ist — eine Format-Grenze, plausibel formuliert und bequem
+zu glauben. Sie war falsch.
+
+**Die Ursache lag im eigenen Codegen.** Das Reduktions-Template hat zwei Pfade. Der
+K-Loop-Fallback akkumulierte korrekt im angeforderten Akku-Format, der
+single-shot-Pfad — der für alle Report-Größen gewählt wird — dagegen **im
+Eingabeformat**: ``ct.sum(tile, axis=1)`` statt ``ct.sum(ct.astype(tile, ct.float32),
+axis=1)``. Der ``acc_dtype``-Regler war auf diesem Pfad wirkungslos. Auffällig wurde
+das an einer Stelle, an der die Intuition genau anders herum zeigt: Dieselbe Eingabe
+über eine **doppelt so lange** Achse reduziert (jenseits von :math:`K = 16384`, also
+über den Loop-Pfad) war drei Größenordnungen *genauer*. Nicht die Länge der Summe war
+der Unterschied, sondern der Akkumulator.
+
+**Die Korrektur** ist eine Zeile — der Cast vor ``ct.sum``, exakt wie im Loop-Pfad.
+Danach liefert dieselbe bf16-Reduktion einen Fehler von **3,05·10⁻⁵**, rund
+**51 000×** kleiner, besteht die Verifikation und steht in der memory-bound-Tabelle
+oben. Die fp16-Reduktion, die zuvor mit einem Fehler von 0,22 *innerhalb* ihrer
+Toleranz lag und deshalb als ``ok`` durchgegangen war, verbesserte sich im selben
+Zug auf 3,05·10⁻⁵.
+
+**Das ist der eigentliche Wert des Gates.** Es hat keine Eigenschaft eines
+Zahlenformats gemeldet, sondern einen **echten Defekt im generierten Kernel** — und
+zwar bevor eine falsch beschriftete Genauigkeitszahl in diesen Report gelangte. Ohne
+die fp32-Referenz wäre der Fehler unsichtbar geblieben: 1,574 auf einer Zeilensumme
+über 4096 bf16-Werte sieht nach einem Format-Limit aus, nicht nach einem Bug, und der
+fp16-Fall hätte mit 0,22 nie Verdacht erregt. Genau das ist die Klasse stiller
+Falschergebnisse, gegen die generierter Kernel-Code abgesichert werden muss.
+
+Ein Toleranz-Fall bleibt zudem echt: Bei tieferen n-ären fp16-Ketten summiert sich ab
+:math:`384^4` der Fehler beider GEMM-Schritte über die Toleranz — deshalb zeigt der
+Report die Kette bewusst bei :math:`256^4`. Das Tool meldet solche Fälle laut, statt
+still eine falsche Zahl zu liefern — dieselbe Verifikation, die auch die
+Kernel-Erzeugung absichert.
 
 Test- und Reproduzierbarkeits-Stand
 -----------------------------------
@@ -441,7 +487,10 @@ Orientierungs-Wächter und ragged-Randfällen über alle Familien, family-korrek
 Metriken, Store-Mutatoren und Compile-Cache-Härtung, CLI-Sweep-Erzeugung, sowie für
 die Fusion: Byte-Identität des unfusionierten Quelltextes, ragged-/dtype-Verify beider
 Epiloge gegen ``torch.einsum`` + Epilog, ein Wächter dagegen, dass ein Epilog *still
-unangewandt* bliebe, und ein Orientierungs-Wächter für die Bias-Kachel). Die
-headless-Tests laufen ohne GPU; die GPU-Tests verifizieren die Kernel real gegen
-``torch``. Alle im Report gezeigten Figuren sind aus ``results.jsonl`` reproduzierbar
-und tragen ausschließlich ``ok``-Läufe.
+unangewandt* bliebe, und ein Orientierungs-Wächter für die Bias-Kachel). Die Suite
+teilt sich in zwei Klassen: Die headless-Tests (Parsing, Kanonisierung,
+Metrik-Formeln, Store-Mutatoren, Sweep-Config-Erzeugung, Chart-Funktionen) laufen ohne
+GPU; die **Codegen- und Mess-Tests setzen eine CUDA-GPU voraus** — sie compilieren die
+generierten Kernel wirklich und verifizieren sie real gegen ``torch``, sind also auf
+einem Host ohne GPU nicht aussagekräftig. Alle im Report gezeigten Figuren sind aus
+``results.jsonl`` reproduzierbar und tragen ausschließlich ``ok``-Läufe.

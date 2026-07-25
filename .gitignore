@@ -29,4 +29,12 @@ learning/
 assignments/06_assignment/data/
 /assignments/07_assignment/build/
 /submission.tar.xz
+# Compile-Cache der Group-Specific Component: results/kernels/<slug>.py wird bei jedem
+# Lauf neu erzeugt und muss nicht versioniert werden. ACHTUNG, bewusster Mischzustand:
+# eine Reihe Kernel wurde VOR dieser Regel committet und bleibt getrackt — .gitignore
+# wirkt nicht auf bereits getrackte Dateien. Diese eingecheckten Dateien sind die
+# Referenz-Artefakte, auf die der Report verweist ("results/kernels/<slug>.py"); neu
+# erzeugte bleiben lokal. Folge: Ein Lauf, der einen getrackten Kernel neu emittiert
+# (z. B. nach einer Template-Änderung), erscheint als Git-Änderung — das ist erwartet
+# und gewollt sichtbar. Kein "git rm --cached" vor der Abgabe.
 /project/results/kernels/
