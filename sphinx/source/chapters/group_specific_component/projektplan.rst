@@ -74,7 +74,9 @@ Designentscheidungen (Überblick)
        lassen sich ansehen, vergleichen, umbenennen und löschen (GPU-frei).
    * - Zukunfts-Scope
      - Autotuning und Tile-Heatmap bewusst gestrichen; **Fusion**
-       (Kontraktion + Elementwise-Epilog) als Zukunftskandidat vorgemerkt.
+       (Kontraktion + Elementwise-Epilog) war als Zukunftskandidat vorgemerkt und
+       ist in TZ 9 umgesetzt. Offen bleibt Copy/Transpose als eigene
+       speichergebundene Operationen.
 
 Zielhardware
 ============
@@ -192,11 +194,20 @@ Fortschritts-Log
        Report-Figuren aus dem Store, benutzerfreundliche Fehlerzustände und ein
        durchgängigeres Erscheinungsbild. Ergebnis: das fertige, dokumentierte
        Deliverable.
+   * - TZ 9
+     - **Fusion** von Kontraktion und Elementwise-Epilog (``bias``/``relu`` auf
+       dem Akkumulator-Tile vor dem Store): additiv über ``RunConfig.epilog``,
+       ohne Epilog byte-identischer Kernel; die fp32-Referenz schließt den Epilog
+       ein; der sequentielle Zwei-Kernel-Pfad wird im selben Lauf mitgemessen und
+       ebenfalls verifiziert. Ergebnis: ein monoton fallender Speedup von 2,72×
+       (bandbreitenlimitiert) auf 1,03× (rechenlimitiert) — siehe
+       :ref:`Bericht <gsc_report>`.
 
 Ausblick
 ========
 
-Als Zukunftskandidat bleibt die **Fusion** von Kontraktion und
-Elementwise-Epilog (A04-Befund 0,98×): das Ergebnis-Tile eines GEMM direkt auf
-dem Compute-Tile weiterverarbeiten, statt das Zwischenergebnis über den langsamen
-Hauptspeicher zu schicken — die konsequente nächste Stufe der memory-bound-Story.
+Offen bleibt als Zukunftskandidat **Copy/Transpose als eigene speichergebundene
+Operationen**: reine Datenbewegung ohne Rechenanteil, also der äußerste linke
+Rand der Roofline. Damit ließe sich die Bandbreiten-Obergrenze der GB10 direkt
+vermessen — der Bezugspunkt, gegen den sich alle memory-bound-Ergebnisse dieses
+Berichts einordnen lassen.

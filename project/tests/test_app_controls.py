@@ -23,6 +23,7 @@ from tool_pipeline.app.components.controls import (  # noqa: E402
     ID_BASELINE_INFO,
     ID_BASELINES,
     ID_DTYPE_INFO,
+    ID_EPILOG,
     ID_EXPR,
     ID_FAMILY,
     ID_INDEX_SIZES,
@@ -51,6 +52,7 @@ from tool_pipeline.app.components.controls import (  # noqa: E402
     default_selection_for_family,
     default_tile_row,
     dim_sizes_from_state,
+    epilog_from_controls,
     expr_indices,
     group_m_from_controls,
     index_categories,
@@ -68,6 +70,7 @@ from tool_pipeline.app.components.controls import (  # noqa: E402
     tiles_from_state,
     validate_baselines,
     validate_dim_sizes,
+    validate_epilog,
     validate_expr,
     validate_group_m,
     validate_selection,
@@ -490,10 +493,78 @@ def test_validate_dim_sizes_family_memory_guard():
 
 
 def test_build_controls_has_family_and_op_ids():
-    """Familien- und Op-Auswahl sind im Komponentenbaum."""
+    """Familien-, Op- und Epilog-Auswahl sind im Komponentenbaum."""
     ids = [(c.to_plotly_json().get("props", {}) or {}).get("id")
            for c in _walk(build_controls())]
-    assert ID_FAMILY in ids and ID_OP in ids
+    assert ID_FAMILY in ids and ID_OP in ids and ID_EPILOG in ids
+
+
+# --- Epilog-Fusion (TZ 9) ----------------------------------------------------
+def test_epilog_from_controls_normalises():
+    """Der leere Dropdown-Wert und jede memory-bound-Familie ergeben ``None`` ⇒
+    RunConfig/Slug byte-identisch zu TZ 1-8; nur bei der Kontraktion greift der Epilog."""
+    assert epilog_from_controls("", "contraction") is None
+    assert epilog_from_controls(None, "contraction") is None
+    assert epilog_from_controls("bias", "contraction") == "bias"
+    assert epilog_from_controls("relu", "contraction") == "relu"
+    # memory-bound: Epilog wird verworfen (die Op IST dort die Operation).
+    assert epilog_from_controls("bias", "elementwise") is None
+    assert epilog_from_controls("relu", "reduction") is None
+
+
+def test_validate_epilog_family_and_nary():
+    """Validierung: leer immer ok; unbekannter Wert, falsche Familie und n-äre Ketten
+    werden VOR dem GPU-Lauf mit verständlichem Text abgelehnt (run() würde sonst nur
+    ein Compile-Fehler-Tab zeigen)."""
+    assert validate_epilog("", "contraction", "ik,kj->ij") is None
+    assert validate_epilog(None, "elementwise", "ij,ij->ij") is None
+    assert validate_epilog("bias", "contraction", "ik,kj->ij") is None
+    assert validate_epilog("relu", "contraction", "bik,bkj->bij") is None
+    # Unbekannter Epilog.
+    msg = validate_epilog("gelu", "contraction", "ik,kj->ij")
+    assert msg and "gelu" in msg
+    # Falsche Familie.
+    msg = validate_epilog("bias", "elementwise", "ij,ij->ij")
+    assert msg and "Kontraktion" in msg
+    # n-äre Kette (mehrere paarweise GEMMs) — die Scope-Grenze von TZ 9.
+    msg = validate_epilog("bias", "contraction", "ij,jk,kl->il")
+    assert msg and "2-Operanden" in msg
+    # Ungültiger Ausdruck: kein Epilog-Fehler (validate_expr meldet den Ausdruck).
+    assert validate_epilog("bias", "contraction", "!!!") is None
+
+
+def test_config_from_controls_carries_epilog():
+    """Der Epilog landet additiv in der RunConfig; ohne Auswahl bleibt sie unverändert."""
+    c = config_from_controls("ik,kj->ij", {"i": 64, "k": 64, "j": 64},
+                             "contraction", None, "bias")
+    assert c.epilog == "bias" and c.family == "contraction" and c.op is None
+    plain = config_from_controls("ik,kj->ij", {"i": 64, "k": 64, "j": 64})
+    assert plain.epilog is None and plain == RunConfig(dim_sizes={"i": 64, "k": 64, "j": 64})
+
+
+def test_configs_from_selection_epilog_on_every_config():
+    """Fusion ist eine Eigenschaft der Operation, keine Tuning-Achse: der Epilog gilt
+    für ALLE Configs des Kreuzprodukts (Format × Tile × Swizzle) — und ergibt je Config
+    einen eigenen Slug (kein stiller Cache-Treffer auf das unfusionierte Artefakt)."""
+    from tool_pipeline.store.store import config_slug
+
+    cfgs = configs_from_selection(
+        "ik,kj->ij", {"i": 128, "k": 64, "j": 128},
+        [combo_key("fp16", "fp32"), combo_key("bf16", "fp32")],
+        tiles=[{"TM": 128, "TN": 128, "TK": 64}, {"TM": 64, "TN": 64, "TK": 32}],
+        swizzle_configs=[(False, 8), (True, 16)], epilog="relu")
+    assert len(cfgs) == 8, len(cfgs)
+    assert all(c.epilog == "relu" for c in cfgs), [c.epilog for c in cfgs]
+    assert all("__ep_relu" in config_slug(c) for c in cfgs)
+    # Ohne Epilog: unveränderte Slugs (kein __ep_-Suffix irgendwo).
+    plain = configs_from_selection("ik,kj->ij", {"i": 128, "k": 64, "j": 128},
+                                   [combo_key("fp16", "fp32")])
+    assert all(c.epilog is None and "__ep_" not in config_slug(c) for c in plain)
+    # memory-bound: Epilog wird verworfen (validate_epilog lehnt ihn ohnehin ab).
+    ew = configs_from_selection("ij,ij->ij", {"i": 64, "j": 64},
+                                [combo_key("fp16", "fp32")],
+                                family="elementwise", op="add", epilog="bias")
+    assert all(c.epilog is None for c in ew)
 
 
 def test_index_size_inputs_one_per_index():

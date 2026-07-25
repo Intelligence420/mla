@@ -44,6 +44,23 @@ _SWEEP_SIZE_CONTRACTION = 1024
 _SWEEP_SIZE_MEMORY = 4096
 _SWEEP_SIZE_NARY = 256
 
+# Fusions-Sweep (TZ 9) — DREI Formen, aufsteigend in arithmetischer Intensität. Die
+# Fusion spart immer denselben Zwischentensor-Roundtrip (2·4·M·N Bytes); was sich
+# ändert, ist wie stark dieser Roundtrip gegenüber der Kontraktion selbst ins Gewicht
+# fällt. Deshalb variiert der Sweep die AI und nicht die Arbeitsmenge — die Frage
+# „wann lohnt Fusion?" wird damit belegt statt illustriert (gemessen auf GB10, bias):
+#   * schmal  M=N=4096, K=64   ⇒ 2,15 GFLOP,  AI  21 → Speedup 2,17x  (memory-bound)
+#   * quadratisch 1024³        ⇒ 2,15 GFLOP,  AI 205 → Speedup 1,23x
+#   * tief    M=N=1024, K=8192 ⇒ 17,2 GFLOP,  AI 431 → Speedup 1,05x  (compute-dominiert)
+# Die erste und die dritte Form haben denselben gesparten Roundtrip (8 MiB bzw. 128 MiB
+# bei der schmalen), aber grundverschiedene Kontraktions-Laufzeiten ⇒ der Trend ist
+# monoton fallend. Der A04-Befund (0,984x, assignments/04_assignment/src/task_02.py)
+# liegt jenseits der dritten Form: dort erschlägt die Kontraktion (12,83 ms) den Epilog
+# (0,067 ms) so weit, dass der Launch-Overhead der Fusion sie leicht negativ macht.
+_SWEEP_FUSION_NARROW = {"M": 4096, "N": 4096, "K": 64}      # memory-bound
+_SWEEP_FUSION_SQUARE = 1024                                 # quadratisch (Mittelfeld)
+_SWEEP_FUSION_DEEP = {"M": 1024, "N": 1024, "K": 8192}      # compute-dominiert
+
 _GPU_LOCK_REL = ".cache/gpu.lock"   # relativ zu store.PROJECT_DIR (wie in der GUI)
 _LOCK_TIMEOUT = 60                  # s — danach „GPU belegt" statt endlos zu warten
 
@@ -67,13 +84,23 @@ def build_config(args: argparse.Namespace) -> RunConfig:
     (falls angegeben) die Indizes ``i``/``j``/``k`` des Ausdrucks — das erhält den
     klassischen GEMM-Aufruf (``ik,kj->ij``: i=M, k=K, j=N) rückwärtskompatibel und
     generalisiert zugleich auf beliebige Ausdrücke/Familien.
+
+    ``--epilog`` (TZ 9) setzt die Fusion; ohne Angabe bleibt ``epilog=None`` ⇒ Config,
+    Kernel-Quelltext und Slug sind byte-identisch zu TZ 1-8. Ein Epilog auf einer
+    memory-bound-Familie oder einer n-ären Kette wird hier laut abgelehnt (statt still
+    verworfen zu werden), spiegelbildlich zur GUI-Validierung.
     """
     idx = controls.expr_indices(args.expr)
     sizes = {d: args.size for d in idx}
     for d, v in (("i", args.M), ("j", args.N), ("k", args.K)):
         if v is not None and d in sizes:
             sizes[d] = v
+    epilog = getattr(args, "epilog", None)
+    err = controls.validate_epilog(epilog, args.family, args.expr)
+    if err:
+        raise SystemExit(f"Ungültiger Epilog: {err}")
     return RunConfig(family=args.family, op=_resolve_op(args.family, args.op),
+                     epilog=epilog,
                      expr=controls.resolve_expr(args.expr, args.family), dim_sizes=sizes)
 
 
@@ -82,16 +109,27 @@ def build_config(args: argparse.Namespace) -> RunConfig:
 # ---------------------------------------------------------------------------
 def sweep_configs(size_c: int = _SWEEP_SIZE_CONTRACTION,
                   size_m: int = _SWEEP_SIZE_MEMORY,
-                  size_n: int = _SWEEP_SIZE_NARY) -> list[RunConfig]:
+                  size_n: int = _SWEEP_SIZE_NARY,
+                  size_f: int = _SWEEP_FUSION_SQUARE,
+                  narrow: dict | None = None,
+                  deep: dict | None = None) -> list[RunConfig]:
     """Kuratierter Report-Sweep: ein Satz ``RunConfig``s über alle drei Familien,
     der genau die Report-Geschichten erzeugt. **Deterministisch** (keine
     Zufälligkeit, stabile Slugs) und **headless** (kein GPU/torch) — die Ausführung
     macht ``run_sweep``. Aufgebaut aus fokussierten Teil-Sweeps, jeder beantwortet
     eine Report-Frage; zusammen ergeben sie die Roofline mit **beiden** Seiten.
+
+    ``narrow``/``size_f``/``deep`` steuern den Fusions-Sweep (TZ 9): drei Formen
+    aufsteigend in arithmetischer Intensität (schmal ⇒ memory-bound, quadratisch
+    ``size_f``³ ⇒ Mittelfeld, tief ⇒ compute-dominiert). Beide Epiloge (bias/relu)
+    laufen auf allen drei Formen ⇒ der Fusions-Gewinn wird als **Trend** über die AI
+    sichtbar, nicht als Einzelbefund.
     """
     ck = controls.combo_key
     cfgs: list[RunConfig] = []
     dims_c = {"i": size_c, "k": size_c, "j": size_c}
+    narrow = dict(narrow or _SWEEP_FUSION_NARROW)
+    deep = dict(deep or _SWEEP_FUSION_DEEP)
 
     # (1) Kontraktion — Format-Vergleich @ size_c³, Tile 128/128/64, ohne Swizzle,
     #     inkl. cuBLAS-Baseline (Obergrenze). → Durchsatz je Format · Genauigkeit↔
@@ -131,6 +169,22 @@ def sweep_configs(size_c: int = _SWEEP_SIZE_CONTRACTION,
     cfgs.append(RunConfig(expr="ij,jk,kl->il",
                           dim_sizes={"i": size_n, "j": size_n, "k": size_n, "l": size_n},
                           dtype="fp16", acc_dtype="fp32"))
+
+    # (7) Fusions-Sweep (TZ 9) — beide Epiloge × drei Formen (AI aufsteigend). Der
+    #     sequentielle Vergleichspunkt entsteht NICHT als eigene Config: er wird
+    #     innerhalb jedes fused-run() mitgemessen (metrics["fusion"], measure/fusion.py).
+    #     Zusätzlich je Form die unfusionierte Kontraktion als Bezugspunkt — die
+    #     quadratische steckt schon in (1), schmal und tief kommen hier dazu.
+    dims_narrow = {"i": narrow["M"], "k": narrow["K"], "j": narrow["N"]}
+    dims_square = {"i": size_f, "k": size_f, "j": size_f}
+    dims_deep = {"i": deep["M"], "k": deep["K"], "j": deep["N"]}
+    for dims in (dims_narrow, dims_deep):            # unfusionierte Bezugspunkte
+        cfgs += controls.configs_from_selection(
+            "ik,kj->ij", dims, fp16, family="contraction")
+    for epilog in ("bias", "relu"):
+        for dims in (dims_narrow, dims_square, dims_deep):
+            cfgs += controls.configs_from_selection(
+                "ik,kj->ij", dims, fp16, family="contraction", epilog=epilog)
     return cfgs
 
 
@@ -154,7 +208,9 @@ def print_summary(res) -> None:
 
     print("=== cuTile Performance Lab — Lauf ===")
     op_txt = f"  ·  op={c.get('op')}" if c.get("op") else ""
-    print(f"Familie  : {fam}{op_txt}")
+    # Epilog-Fusion (TZ 9) nur zeigen, wenn gesetzt → unfusionierte Ausgabe unverändert.
+    ep_txt = f"  ·  epilog={c.get('epilog')}" if c.get("epilog") else ""
+    print(f"Familie  : {fam}{op_txt}{ep_txt}")
     print(f"Ausdruck : {c.get('expr')}   (Größen: {s})")
     sw_txt = f" G{c.get('group_m')}" if c.get("swizzle") else ""
     print(f"Format   : {c.get('dtype')} -> {c.get('acc_dtype')}   "
@@ -184,6 +240,24 @@ def print_summary(res) -> None:
                   f"(AI={_fmt(ai, '.1f')} FLOP/B, "
                   f"{_fmt(met.get('percent_peak_flops'), '.1f')} % Peak-FLOP, "
                   f"{_fmt(met.get('gbps'), '.1f')} GB/s)")
+    # Fusions-Zeile (TZ 9): fused vs. sequentiell + gesparter Zwischentensor-Roundtrip.
+    # Nur bei gesetztem Epilog; nicht verfügbar ⇒ Grund statt stiller Lücke.
+    fus = (met or {}).get("fusion")
+    if isinstance(fus, dict):
+        if fus.get("available"):
+            sp = fus.get("speedup")
+            verdict = ("Fusion gewinnt" if isinstance(sp, (int, float)) and sp > 1.02 else
+                       "neutral" if isinstance(sp, (int, float)) and sp >= 0.98 else
+                       "sequentiell schneller")
+            print(f"Fusion   : {_fmt(sp, '.3f')}x   "
+                  f"(fused={_fmt(fus.get('fused_ms'), '.4f')} ms vs. "
+                  f"sequentiell={_fmt(fus.get('sequential_ms'), '.4f')} ms — {verdict})")
+            print(f"           gespart: {fus.get('saved_bytes', 0) / 2**20:.1f} MiB "
+                  f"Zwischentensor-Roundtrip   AI "
+                  f"{_fmt(fus.get('sequential_ai'), '.1f')} → "
+                  f"{_fmt(fus.get('fused_ai'), '.1f')} FLOP/B")
+        else:
+            print(f"Fusion   : kein Vergleich ({fus.get('note', 'unbekannt')})")
     if res.error:
         print(f"Fehler   : {res.error}")
     print(f"Store    : {store.store_relpath(store.RESULTS_JSONL)}  (+1 Zeile)")
@@ -215,8 +289,9 @@ def run_sweep(configs: list[RunConfig], name: str | None = None) -> int:
             for i, cfg in enumerate(configs, 1):
                 sw = f" · sw G{cfg.group_m}" if cfg.swizzle else ""
                 op = f" · {cfg.op}" if cfg.op else ""
+                ep = f" · ep {cfg.epilog}" if cfg.epilog else ""
                 print(f"----- [{i}/{total}] {cfg.family} · {cfg.expr} · "
-                      f"{cfg.dtype}→{cfg.acc_dtype}{op} · "
+                      f"{cfg.dtype}→{cfg.acc_dtype}{op}{ep} · "
                       f"TM{cfg.tile['TM']}/{cfg.tile['TN']}/{cfg.tile['TK']}{sw} -----")
                 res = run(cfg, run_id=batch_id, run_name=run_name, created_at=created_at)
                 print_summary(res)
@@ -263,6 +338,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--M", type=int, default=None, help="überschreibt Index i (Zeilen M)")
     p.add_argument("--N", type=int, default=None, help="überschreibt Index j (Spalten N)")
     p.add_argument("--K", type=int, default=None, help="überschreibt Index k (Kontraktion K)")
+    p.add_argument("--epilog", default=None, choices=["bias", "relu"],
+                   help="Epilog-Fusion auf dem Akku-Tile vor dem Store (nur Kontraktion, "
+                        "2-Operanden): bias = acc+D, relu = max(acc,0). Ohne Angabe keine "
+                        "Fusion (Kernel byte-identisch zu TZ 1-8)")
     # Sweep-Modus.
     p.add_argument("--sweep", action="store_true",
                    help="kompletten Report-Sweep fahren (alle Familien, GROUP_M/Tiles/n-är)")
