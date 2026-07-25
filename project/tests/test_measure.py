@@ -262,9 +262,7 @@ def test_fusion_metrics_consistent():
     Fusion hebt die arithmetische Intensität (der fused-Punkt sitzt auf der Roofline
     rechts vom sequentiellen). Deckt beide Epiloge ab (bias mit D-Operand, relu ohne).
     """
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.hardware import dtype_bytes
     from tool_pipeline.schema import RunConfig
@@ -401,11 +399,43 @@ def _has_cuda() -> bool:
         return False
 
 
+class _SkippedStandalone(Exception):
+    """Skip-Marker fuer den Standalone-Runner, falls pytest nicht installiert ist."""
+
+
+def _require_cuda() -> None:
+    """Ohne CUDA-GPU **ehrlich ueberspringen** statt still ``passed`` zu melden.
+
+    Ein ``return`` im Test zaehlt bei pytest als *bestanden* — auf einem GPU-losen Host
+    stand damit gruen, was nichts geprueft hat. ``pytest.skip`` meldet stattdessen
+    ``skipped``. Es wirft ``Skipped`` (eine ``BaseException``); der Standalone-Runner
+    ``_main`` unten faengt beide Skip-Formen ab (s. ``_skip_exceptions``) und zaehlt sie
+    als uebersprungen — auch in einem venv ganz ohne pytest.
+    """
+    if _has_cuda():
+        return
+    msg = "keine CUDA-GPU verfuegbar (GPU-Test)"
+    try:
+        import pytest
+    except ImportError:          # Standalone-Lauf ohne pytest im venv
+        raise _SkippedStandalone(msg) from None
+    pytest.skip(msg)
+
+
+def _skip_exceptions() -> tuple:
+    """Die Exception-Typen, die „uebersprungen" bedeuten (pytest-Skip + Fallback)."""
+    excs = [_SkippedStandalone]
+    try:
+        import pytest
+        excs.append(pytest.skip.Exception)
+    except ImportError:
+        pass
+    return tuple(excs)
+
+
 def test_benchmark_returns_distribution_keys():
     """Echter bench-Lauf: liefert die Verteilungs-Keys, min ≤ median ≤ p90, σ≥0."""
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import torch
     from tool_pipeline.codegen.compile import load_kernel
     from tool_pipeline.codegen.emit import emit
@@ -430,9 +460,7 @@ def test_benchmark_returns_distribution_keys():
 
 def test_benchmark_flush_toggle_runs():
     """flush_l2=False läuft ebenfalls durch (Vergleichs-Pfad warm vs. cold-L2)."""
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import torch
     from tool_pipeline.codegen.compile import load_kernel
     from tool_pipeline.codegen.emit import emit
@@ -453,9 +481,7 @@ def test_benchmark_flush_toggle_runs():
 
 def test_run_timing_has_distribution():
     """run() reicht die Verteilungs-Keys in RunResult.timing durch (+ compile getrennt)."""
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.schema import RunConfig
     from tool_pipeline.store import store as st
@@ -478,9 +504,7 @@ def test_run_metrics_has_roofline_keys():
     arithm. Intensität = 128 FLOP/Byte ist deterministisch (GPU-unabhängig) und
     hier hart prüfbar; GB/s/TFLOP/s/%-Peak müssen positiv und plausibel sein.
     """
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.schema import RunConfig
     from tool_pipeline.store import store as st
@@ -506,9 +530,7 @@ def test_baselines_cublas_naive_real():
     cuBLAS ist die hochoptimierte Bibliothek (Obergrenze), der naive 16³-Kernel
     die untunte cuTile-Variante (Untergrenze) — beide positiv, cuBLAS ≥ naive.
     """
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.schema import RunConfig
     from tool_pipeline.store import store as st
@@ -531,9 +553,7 @@ def test_baselines_cublas_naive_real():
 def test_baselines_fp8_graceful():
     """fp8-Lauf mit Baselines kippt nicht: naive läuft, cuBLAS ist entweder
     verfügbar oder sauber als nicht verfügbar markiert (kein Crash)."""
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.schema import RunConfig
     from tool_pipeline.store import store as st
@@ -554,9 +574,7 @@ def test_baselines_fp8_graceful():
 def test_run_provenance_has_gpu_state():
     """run() legt den GPU-Zustand pro Lauf in provenance ab (auf diesem Host
     mit nvidia-smi → nicht leer, mit numerischem sm_clock_mhz)."""
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.schema import RunConfig
     from tool_pipeline.store import store as st
@@ -577,15 +595,20 @@ def test_run_provenance_has_gpu_state():
 def _main() -> int:
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
-    failed = 0
+    skips = _skip_exceptions()
+    failed = skipped = 0
     for t in tests:
         try:
             t()
             print(f"PASS  {t.__name__}")
+        except skips as e:      # GPU-Test auf GPU-losem Host — kein Fehler
+            skipped += 1
+            print(f"SKIP  {t.__name__}: {e}")
         except Exception as e:  # noqa: BLE001
             failed += 1
             print(f"FAIL  {t.__name__}: {type(e).__name__}: {e}")
-    print(f"\n{len(tests) - failed}/{len(tests)} Tests bestanden")
+    extra = f", {skipped} übersprungen" if skipped else ""
+    print(f"\n{len(tests) - failed - skipped}/{len(tests)} Tests bestanden{extra}")
     return 1 if failed else 0
 
 
