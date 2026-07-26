@@ -33,4 +33,4 @@ Die zugehörigen Prüfungsleistungen (siehe ``slides/pruefungsleistungen.pdf``):
    projektplan
    pitch
    presentation
-   report
+   report/index
