@@ -27,6 +27,10 @@ _OPS = {
     "add":  {"arity": 2, "frag": "a + b", "doc": "elementweise Summe A + B (binaer)"},
     "mul":  {"arity": 2, "frag": "a * b", "doc": "elementweise Produkt A * B (binaer)"},
     "copy": {"arity": 1, "frag": "a",     "doc": "reine Kopie A — nur Bandbreite (unaer)"},
+    # ReLU (TZ 9): unaere elementweise Op max(A, 0). Dient zugleich als sequentieller
+    # Zwilling der Kontraktions-Epilog-Fusion ``epilog="relu"`` (Plain-Kontraktion +
+    # separater ReLU-Lauf) fuer den fused-vs-sequentiell-Vergleich.
+    "relu": {"arity": 1, "frag": "ct.maximum(a, 0)", "doc": "elementweise ReLU max(A, 0) (unaer)"},
 }
 
 
@@ -176,4 +180,19 @@ if __name__ == "__main__":
         print(f"  copy {label} (256,100): exakt={ok}")
         assert ok, f"Elementwise copy {label} stimmt nicht"
 
-    print("OK: generierter Elementwise-Modul laeuft und stimmt (add/mul/copy).")
+    # unaere relu (arithmetisch) in fp16/bf16/fp32, inkl. ragged (128x100).
+    launch = _load("relu")
+    for label in ("fp16", "bf16", "fp32"):
+        dt = _TORCH[label]
+        for (M, N) in [(256, 128), (128, 100)]:
+            a = _rand((M, N), dt)
+            C = torch.empty(M, N, dtype=torch.float32, device="cuda")
+            launch(a, C)
+            torch.cuda.synchronize()
+            exp = a.float().clamp(min=0)
+            err = (C.float() - exp).abs().max().item()
+            ok = torch.allclose(C.float(), exp, atol=1e-1, rtol=1e-2)
+            print(f"  relu {label} ({M},{N}): max_abs_err={err:.3e} allclose={ok}")
+            assert ok, f"Elementwise relu {label} stimmt nicht"
+
+    print("OK: generierter Elementwise-Modul laeuft und stimmt (add/mul/copy/relu).")

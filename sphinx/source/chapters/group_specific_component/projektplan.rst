@@ -74,7 +74,9 @@ Designentscheidungen (Überblick)
        lassen sich ansehen, vergleichen, umbenennen und löschen (GPU-frei).
    * - Zukunfts-Scope
      - Autotuning und Tile-Heatmap bewusst gestrichen; **Fusion**
-       (Kontraktion + Elementwise-Epilog) als Zukunftskandidat vorgemerkt.
+       (Kontraktion + Elementwise-Epilog) war als Zukunftskandidat vorgemerkt und
+       ist in TZ 9 umgesetzt. ``copy`` misst inzwischen die Bandbreiten-Obergrenze;
+       offen bleibt **Transpose** als eigene speichergebundene Operation.
 
 Zielhardware
 ============
@@ -147,6 +149,11 @@ dann **breit** (Operationen), dann **Politur**.
      - Feinschliff des Erscheinungsbilds, systematisch belegte Randfälle,
        gehärteter Compile-Cache, saubere Fehlerzustände, reproduzierbare
        Batch-Sweeps und dieser Sphinx-Bericht.
+   * - 9
+     - Fusion (Kontraktion + Elementwise-Epilog)
+     - ``bias``/``relu`` auf dem Akkumulator-Tile vor dem Store — ein Kernel
+       statt zwei; der sequentielle Pfad wird im selben Lauf mitgemessen, sodass
+       der Speedup über der arithmetischen Intensität ablesbar wird.
 
 Aufgabenverteilung
 ==================
@@ -192,11 +199,36 @@ Fortschritts-Log
        Report-Figuren aus dem Store, benutzerfreundliche Fehlerzustände und ein
        durchgängigeres Erscheinungsbild. Ergebnis: das fertige, dokumentierte
        Deliverable.
+   * - TZ 9
+     - **Fusion** von Kontraktion und Elementwise-Epilog (``bias``/``relu`` auf
+       dem Akkumulator-Tile vor dem Store): additiv über ``RunConfig.epilog``,
+       ohne Epilog byte-identischer Kernel; die fp32-Referenz schließt den Epilog
+       ein; der sequentielle Zwei-Kernel-Pfad wird im selben Lauf mitgemessen und
+       ebenfalls verifiziert. Ergebnis: ein monoton fallender Speedup von 2,71×
+       (bandbreitenlimitiert) auf 1,03× (rechenlimitiert) — siehe
+       :ref:`Bericht <gsc_report>`.
+   * - Bericht-
+       Vertiefung
+     - Der Projektbericht wurde von einem Ergebnis- zu einem **Erklär**-Bericht
+       ausgebaut (sechs Unterseiten: Grundlagen · Architektur · Pipeline ·
+       Frontend · Ergebnisse · Anhang) — Zielbild: wer ihn liest, versteht Aufbau
+       und Begründung jeder Stufe. Dabei wurden zwei Belege **nachgemessen**, die
+       der Text sonst nur hätte behaupten können, und in den kanonischen Sweep
+       aufgenommen (jetzt **33** Konfigurationen): die ``GROUP_M``-Achse bei
+       :math:`4096^3` (32×32-Blockgitter — der Swizzle ist dort **2,03×** wert mit
+       Optimum bei G8, während er bei :math:`1024^3` strukturell wirkungslos
+       bleibt) und ``copy`` als reine Datenbewegung (0 FLOP ⇒ die praktisch
+       erreichbare Bandbreite von **223 GB/s** = 82 % der theoretischen; damit ist
+       die bisherige 70–85 %-Annahme belegt statt geschätzt).
 
 Ausblick
 ========
 
-Als Zukunftskandidat bleibt die **Fusion** von Kontraktion und
-Elementwise-Epilog (A04-Befund 0,98×): das Ergebnis-Tile eines GEMM direkt auf
-dem Compute-Tile weiterverarbeiten, statt das Zwischenergebnis über den langsamen
-Hauptspeicher zu schicken — die konsequente nächste Stufe der memory-bound-Story.
+Die **Bandbreiten-Obergrenze** der GB10 ist inzwischen vermessen: Der Report-Sweep
+fährt ``copy`` als reine Datenbewegung (0 FLOP, arithmetische Intensität 0) und
+belegt damit **223 GB/s** — der Bezugspunkt, gegen den sich alle
+memory-bound-Ergebnisse einordnen. Offen bleibt der zweite Teil des
+Zukunftskandidaten: **Transpose als eigene speichergebundene Operation**, also
+Datenbewegung mit *nicht-kontiguiertem* Zugriffsmuster. Der Vergleich Transpose
+gegen Copy würde zeigen, was ein ungünstiges Layout allein kostet — bei
+identischer Byte-Zahl und identisch null Rechenanteil.

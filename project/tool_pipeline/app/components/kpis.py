@@ -135,6 +135,41 @@ def _baseline_cards(met: dict) -> list:
     return cards
 
 
+def _mib(nbytes) -> str:
+    """Bytes → MiB-Text (kleine Werte bleiben in KiB lesbar)."""
+    if not isinstance(nbytes, (int, float)) or isinstance(nbytes, bool):
+        return "—"
+    return f"{nbytes / 2**20:.1f} MiB" if nbytes >= 2**20 else f"{nbytes / 2**10:.0f} KiB"
+
+
+def _fusion_cards(met: dict) -> list:
+    """Fusions-Karten (TZ 9): fused vs. sequentiell + gesparter DRAM-Umweg des
+    Zwischentensors. Nur wenn ein Epilog lief UND die Zweitmessung verfügbar war —
+    schlug sie fehl, erscheint eine dezente Grund-Karte statt einer stillen Lücke
+    (der fused-Lauf selbst bleibt gültig)."""
+    f = met.get("fusion")
+    if not isinstance(f, dict):
+        return []
+    if not f.get("available"):
+        return [_kpi_card("Fusion", "—", sub=f"kein Vergleich: {f.get('note', 'unbekannt')}")]
+    sp = f.get("speedup")
+    # >1 ⇒ Fusion gewinnt, ~1 neutral, <1 leicht negativ (der A04-Fall) — die
+    # Einordnung steht direkt an der Zahl, damit die Karte nicht überinterpretiert wird.
+    verdict = ("Fusion gewinnt" if isinstance(sp, (int, float)) and sp > 1.02 else
+               "neutral" if isinstance(sp, (int, float)) and sp >= 0.98 else
+               "sequentiell schneller")
+    return [
+        _kpi_card(f"Fusion vs. sequentiell ({f.get('epilog')})",
+                  _fmt(sp, ".2f"), "×",
+                  sub=(f"fused {_fmt(f.get('fused_ms'), '.4f')} ms · sequentiell "
+                       f"{_fmt(f.get('sequential_ms'), '.4f')} ms — {verdict}")),
+        _kpi_card("Gesparter DRAM-Umweg", _mib(f.get("saved_bytes")),
+                  sub=(f"Zwischentensor nicht geschrieben+gelesen · AI "
+                       f"{_fmt(f.get('sequential_ai'), '.0f')} → "
+                       f"{_fmt(f.get('fused_ai'), '.0f')} FLOP/Byte")),
+    ]
+
+
 def render_kpis(result: RunResult):
     """KPI-Karten (wrappen responsiv): Durchsatz (+%-Peak) · Laufzeit-Median
     (+min/p90/σ) · Compile · Bandbreite (+%-Peak-BW) · arithm. Intensität · optional
@@ -151,6 +186,7 @@ def render_kpis(result: RunResult):
         _kpi_card("Arithm. Intensität", _fmt(met.get("arithmetic_intensity"), ".1f"), "FLOP/Byte"),
     ]
     cards += _baseline_cards(met)
+    cards += _fusion_cards(met)          # TZ 9: nur bei gesetztem Epilog
     return dbc.Row([dbc.Col(c, md=4) for c in cards], className="g-3 mb-3")
 
 

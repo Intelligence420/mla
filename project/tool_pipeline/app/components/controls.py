@@ -39,6 +39,8 @@ from ...schema import ALLOWED_ACC, RunConfig
 ID_FAMILY = "sel-family"          # Operations-Familie (contraction/elementwise/reduction)
 ID_OP = "sel-op"                  # Elementwise-Op (add/mul/copy) — nur für Elementwise
 ID_OP_WRAP = "op-wrap"            # Hülle der Op-Auswahl (Sichtbarkeit je Familie)
+ID_EPILOG = "sel-epilog"          # Epilog-Fusion (bias/relu) — nur für Kontraktion (TZ 9)
+ID_EPILOG_WRAP = "epilog-wrap"    # Hülle der Epilog-Auswahl (Sichtbarkeit je Familie)
 ID_PRESET = "sel-preset"          # Preset-Dropdown (füllt den Ausdruck)
 ID_EXPR = "in-expr"               # einsum-Ausdruck (Freitext, Source of Truth)
 ID_EXPR_INFO = "expr-info"        # aufgelöster Output / Klassifikation / Fehler
@@ -134,8 +136,20 @@ _OP_OPTIONS = [
     {"label": "add  (A + B)", "value": "add"},
     {"label": "mul  (A · B)", "value": "mul"},
     {"label": "copy (A)", "value": "copy"},
+    {"label": "relu (max(A,0))", "value": "relu"},
 ]
-_OP_KEYS = {"add", "mul", "copy"}
+_OP_KEYS = {"add", "mul", "copy", "relu"}
+
+# Epilog-Fusion (TZ 9) — nur bei family=contraction sichtbar, spiegelt die Op-Auswahl.
+# Der leere Wert "" = keine Fusion (⇒ RunConfig.epilog=None ⇒ byte-identischer
+# Kernel/Slug wie TZ 1-8). Die Werte sind die Keys von
+# ``codegen/templates/contraction._EPILOGS``.
+_EPILOG_OPTIONS = [
+    {"label": "keiner", "value": ""},
+    {"label": "bias (acc + D)", "value": "bias"},
+    {"label": "relu (max(acc,0))", "value": "relu"},
+]
+_EPILOG_KEYS = {"bias", "relu"}
 
 # memory-bound-Familien rechnen ohne Tensor-Core → nur die arithmetisch nativen
 # Formate (fp8-Arithmetik compiliert nicht, tf32 ist ein reines TC-Konzept). fp32
@@ -427,14 +441,54 @@ def _resolve_op(family: str, op: Optional[str]) -> Optional[str]:
     return None
 
 
+def epilog_from_controls(v, family: str = "contraction") -> Optional[str]:
+    """Epilog-Dropdown-Wert → ``RunConfig.epilog``. Der leere Wert (""/None) und jede
+    memory-bound-Familie ergeben ``None`` ⇒ Kernel/Slug byte-identisch zu TZ 1-8.
+    Erwartet einen vorher via ``validate_epilog`` geprüften Wert."""
+    if family != "contraction" or not v:
+        return None
+    return str(v)
+
+
+def validate_epilog(epilog, family: str = "contraction",
+                    expr: Optional[str] = None) -> Optional[str]:
+    """Prüfe die Epilog-Auswahl (TZ 9): leer ⇒ immer in Ordnung; gesetzt nur bei
+    ``family=contraction`` **und** einer 2-Operanden-Kontraktion.
+
+    Die n-är-Sperre ist der wichtige Teil: ``run()`` lehnt Epilog+n-är laut ab —
+    dieselbe Regel hier VOR dem GPU-Lauf gibt eine verständliche Meldung statt eines
+    Compile-Fehler-Tabs."""
+    if not epilog:
+        return None
+    if epilog not in _EPILOG_KEYS:
+        return f"Unbekannter Epilog {epilog!r} (erlaubt: {sorted(_EPILOG_KEYS)} oder keiner)."
+    if family != "contraction":
+        return (f"Epilog-Fusion gibt es nur bei der Kontraktion — die Familie "
+                f"{family!r} rechnet ohnehin memory-bound (der Epilog wäre dort die "
+                f"Operation selbst).")
+    if expr:
+        try:
+            ir = parse(expr, {d: 2 for d in expr_indices(expr)}, family=family)
+        except Exception:  # noqa: BLE001 — Ausdrucksfehler meldet validate_expr
+            return None
+        if isinstance(ir, NAryContractionIR):
+            return ("Epilog-Fusion ist nur für 2-Operanden-Kontraktionen umgesetzt — "
+                    "dieser Ausdruck ist eine n-äre Kette (mehrere paarweise GEMMs). "
+                    "Bitte Epilog auf „keiner“ stellen oder einen 2-Operanden-Ausdruck wählen.")
+    return None
+
+
 def config_from_controls(expr: str, dim_sizes: dict, family: str = "contraction",
-                         op: Optional[str] = None) -> RunConfig:
-    """Ausdruck + Größen (+ Familie/Op) → eine ``RunConfig`` (fp16→fp32-Default; von
-    der Einzellauf-Naht weiterbenutzt). Erwartet validierte Eingaben; coerct tolerant
-    über ``float`` und normalisiert den Ausdruck auf die explizite Form."""
+                         op: Optional[str] = None,
+                         epilog: Optional[str] = None) -> RunConfig:
+    """Ausdruck + Größen (+ Familie/Op/Epilog) → eine ``RunConfig`` (fp16→fp32-Default;
+    von der Einzellauf-Naht weiterbenutzt). Erwartet validierte Eingaben; coerct tolerant
+    über ``float`` und normalisiert den Ausdruck auf die explizite Form. ``epilog=None``
+    (Default) ⇒ unveränderte Config wie TZ 1-8."""
     idx = expr_indices(expr)
     ds = {d: int(float(dim_sizes[d])) for d in idx}
     return RunConfig(family=family, op=_resolve_op(family, op),
+                     epilog=epilog_from_controls(epilog, family),
                      expr=resolve_expr(expr, family), dim_sizes=ds)
 
 
@@ -619,7 +673,7 @@ def mutate_tile_rows(rows, triggered_id) -> list[dict]:
 
 def configs_from_selection(expr, dim_sizes, selection, tiles=None, swizzle_configs=None,
                            baselines=None, bench=None, family="contraction",
-                           op=None) -> list[RunConfig]:
+                           op=None, epilog=None) -> list[RunConfig]:
     """Ausdruck + Größen + Format-Auswahl → das **Kreuzprodukt** an ``RunConfig``s
     ``selection × tiles × swizzle_configs`` (TZ 7.5-2).
 
@@ -639,9 +693,14 @@ def configs_from_selection(expr, dim_sizes, selection, tiles=None, swizzle_confi
     (Reduktion=sum, Elementwise=`op`, Kontraktion=None). ``bench`` ist das optionale
     dict ``{"bench_warmup", "bench_iters"}``; ``None`` ⇒ RunConfig-Defaults (10/30).
     Erwartet vorher validierte Eingaben.
+
+    ``epilog`` (TZ 9) gilt **für alle** Configs des Kreuzprodukts (Fusion ist eine
+    Eigenschaft der Operation, keine Tuning-Achse) und nur bei der Kontraktion;
+    ``None`` ⇒ byte-identische Configs/Slugs wie TZ 1-8.
     """
     norm_expr = resolve_expr(expr, family)
     the_op = _resolve_op(family, op)
+    the_epilog = epilog_from_controls(epilog, family)
     idx = expr_indices(expr)
     sizes = {d: int(float(dim_sizes[d])) for d in idx}
     memory_bound = family in _MEMORY_BOUND
@@ -658,7 +717,8 @@ def configs_from_selection(expr, dim_sizes, selection, tiles=None, swizzle_confi
         first = True   # Baselines NUR an der ersten (tile,swizzle)-Kombi je Format
         for tile in tile_list:
             for (sw, gm) in sw_list:
-                kwargs = dict(family=family, op=the_op, expr=norm_expr, dim_sizes=dict(sizes),
+                kwargs = dict(family=family, op=the_op, epilog=the_epilog,
+                              expr=norm_expr, dim_sizes=dict(sizes),
                               dtype=d, acc_dtype=a, swizzle=bool(sw), group_m=int(gm),
                               baselines=list(bl) if first else [])
                 if tile is not None:
@@ -703,6 +763,24 @@ def _op_select() -> html.Div:
         children=[
             html.Label("Elementwise-Op", className="ctl-label"),
             dbc.RadioItems(id=ID_OP, options=_OP_OPTIONS, value="add", inline=True,
+                           style={"fontSize": "13px"}, inputStyle={"marginRight": "5px"},
+                           labelStyle={"marginRight": "14px"}),
+        ],
+    )
+
+
+def _epilog_select() -> html.Div:
+    """Epilog-Fusion-Auswahl (keiner/bias/relu). Nur bei family=contraction sichtbar
+    (die Sichtbarkeit schaltet ein Callback über ID_EPILOG_WRAP) — spiegelt bewusst
+    die Bauform der Elementwise-Op-Auswahl.
+
+    Der Epilog wird auf dem Akkumulator-Tile VOR dem Store angewandt und spart damit
+    den DRAM-Umweg des Zwischentensors; die KPI-Karten zeigen fused vs. sequentiell."""
+    return html.Div(
+        id=ID_EPILOG_WRAP, style={"display": "block", "marginTop": "10px"},
+        children=[
+            html.Label("Epilog-Fusion", className="ctl-label"),
+            dbc.RadioItems(id=ID_EPILOG, options=_EPILOG_OPTIONS, value="", inline=True,
                            style={"fontSize": "13px"}, inputStyle={"marginRight": "5px"},
                            labelStyle={"marginRight": "14px"}),
         ],
@@ -939,6 +1017,7 @@ def build_controls() -> html.Div:
         _preset_select(),
         _expr_input(),
         _op_select(),
+        _epilog_select(),
         # Aufgelöster Output / Klassifikation / Fehler (vom Callback gefüllt).
         html.Div(id=ID_EXPR_INFO, style={"fontSize": "12px", "margin": "6px 0 0",
                                          "minHeight": "16px"}),

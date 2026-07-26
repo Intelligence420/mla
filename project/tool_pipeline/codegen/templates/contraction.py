@@ -17,6 +17,8 @@ TK)``, ``b = load(B, (bb, kk, j), (1, TK, TN))`` -> ``(TK, TN)``, ``acc =
 ct.mma(a, b, acc)`` -> ``(TM, TN)``. KEIN Operanden-Swap, KEIN Permute.
 """
 
+from typing import Optional
+
 # ---------------------------------------------------------------------------
 # acc-dtype-Mapping: Akkumulator-Label -> ct-dtype-Ausdruck, als Literal in den
 # Kernel substituiert. fp32 und fp16 sind nutzbar (fp16-/fp8-Compute duerfen in
@@ -54,8 +56,26 @@ _INPUT_CAST = {
 _SWIZZLE_GROUP_M = 8
 
 
+# ---------------------------------------------------------------------------
+# Epilog-Fusion (TZ 9): eine optionale elementweise Op auf dem Akkumulator-Tile
+# VOR ``ct.store`` — spart den DRAM-Umweg des Zwischentensors (die Kontraktion
+# schreibt ihr Ergebnis nicht erst nach DRAM, damit ein zweiter Kernel es wieder
+# liest). Vorbild: der ``kernel_fused`` aus ``assignments/04_assignment/src/
+# task_02.py`` (D-Kachel laden, auf fp32 casten, auf das Akku-Tile anwenden).
+# ``operand=True`` ⇒ der Epilog braucht einen zusaetzlichen Eingabetensor D in
+# voller Ausgabe-Form (B,M,N) ⇒ der Kernel/launch bekommt einen vierten Operanden.
+# ``epilog=None`` ⇒ KEIN Epilog-Block, KEIN D ⇒ der emittierte Quelltext ist
+# byte-identisch zu TZ 1-8 (Anti-Drift). Zugleich die Validierungs-Whitelist.
+# ---------------------------------------------------------------------------
+_EPILOGS = {
+    "bias": {"operand": True},   # acc += D (elementweiser Bias-Add, A04-Form)
+    "relu": {"operand": False},  # acc = max(acc, 0) (operandenlos)
+}
+
+
 def build_gemm_module(tile: dict, dtype: str, acc_dtype: str,
-                      swizzle: bool = False, group_m: int = _SWIZZLE_GROUP_M) -> str:
+                      swizzle: bool = False, group_m: int = _SWIZZLE_GROUP_M,
+                      epilog: Optional[str] = None) -> str:
     """Baue den cuTile-Modul-Quelltext fuer ein kanonisches Batched-GEMM
     ``(B,M,K) x (B,K,N) -> (B,M,N)`` (B=1 = Plain-GEMM als Grid-Z=1).
 
@@ -74,10 +94,17 @@ def build_gemm_module(tile: dict, dtype: str, acc_dtype: str,
                       Wert). Wirkt NUR bei ``swizzle=True`` und wird dort als Literal
                       in den Kernel gebacken. ``group_m=8`` ⇒ byte-identisch; bei
                       ``swizzle=False`` wirkungslos (ignoriert). Loud-Fail bei ``< 1``.
+    :param epilog:    Optionale Epilog-Fusion (TZ 9) auf dem Akku-Tile VOR ``ct.store``:
+                      ``None`` (kein Epilog ⇒ Quelltext **byte-identisch** zu TZ 1-8),
+                      ``"bias"`` (acc += D, vierter Operand D in Ausgabe-Form ⇒
+                      ``launch(A, B, D, C)``) oder ``"relu"`` (acc = max(acc, 0),
+                      operandenlos ⇒ ``launch(A, B, C)`` unveraendert). Loud-Fail bei
+                      unbekanntem Epilog.
     :returns:         Vollstaendiger, ausfuehrbarer Modul-Quelltext als String.
-                      Konvention fuer den compile.py-Consumer: der Modul
-                      definiert eine Funktion ``launch(A, B, C)`` (C ist vorab
-                      alloziert, der Aufrufer kontrolliert den Output-dtype).
+                      Konvention fuer den compile.py-Consumer: der Modul definiert eine
+                      Funktion ``launch(A, B, C)`` (bzw. ``launch(A, B, D, C)`` bei
+                      ``epilog="bias"``); der letzte Operand C ist vorab alloziert, der
+                      Aufrufer kontrolliert den Output-dtype.
     """
     if acc_dtype not in _ACC_DTYPE_MAP:
         raise ValueError(
@@ -154,6 +181,49 @@ def build_gemm_module(tile: dict, dtype: str, acc_dtype: str,
             "    bb = ct.bid(2)\n"
         )
 
+    # Epilog-Fusion (TZ 9): optionale elementweise Op auf dem Akku-Tile VOR ct.store.
+    # epilog=None ⇒ KEIN Block, KEIN D-Operand, KEINE Doc-Zeile ⇒ der erzeugte
+    # Quelltext ist byte-identisch zu TZ 1-8 (Anti-Drift-Tests bleiben gruen). Der
+    # Epilog-Block sitzt zwischen ct.mma-Loop und ct.store; ``bias`` bringt einen
+    # vierten Operanden D (Ausgabe-Form) in Kernel-Signatur, launch und ct.launch-Tuple.
+    if epilog is not None and epilog not in _EPILOGS:
+        raise ValueError(
+            f"epilog {epilog!r} nicht unterstuetzt "
+            f"(verfuegbar: {sorted(_EPILOGS)} oder None)."
+        )
+    if epilog is None:
+        kern_operands = "A, B, C"
+        epilog_doc = ""
+        epilog_block = ""
+        launch_operand_doc = ""
+    elif epilog == "bias":
+        # Bias-Add: D-Kachel (Ausgabe-Form B,M,N) laden, auf den Akku-dtype casten
+        # und elementweise addieren — genau die A04-Fusions-Form (acc += D).
+        kern_operands = "A, B, D, C"
+        epilog_doc = (" Epilog-Fusion: bias — acc += D (elementweiser Bias-Operand in "
+                      "voller Ausgabe-Form) auf dem Akku-Tile VOR ct.store.")
+        epilog_block = (
+            "    # Epilog-Fusion (bias): D-Kachel laden, auf den Akku-dtype casten und\n"
+            "    # elementweise auf das Akku-Tile addieren -- VOR ct.store (spart den\n"
+            "    # DRAM-Umweg des Zwischentensors). D hat die volle Ausgabe-Form (B,M,N).\n"
+            "    d = ct.load(D, index=(bb, i, j), shape=(1, TM, TN),\n"
+            "                padding_mode=ct.PaddingMode.ZERO)\n"
+            "    d = ct.reshape(d, (TM, TN))\n"
+            f"    acc = acc + ct.astype(d, {acc_ct})\n\n"
+        )
+        launch_operand_doc = ("\n    D=(B,M,N) ist der elementweise Bias-Operand "
+                              "(Ausgabe-Form), der VOR dem Store auf das Akku-Tile addiert wird.")
+    else:  # relu
+        kern_operands = "A, B, C"
+        epilog_doc = (" Epilog-Fusion: relu — acc = max(acc, 0) auf dem Akku-Tile "
+                      "VOR ct.store (operandenlos).")
+        epilog_block = (
+            "    # Epilog-Fusion (relu): das Akku-Tile bei 0 abschneiden -- VOR ct.store\n"
+            "    # (der Epilog liegt auf dem Akku-Tile, kein Zwischentensor nach DRAM).\n"
+            "    acc = ct.maximum(acc, 0)\n\n"
+        )
+        launch_operand_doc = ""
+
     return f'''"""Generierter cuTile-GEMM (Codegen C1) — kanonisches Batched-GEMM (B,M,K)x(B,K,N)->(B,M,N).
 
 Jede 2-Operanden-Kontraktion wird host-seitig (B1-Reshape) auf diese Form
@@ -164,7 +234,7 @@ Tile-Literale: TM={tm}, TN={tn}, TK={tk} (fest in den Quelltext gebacken).
 
 Bewiesene Orientierung: a=(TM,TK), b=(TK,TN), ct.mma(a,b,acc)->(TM,TN),
 KEIN Operanden-Swap, KEIN Permute. i=bid(0)=M-Kachel, j=bid(1)=N-Kachel,
-bb=bid(2)=Batch.{swizzle_doc}
+bb=bid(2)=Batch.{swizzle_doc}{epilog_doc}
 """
 
 import cuda.tile as ct
@@ -177,7 +247,7 @@ TK = {tk}
 {group_const}
 
 @ct.kernel
-def gemm(A, B, C,
+def gemm({kern_operands},
          M: ct.Constant[int],
          N: ct.Constant[int],
          K: ct.Constant[int]):
@@ -199,24 +269,24 @@ def gemm(A, B, C,
         b = ct.reshape(b, (TK, TN))
 {cast_block}        acc = ct.mma(a, b, acc)
 
-    # (TM, TN)-Ergebnis in die (1, TM, TN)-Batch-Scheibe zurueckformen; ct.store
+{epilog_block}    # (TM, TN)-Ergebnis in die (1, TM, TN)-Batch-Scheibe zurueckformen; ct.store
     # schneidet out-of-bounds Elemente am M/N-Rand automatisch ab.
     ct.store(C, index=(bb, i, j),
              tile=ct.reshape(ct.astype(acc, C.dtype), (1, TM, TN)))
 
 
-def launch(A, B, C):
+def launch({kern_operands}):
     """Starte den batched GEMM-Kernel: C[bb] = A[bb] @ B[bb] (C vorab alloziert).
 
     A=(B,M,K), B=(B,K,N), C=(B,M,N). Grid = (cdiv(M,TM), cdiv(N,TN), B).
     M/N/K sind ct.Constant[int]-Launch-Args; TM/TN/TK sind Quelltext-Literale;
-    die Batch-Groesse B kommt ueber die dritte Grid-Achse (bb=bid(2)).
+    die Batch-Groesse B kommt ueber die dritte Grid-Achse (bb=bid(2)).{launch_operand_doc}
     """
     Bb, M, K = A.shape
     _, _, N = B.shape
     grid = (ct.cdiv(M, TM), ct.cdiv(N, TN), Bb)
     ct.launch(torch.cuda.current_stream().cuda_stream,
-              grid, gemm, (A, B, C, M, N, K))
+              grid, gemm, ({kern_operands}, M, N, K))
     return C
 '''
 

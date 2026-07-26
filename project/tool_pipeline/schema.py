@@ -88,6 +88,14 @@ class RunConfig:
     # verschiedene Kernel-Dateien bekommen. Kontraktion lässt ``op=None`` ⇒ Slug
     # byte-identisch zu TZ 1-6 (keine Regression, keine Cache-Kollision).
     op: Optional[str] = None
+    # Epilog-Fusion (TZ 9, additiv): eine optionale elementweise Op auf dem
+    # Akkumulator-Tile der **Kontraktion** VOR ``ct.store`` (spart den DRAM-Umweg
+    # des Zwischentensors). ``None`` = keine Fusion (reine Kontraktion); ``"bias"``
+    # = ``acc += D`` (zusätzlicher Operand D in Ausgabe-Form, A04-Form); ``"relu"``
+    # = ``max(acc, 0)`` (operandenlos). Geht — wie ``op``/``group_m`` — nur BEDINGT
+    # in den Slug ein (``store.config_slug``); ``epilog=None`` ⇒ Slug UND emittierter
+    # Quelltext byte-identisch zu TZ 1-8 (keine Cache-Drift). Nur bei Kontraktion.
+    epilog: Optional[str] = None
     expr: str = "ik,kj->ij"            # einsum-Ausdruck; treibt inputs/output
     inputs: Optional[list[str]] = None  # z. B. ["ik", "kj"]; aus expr abgeleitet
     output: Optional[str] = None        # z. B. "ij"; aus expr abgeleitet

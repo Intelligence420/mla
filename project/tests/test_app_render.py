@@ -172,6 +172,50 @@ def test_kpis_shows_baseline_cards():
     assert "Tuning-Speedup" in kt and "9.1" in kt, kt     # 10.9/1.2 ≈ 9.1
 
 
+def _ok_fused(available: bool = True) -> RunResult:
+    """ok-Lauf **mit** Epilog-Fusion (TZ 9): metrics["fusion"] trägt den
+    fused-vs-sequentiell-Vergleich. `available=False` = die Zweitmessung schlug fehl
+    (der fused-Lauf selbst bleibt gültig)."""
+    fusion = ({"available": True, "epilog": "bias", "ew_op": "add",
+               "fused_ms": 0.0246, "sequential_ms": 0.0320, "speedup": 1.301,
+               "fused_bytes": 917504, "sequential_bytes": 1441792,
+               "saved_bytes": 524288, "fused_ai": 36.6, "sequential_ai": 23.3}
+              if available else
+              {"available": False, "note": "sequentieller Pfad verify_failed (max_abs_err=9.1)"})
+    return RunResult(
+        status="ok", config=RunConfig(epilog="bias").to_dict(),
+        kernel_path="results/kernels/x__ep_bias.py",
+        accuracy={"max_abs_err": 1.7e-4, "passed": True, "atol": 0.01, "rtol": 0.001},
+        timing={"compile_ms": 52.9, "run_ms": 0.0246, "bench_iters": 30},
+        metrics={"tflops": 10.9, "gbps": 85.3, "arithmetic_intensity": 36.6,
+                 "fusion": fusion},
+        provenance=dict(_PROV), error=None,
+    )
+
+
+def test_kpis_shows_fusion_cards():
+    """Fusions-Karten (TZ 9): Speedup mit Einordnung + gesparter DRAM-Umweg mit der
+    AI-Verschiebung. Ohne Epilog dürfen die Karten NICHT erscheinen."""
+    kt = _renders(kpis.render_kpis, _ok_fused())
+    assert "Fusion vs. sequentiell" in kt and "bias" in kt, kt
+    assert "1.30" in kt and "Fusion gewinnt" in kt, kt      # >1.02 ⇒ Gewinn
+    assert "0.0246" in kt and "0.0320" in kt, kt            # fused/sequentiell ms
+    assert "Gesparter DRAM-Umweg" in kt and "512 KiB" in kt, kt
+    assert "23 → 37 FLOP/Byte" in kt, kt                    # AI-Verschiebung
+    # Ohne Epilog: keine Fusions-Karten (kein leeres Feld).
+    plain = _renders(kpis.render_kpis, _ok_full())
+    assert "Fusion" not in plain, plain
+
+
+def test_kpis_fusion_unavailable_shows_reason():
+    """Schlägt die Zweitmessung fehl, erscheint der Grund statt einer stillen Lücke —
+    und der fused-Lauf selbst wird weiterhin normal gerendert."""
+    kt = _renders(kpis.render_kpis, _ok_fused(available=False))
+    assert "Fusion" in kt and "kein Vergleich" in kt, kt
+    assert "verify_failed" in kt, kt
+    assert "TFLOP/s" in kt, "der fused-Lauf muss trotzdem gerendert werden"
+
+
 def test_context_shows_gpu_state():
     """render_context zeigt den GPU-Zustand (Takt/Temp/Power); [N/A]-Felder fehlen still."""
     ct = _renders(kpis.render_context, _ok_full())

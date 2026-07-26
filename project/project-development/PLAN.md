@@ -19,7 +19,7 @@ Ein Tool: Nutzer gibt einen einsum-/GEMM-Ausdruck ein → daraus wird **live** e
 | **GUI-Framework** | **Plotly Dash** | turnkey Background-Jobs (`background=True`: Progress/Cancel/Run-Disable) lösen den mehrsekündigen cuTile-Compile ohne Bastelei; native Plotly-Charts inkl. Roofline; reif/langlebig. Runner-up: NiceGUI. Bewusst **nicht** Gradio/Streamlit (Demo-Optik vs. „ordentliches Framework") |
 | **GUI-Stellenwert** | **Hauptdeliverable**, kein Anhängsel; professionell, nicht das Mockup, nicht vibe-coded | |
 | **Operationen** | Kontraktions-Familie (GEMM, Batched GEMM, allg. Kontraktion) **+ memory-bound** (Elementwise, Reduktion, opt. Copy/Transpose) | einsum ist die verbindende Sprache + Presets → Kernel-Familien; memory-bound macht die **Roofline** aussagekräftig (compute- vs. memory-bound) |
-| **Fusion** | **Zukunftskandidat** (Kontraktion+Elementwise-Epilog, A04), nicht jetzt | A04-Befund: 0,98× — ehrlich interessant, aber später |
+| **Fusion** | **Umgesetzt in TZ 9** (Kontraktion+Elementwise-Epilog `bias`/`relu` auf dem Akku-Tile, additiv: `epilog=None` ⇒ byte-identisch) | A04-Befund 0,98× war der Anlass; gemessener Trend auf GB10: 2,72× (schmal, AI 32) → 1,03× (tief, AI 455) ⇒ Fusion lohnt genau im bandbreitenlimitierten Bereich |
 | **Autotuning + Tile-Heatmap** | **Gestrichen** | Scope-Reduktion |
 | **Codegen** | **C1 + B1** (s. §3) | Headline „Kernel generieren" wörtlich wahr & sichtbar; Korrektheitsrisiko begrenzt |
 | **Generierter Code** | wird **persistiert** (nicht nur angezeigt) | Cache-Schlüssel + reproduzierbares Artefakt + UI-Anzeige + Debugbarkeit |
@@ -156,5 +156,11 @@ Jede Datei hat aktuell einen Zweck-Docstring + TODO-Hinweis; Inhalte füllen die
 *TODOs:* `app/assets/theme.css`, Padding/Masking im Codegen, Cache-Härtung im Store, `cli.py` (Batch-Sweeps für Report-Plots), Sphinx-Kapitel, `tests/test_measure.py`.
 *Schaltet frei:* das **fertige, dokumentierte Deliverable**.
 
+### TZ 9 — Fusion: Kontraktion + Elementwise-Epilog
+*Fertig, wenn:* ein **optionaler** Epilog (`bias` = `acc += D`, `relu` = `max(acc,0)`) im Kontraktions-Template auf dem Akkumulator-Tile **vor** `ct.store` läuft — additiv über `RunConfig.epilog` gesteuert, bedingt im Slug (`__ep_<epilog>`), `epilog=None` byte-identisch zu TZ 1–8; die fp32-Referenz schließt den Epilog ein; **fused vs. sequentiell** wird als Zweitmessung im selben `run()` gemessen und verifiziert; GUI-Auswahl (nur Kontraktion) + KPI-Karten; CLI-Fusions-Sweep über drei Formen; Report-Figur + Fusions-Story.
+*TODOs:* `codegen/templates/contraction.py` (Epilog-Zweig), `schema.py` (`epilog`), `store/store.py` (bedingtes Slug-Suffix), `measure/fusion.py` (NEU: sequentieller Vergleich, graceful), `measure/verify.py`/`metrics.py` (Referenz inkl. Epilog, D-Read in den Bytes), `run.py` (Epilog-Operanden + launch-Arity), `app/components/controls.py`/`kpis.py`/`callbacks.py`, `cli.py` (`--epilog` + Sweep), `report_figures.py` (`fig_fusion`), `report.rst`.
+*Ergebnis (GB10, fp16→fp32):* Speedup **2,22×/2,72×** (schmal 4096·4096·64, AI 21/32) → **1,25×/1,33×** (1024³, AI 205/256) → **1,06×/1,03×** (tief 1024·1024·8192, AI 431/455). Monoton fallend ⇒ Fusion zahlt sich in dem Maß aus, in dem die Operation bandbreiten- statt rechenlimitiert ist; der A04-Befund (0,984×) liegt jenseits der tiefsten Form.
+*Schaltet frei:* die **memory-bound-Story zu Ende erzählt** — Datentransport sparen statt schneller rechnen.
+
 ### Später / optional (Zukunftskandidaten)
-n-ary einsum (opt_einsum → paarweise Kontraktionen), **Fusion** (Kontraktion+Elementwise-Epilog, A04), Copy/Transpose als eigene memory-bound Ops.
+Copy/Transpose als eigene memory-bound Ops. (n-ary einsum in TZ 7.5 erledigt, Fusion in TZ 9.)

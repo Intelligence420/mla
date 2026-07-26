@@ -42,6 +42,9 @@ def _header(config: RunConfig) -> str:
         head.append(f"# Format   : {config.dtype} -> {config.acc_dtype} (Akku)")
         head.append(f"# Tile     : TM={t.get('TM')} TN={t.get('TN')} TK={t.get('TK')}"
                     f" | swizzle={config.swizzle}")
+        # Epilog-Zeile (TZ 9) NUR wenn gesetzt ⇒ epilog=None-Header byte-identisch zu TZ 1-8.
+        if config.epilog:
+            head.append(f"# Epilog   : {config.epilog} (Fusion auf dem Akku-Tile vor Store)")
     elif fam == "elementwise":
         head.append("# Familie  : elementwise")
         head.append(f"# Format   : {config.dtype} -> {config.acc_dtype} (Ausgabe)")
@@ -68,7 +71,8 @@ def emit(config: RunConfig) -> str:
     """
     if config.family == "contraction":
         body = build_gemm_module(config.tile, config.dtype, config.acc_dtype,
-                                 swizzle=config.swizzle, group_m=config.group_m)
+                                 swizzle=config.swizzle, group_m=config.group_m,
+                                 epilog=config.epilog)
     elif config.family == "elementwise":
         if not config.op:
             raise ValueError(
