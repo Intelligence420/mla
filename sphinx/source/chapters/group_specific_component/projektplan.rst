@@ -75,8 +75,8 @@ Designentscheidungen (Überblick)
    * - Zukunfts-Scope
      - Autotuning und Tile-Heatmap bewusst gestrichen; **Fusion**
        (Kontraktion + Elementwise-Epilog) war als Zukunftskandidat vorgemerkt und
-       ist in TZ 9 umgesetzt. Offen bleibt Copy/Transpose als eigene
-       speichergebundene Operationen.
+       ist in TZ 9 umgesetzt. ``copy`` misst inzwischen die Bandbreiten-Obergrenze;
+       offen bleibt **Transpose** als eigene speichergebundene Operation.
 
 Zielhardware
 ============
@@ -149,6 +149,11 @@ dann **breit** (Operationen), dann **Politur**.
      - Feinschliff des Erscheinungsbilds, systematisch belegte Randfälle,
        gehärteter Compile-Cache, saubere Fehlerzustände, reproduzierbare
        Batch-Sweeps und dieser Sphinx-Bericht.
+   * - 9
+     - Fusion (Kontraktion + Elementwise-Epilog)
+     - ``bias``/``relu`` auf dem Akkumulator-Tile vor dem Store — ein Kernel
+       statt zwei; der sequentielle Pfad wird im selben Lauf mitgemessen, sodass
+       der Speedup über der arithmetischen Intensität ablesbar wird.
 
 Aufgabenverteilung
 ==================
@@ -199,15 +204,31 @@ Fortschritts-Log
        dem Akkumulator-Tile vor dem Store): additiv über ``RunConfig.epilog``,
        ohne Epilog byte-identischer Kernel; die fp32-Referenz schließt den Epilog
        ein; der sequentielle Zwei-Kernel-Pfad wird im selben Lauf mitgemessen und
-       ebenfalls verifiziert. Ergebnis: ein monoton fallender Speedup von 2,72×
+       ebenfalls verifiziert. Ergebnis: ein monoton fallender Speedup von 2,71×
        (bandbreitenlimitiert) auf 1,03× (rechenlimitiert) — siehe
        :ref:`Bericht <gsc_report>`.
+   * - Bericht-
+       Vertiefung
+     - Der Projektbericht wurde von einem Ergebnis- zu einem **Erklär**-Bericht
+       ausgebaut (sechs Unterseiten: Grundlagen · Architektur · Pipeline ·
+       Frontend · Ergebnisse · Anhang) — Zielbild: wer ihn liest, versteht Aufbau
+       und Begründung jeder Stufe. Dabei wurden zwei Belege **nachgemessen**, die
+       der Text sonst nur hätte behaupten können, und in den kanonischen Sweep
+       aufgenommen (jetzt **33** Konfigurationen): die ``GROUP_M``-Achse bei
+       :math:`4096^3` (32×32-Blockgitter — der Swizzle ist dort **2,03×** wert mit
+       Optimum bei G8, während er bei :math:`1024^3` strukturell wirkungslos
+       bleibt) und ``copy`` als reine Datenbewegung (0 FLOP ⇒ die praktisch
+       erreichbare Bandbreite von **223 GB/s** = 82 % der theoretischen; damit ist
+       die bisherige 70–85 %-Annahme belegt statt geschätzt).
 
 Ausblick
 ========
 
-Offen bleibt als Zukunftskandidat **Copy/Transpose als eigene speichergebundene
-Operationen**: reine Datenbewegung ohne Rechenanteil, also der äußerste linke
-Rand der Roofline. Damit ließe sich die Bandbreiten-Obergrenze der GB10 direkt
-vermessen — der Bezugspunkt, gegen den sich alle memory-bound-Ergebnisse dieses
-Berichts einordnen lassen.
+Die **Bandbreiten-Obergrenze** der GB10 ist inzwischen vermessen: Der Report-Sweep
+fährt ``copy`` als reine Datenbewegung (0 FLOP, arithmetische Intensität 0) und
+belegt damit **223 GB/s** — der Bezugspunkt, gegen den sich alle
+memory-bound-Ergebnisse einordnen. Offen bleibt der zweite Teil des
+Zukunftskandidaten: **Transpose als eigene speichergebundene Operation**, also
+Datenbewegung mit *nicht-kontiguiertem* Zugriffsmuster. Der Vergleich Transpose
+gegen Copy würde zeigen, was ein ungünstiges Layout allein kostet — bei
+identischer Byte-Zahl und identisch null Rechenanteil.
