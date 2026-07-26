@@ -73,6 +73,15 @@ _SWEEP_FUSION_NARROW = {"M": 4096, "N": 4096, "K": 64}      # memory-bound
 _SWEEP_FUSION_SQUARE = 1024                                 # quadratisch (Mittelfeld)
 _SWEEP_FUSION_DEEP = {"M": 1024, "N": 1024, "K": 8192}      # compute-dominiert
 
+# GROUP_M-Achse (Report-Vertiefung) — die Swizzle-Gruppengröße ist bei 1024³
+# strukturell **wirkungslos**: mit TM=TN=128 entsteht ein 8×8-Blockgitter, die
+# Rasterung begrenzt die Gruppe auf ``min(num_pid_m - first_pid_m, GROUP_M)`` = 8,
+# es gibt also nur EINE Gruppe und für jedes GROUP_M ≥ 8 dieselbe Permutation.
+# Messbar wird die Achse erst auf einem größeren Gitter: 4096³ ⇒ 32×32 Blöcke ⇒
+# G2/G4/G8/G16/G32 = 16/8/4/2/1 echte Gruppen. Ohne-Swizzle läuft als Bezugspunkt mit.
+_SWEEP_SIZE_GROUP_M = 4096
+_SWEEP_GROUP_M_VALUES = (2, 4, 8, 16, 32)
+
 _GPU_LOCK_REL = ".cache/gpu.lock"   # relativ zu store.PROJECT_DIR (wie in der GUI)
 _LOCK_TIMEOUT = 60                  # s — danach „GPU belegt" statt endlos zu warten
 
@@ -137,6 +146,12 @@ def sweep_configs(size_c: int = _SWEEP_SIZE_CONTRACTION,
     ``size_f``³ ⇒ Mittelfeld, tief ⇒ compute-dominiert). Beide Epiloge (bias/relu)
     laufen auf allen drei Formen ⇒ der Fusions-Gewinn wird als **Trend** über die AI
     sichtbar, nicht als Einzelbefund.
+
+    Zwei Teil-Sweeps belegen Aussagen, die der Report sonst nur behaupten könnte:
+    die **GROUP_M-Achse** auf einem hinreichend großen Blockgitter
+    (``_SWEEP_SIZE_GROUP_M``³, wo sie im Gegensatz zu 1024³ wirken kann) und
+    **``copy``** als reine Datenbewegung (0 FLOP ⇒ die praktisch erreichbare
+    Bandbreite als Bezugspunkt aller memory-bound-Zahlen).
     """
     controls = _controls()
     ck = controls.combo_key
@@ -199,6 +214,30 @@ def sweep_configs(size_c: int = _SWEEP_SIZE_CONTRACTION,
         for dims in (dims_narrow, dims_square, dims_deep):
             cfgs += controls.configs_from_selection(
                 "ik,kj->ij", dims, fp16, family="contraction", epilog=epilog)
+
+    # (8) GROUP_M-Achse auf einem Gitter, auf dem sie überhaupt wirken KANN
+    #     (``_SWEEP_SIZE_GROUP_M``³ ⇒ 32×32 Blöcke ⇒ 16/8/4/2/1 echte Gruppen).
+    #     Bei 1024³ (Teil-Sweep 3) ist dieselbe Achse strukturell wirkungslos — erst
+    #     der Vergleich beider Größen macht aus „Swizzle bringt ~3 %" die richtige
+    #     Aussage „der Swizzle-Gewinn hängt an der Gittergröße". Ohne-Swizzle ist der
+    #     Bezugspunkt; alle sechs Läufe teilen Format/Tile, variiert wird nur GROUP_M.
+    dims_g = {"i": _SWEEP_SIZE_GROUP_M, "k": _SWEEP_SIZE_GROUP_M, "j": _SWEEP_SIZE_GROUP_M}
+    cfgs += controls.configs_from_selection(
+        "ik,kj->ij", dims_g, fp16,
+        tiles=[{"TM": 128, "TN": 128, "TK": 64}],
+        swizzle_configs=[(False, 8)] + [(True, g) for g in _SWEEP_GROUP_M_VALUES],
+        family="contraction")
+
+    # (9) Reine Datenbewegung: Elementwise ``copy`` @ size_m² — 0 FLOP, arithmetische
+    #     Intensität 0, also der äußerste linke Rand der Roofline. Das misst die
+    #     **praktisch erreichbare** Bandbreite der Maschine und liefert damit den
+    #     Bezugspunkt, gegen den sich alle memory-bound-Ergebnisse einordnen (die
+    #     hardware.py-Annahme „real 70–85 % der theoretischen 273 GB/s" wird hier
+    #     empirisch geprüft statt geglaubt). Drei Formate ⇒ 4, 6 und 8 Byte je Element.
+    for dt, acc in (("fp16", "fp16"), ("fp16", "fp32"), ("fp32", "fp32")):
+        cfgs += controls.configs_from_selection(
+            "ij->ij", {"i": size_m, "j": size_m}, [ck(dt, acc)],
+            family="elementwise", op="copy")
     return cfgs
 
 
