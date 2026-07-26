@@ -113,6 +113,44 @@ def test_execute_batched_expression():
     assert "erfolgreich" in txt and "PASS" in txt, f"kein ok/Verify: {txt[:300]}"
 
 
+def test_execute_with_epilog_fusion():
+    """Epilog-Fusion (TZ 9) über die UI-Naht: echter fused GPU-Lauf → verifiziert,
+    die Fusions-KPI-Karten erscheinen (Speedup + gesparter DRAM-Umweg) und der Tab
+    ist als fused erkennbar (`ep bias`)."""
+    restore = _redirect_store()
+    try:
+        comps = execute_run(_EXPR, {"i": 256, "k": 256, "j": 256},
+                            [combo_key("fp16", "fp32")], epilog="bias")
+    finally:
+        restore()
+    assert isinstance(comps, list) and comps
+    txt = _text(comps)
+    assert "erfolgreich" in txt and "PASS" in txt, f"kein ok/Verify: {txt[:300]}"
+    assert "Fusion vs. sequentiell" in txt, f"Fusions-KPI fehlt: {txt[:400]}"
+    assert "Gesparter DRAM-Umweg" in txt, f"Bytes-KPI fehlt: {txt[:400]}"
+    assert "ep bias" in txt, "fused-Lauf ist im Tab/Status-Strip nicht als solcher erkennbar"
+    assert "ct.maximum" not in txt, "bias darf keinen relu-Block emittieren"
+
+
+def test_execute_epilog_rejected_for_nary_before_gpu():
+    """Epilog + n-äre Kette wird VOR dem GPU-Lauf abgelehnt (verständliche Warnung
+    statt Compile-Fehler-Tab) — die Scope-Grenze von TZ 9 ist in der GUI sichtbar."""
+    comps = execute_run("ij,jk,kl->il", {"i": 64, "j": 64, "k": 64, "l": 64},
+                        [combo_key("fp16", "fp32")], epilog="bias")
+    txt = _text(comps)
+    assert "Ungültiger Epilog" in txt and "2-Operanden" in txt, txt
+    assert "Graph" not in _types(comps), "es darf kein Lauf/Chart entstanden sein"
+
+
+def test_execute_epilog_rejected_for_memory_bound():
+    """Epilog + memory-bound-Familie wird ebenfalls vorab abgelehnt (dort IST die Op
+    die Operation) — kein stiller GPU-Lauf ohne Fusion."""
+    comps = execute_run("ij,ij->ij", {"i": 64, "j": 64}, [combo_key("fp16", "fp32")],
+                        family="elementwise", op="add", epilog="relu")
+    txt = _text(comps)
+    assert "Ungültiger Epilog" in txt and "Kontraktion" in txt, txt
+
+
 def test_execute_with_tile_swizzle_baselines():
     """Nicht-Default-Tile (64/64/32) + Swizzle + beide Baselines fließen durch →
     echter Lauf mit drei Charts; der Lauf verifiziert (kein Crash)."""

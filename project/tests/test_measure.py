@@ -225,6 +225,131 @@ def test_group_m_in_slug_conditional():
                         "tile": {"TM": 128, "TN": 128, "TK": 64}, "swizzle": True}) == base + "__sw"
 
 
+def test_fusion_epilog_ew_op_mapping():
+    """Jeder unterstützte Epilog hat einen sequentiellen Elementwise-Zwilling
+    (bias→add binär, relu→relu unär) — sonst könnte der Vergleich nicht gebaut
+    werden. Ein unbekannter Epilog liefert `available=False` mit Begründung statt
+    einer stillen Falschmessung. Headless (kein GPU-Pfad erreicht)."""
+    from tool_pipeline.measure.fusion import _EPILOG_TO_EW_OP, measure_sequential
+    from tool_pipeline.schema import RunConfig
+
+    assert _EPILOG_TO_EW_OP == {"bias": "add", "relu": "relu"}
+    # Unbekannter Epilog ⇒ früher, sauberer Ausstieg VOR jeder GPU-Arbeit.
+    out = measure_sequential(RunConfig(epilog="gelu"), None, None, None, None,
+                             None, [], 1.0)
+    assert out["available"] is False, out
+    assert "gelu" in out["note"], out
+
+
+def test_fusion_graceful_on_error():
+    """`measure_sequential` ist graceful: schlägt der sequentielle Vergleich fehl,
+    kommt `available=False` + Grund zurück — die Ausnahme darf NICHT nach oben
+    laufen, sonst kippt ein bereits verifizierter und gemessener fused-Lauf wegen
+    einer bloßen Zweitmessung."""
+    from tool_pipeline.measure.fusion import measure_sequential
+    from tool_pipeline.schema import RunConfig
+
+    # canonical=None ⇒ TypeError beim Auspacken der c_shape → muss gefangen werden.
+    out = measure_sequential(RunConfig(epilog="bias"), None, None, None, None,
+                             None, [], 1.0)
+    assert out["available"] is False, out
+    assert "Error" in out["note"] or "error" in out["note"], out
+
+
+def test_fusion_metrics_consistent():
+    """Realer fused-Lauf: `metrics["fusion"]` ist in sich konsistent — die Ersparnis
+    ist EXAKT der DRAM-Roundtrip des Zwischentensors (2·out·B·M·N Bytes), und die
+    Fusion hebt die arithmetische Intensität (der fused-Punkt sitzt auf der Roofline
+    rechts vom sequentiellen). Deckt beide Epiloge ab (bias mit D-Operand, relu ohne).
+    """
+    _require_cuda()
+    import tool_pipeline.run as R
+    from tool_pipeline.hardware import dtype_bytes
+    from tool_pipeline.schema import RunConfig
+    from tool_pipeline.store import store as st
+
+    M = N = K = 256
+    for epilog in ("bias", "relu"):
+        orig = st.append_result
+        st.append_result = lambda r, path=None: None    # Store isolieren
+        try:
+            res = R.run(RunConfig(dim_sizes={"i": M, "k": K, "j": N}, epilog=epilog))
+        finally:
+            st.append_result = orig
+        assert res.status == "ok", f"{epilog}: status={res.status} error={res.error}"
+        assert res.accuracy["passed"], f"{epilog}: verify failed {res.accuracy}"
+        f = res.metrics.get("fusion")
+        assert f and f["available"], f"{epilog}: kein Fusions-Vergleich: {f}"
+        # Gesparte Bytes = genau der Zwischentensor-Roundtrip (lesen + schreiben).
+        expected_saved = 2 * dtype_bytes("fp32") * M * N
+        assert f["saved_bytes"] == expected_saved, (epilog, f)
+        assert f["sequential_bytes"] - f["fused_bytes"] == expected_saved, (epilog, f)
+        # Fusion hebt die AI (weniger Bytes bei gleichen FLOPs).
+        assert f["fused_ai"] > f["sequential_ai"], (epilog, f)
+        # Speedup ist der gemessene Quotient (>1 ⇒ Fusion gewinnt bei dieser Form).
+        assert abs(f["speedup"] - f["sequential_ms"] / f["fused_ms"]) < 1e-2, (epilog, f)
+        assert f["epilog"] == epilog and f["fused_ms"] > 0 and f["sequential_ms"] > 0, f
+    # Ohne Epilog gibt es keinen Fusions-Block (kein leeres Feld im Store).
+    orig = st.append_result
+    st.append_result = lambda r, path=None: None
+    try:
+        plain = R.run(RunConfig(dim_sizes={"i": M, "k": K, "j": N}))
+    finally:
+        st.append_result = orig
+    assert "fusion" not in plain.metrics, plain.metrics
+
+
+def test_epilog_bias_bytes_include_d_read():
+    """Der bias-Operand D wird MITGEZÄHLT: compute_metrics(epilog="bias") addiert
+    B·M·N Elemente im Compute-dtype zu den Bytes. Sonst sähe der fused-Punkt auf
+    der Roofline künstlich gut aus (Bytes gelesen, aber nicht gezählt). Headless."""
+    from tool_pipeline.hardware import dtype_bytes
+    from tool_pipeline.measure.metrics import compute_metrics
+
+    kw = dict(run_ms=1.0, dtype="fp16", acc_dtype="fp32", B=1)
+    plain = compute_metrics(256, 256, 256, **kw)
+    bias = compute_metrics(256, 256, 256, epilog="bias", **kw)
+    relu = compute_metrics(256, 256, 256, epilog="relu", **kw)
+    # relu ist operandenlos ⇒ identische Bytes/AI wie ohne Epilog.
+    assert relu["arithmetic_intensity"] == plain["arithmetic_intensity"], (relu, plain)
+    # bias liest D zusätzlich ⇒ mehr Bytes ⇒ niedrigere AI (bei gleichen FLOPs).
+    extra = dtype_bytes("fp16") * 256 * 256
+    assert bias["gbps"] > plain["gbps"], (bias, plain)
+    assert bias["arithmetic_intensity"] < plain["arithmetic_intensity"], (bias, plain)
+    # Der Bytes-Zuschlag ist EXAKT der D-Read: die AI des bias-Punkts ist
+    # FLOPs / (GEMM-Bytes + D-Read) — unabhängig nachgerechnet, nicht aus dem
+    # gerundeten GB/s rückgerechnet.
+    expected_ai = round(gemm_flops(256, 256, 256, 1)
+                        / (gemm_bytes(256, 256, 256, "fp16", "fp32", 1) + extra), 2)
+    assert bias["arithmetic_intensity"] == expected_ai, (bias, expected_ai)
+
+
+def test_epilog_in_slug_conditional():
+    """Der Epilog (TZ 9) geht NUR gesetzt in den Slug — `epilog=None` ⇒ byte-identisch
+    zu TZ 1-8. Er ändert den Kernel-Quelltext (D-Operand / ct.maximum), MUSS also eine
+    eigene kernels/<slug>.py bekommen, sonst trifft der fused Lauf still das gecachte
+    unfusionierte Artefakt (silent wrong answer)."""
+    from tool_pipeline.schema import RunConfig
+    from tool_pipeline.store.store import config_slug
+
+    base = "ik_kj_to_ij__fp16-fp32__TM128_TN128_TK64"
+    # None (implizit + explizit) ⇒ kein Suffix.
+    assert config_slug(RunConfig()) == base
+    assert config_slug(RunConfig(epilog=None)) == base
+    # Gesetzt ⇒ eigener Slug je Epilog.
+    assert config_slug(RunConfig(epilog="bias")) == base + "__ep_bias"
+    assert config_slug(RunConfig(epilog="relu")) == base + "__ep_relu"
+    # Die beiden Epiloge teilen sich NICHT dieselbe Kernel-Datei.
+    assert config_slug(RunConfig(epilog="bias")) != config_slug(RunConfig(epilog="relu"))
+    # Reihenfolge mit dem Swizzle-Suffix: __ep_* steht VOR __sw.
+    assert config_slug(RunConfig(epilog="bias", swizzle=True)) == base + "__ep_bias__sw"
+    assert (config_slug(RunConfig(epilog="relu", swizzle=True, group_m=16))
+            == base + "__ep_relu__sw_g16")
+    # Altzeile ohne epilog-Key ⇒ kein Suffix (Rückwärtskompatibilität des Stores).
+    assert config_slug({"expr": "ik,kj->ij", "dtype": "fp16", "acc_dtype": "fp32",
+                        "tile": {"TM": 128, "TN": 128, "TK": 64}}) == base
+
+
 def test_compute_metrics_nary_aggregates():
     """n-är-Metrik (TZ 7.5-3): FLOPs+Bytes über die paarweisen Schritte aggregiert →
     EIN Roofline-Punkt = Summe der Per-Schritt-GEMM-Kosten (inkl. Zwischentensor)."""
@@ -274,11 +399,43 @@ def _has_cuda() -> bool:
         return False
 
 
+class _SkippedStandalone(Exception):
+    """Skip-Marker fuer den Standalone-Runner, falls pytest nicht installiert ist."""
+
+
+def _require_cuda() -> None:
+    """Ohne CUDA-GPU **ehrlich ueberspringen** statt still ``passed`` zu melden.
+
+    Ein ``return`` im Test zaehlt bei pytest als *bestanden* — auf einem GPU-losen Host
+    stand damit gruen, was nichts geprueft hat. ``pytest.skip`` meldet stattdessen
+    ``skipped``. Es wirft ``Skipped`` (eine ``BaseException``); der Standalone-Runner
+    ``_main`` unten faengt beide Skip-Formen ab (s. ``_skip_exceptions``) und zaehlt sie
+    als uebersprungen — auch in einem venv ganz ohne pytest.
+    """
+    if _has_cuda():
+        return
+    msg = "keine CUDA-GPU verfuegbar (GPU-Test)"
+    try:
+        import pytest
+    except ImportError:          # Standalone-Lauf ohne pytest im venv
+        raise _SkippedStandalone(msg) from None
+    pytest.skip(msg)
+
+
+def _skip_exceptions() -> tuple:
+    """Die Exception-Typen, die „uebersprungen" bedeuten (pytest-Skip + Fallback)."""
+    excs = [_SkippedStandalone]
+    try:
+        import pytest
+        excs.append(pytest.skip.Exception)
+    except ImportError:
+        pass
+    return tuple(excs)
+
+
 def test_benchmark_returns_distribution_keys():
     """Echter bench-Lauf: liefert die Verteilungs-Keys, min ≤ median ≤ p90, σ≥0."""
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import torch
     from tool_pipeline.codegen.compile import load_kernel
     from tool_pipeline.codegen.emit import emit
@@ -303,9 +460,7 @@ def test_benchmark_returns_distribution_keys():
 
 def test_benchmark_flush_toggle_runs():
     """flush_l2=False läuft ebenfalls durch (Vergleichs-Pfad warm vs. cold-L2)."""
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import torch
     from tool_pipeline.codegen.compile import load_kernel
     from tool_pipeline.codegen.emit import emit
@@ -326,9 +481,7 @@ def test_benchmark_flush_toggle_runs():
 
 def test_run_timing_has_distribution():
     """run() reicht die Verteilungs-Keys in RunResult.timing durch (+ compile getrennt)."""
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.schema import RunConfig
     from tool_pipeline.store import store as st
@@ -351,9 +504,7 @@ def test_run_metrics_has_roofline_keys():
     arithm. Intensität = 128 FLOP/Byte ist deterministisch (GPU-unabhängig) und
     hier hart prüfbar; GB/s/TFLOP/s/%-Peak müssen positiv und plausibel sein.
     """
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.schema import RunConfig
     from tool_pipeline.store import store as st
@@ -379,9 +530,7 @@ def test_baselines_cublas_naive_real():
     cuBLAS ist die hochoptimierte Bibliothek (Obergrenze), der naive 16³-Kernel
     die untunte cuTile-Variante (Untergrenze) — beide positiv, cuBLAS ≥ naive.
     """
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.schema import RunConfig
     from tool_pipeline.store import store as st
@@ -404,9 +553,7 @@ def test_baselines_cublas_naive_real():
 def test_baselines_fp8_graceful():
     """fp8-Lauf mit Baselines kippt nicht: naive läuft, cuBLAS ist entweder
     verfügbar oder sauber als nicht verfügbar markiert (kein Crash)."""
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.schema import RunConfig
     from tool_pipeline.store import store as st
@@ -427,9 +574,7 @@ def test_baselines_fp8_graceful():
 def test_run_provenance_has_gpu_state():
     """run() legt den GPU-Zustand pro Lauf in provenance ab (auf diesem Host
     mit nvidia-smi → nicht leer, mit numerischem sm_clock_mhz)."""
-    if not _has_cuda():
-        print("  (übersprungen: keine CUDA-GPU)")
-        return
+    _require_cuda()
     import tool_pipeline.run as R
     from tool_pipeline.schema import RunConfig
     from tool_pipeline.store import store as st
@@ -450,15 +595,20 @@ def test_run_provenance_has_gpu_state():
 def _main() -> int:
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
-    failed = 0
+    skips = _skip_exceptions()
+    failed = skipped = 0
     for t in tests:
         try:
             t()
             print(f"PASS  {t.__name__}")
+        except skips as e:      # GPU-Test auf GPU-losem Host — kein Fehler
+            skipped += 1
+            print(f"SKIP  {t.__name__}: {e}")
         except Exception as e:  # noqa: BLE001
             failed += 1
             print(f"FAIL  {t.__name__}: {type(e).__name__}: {e}")
-    print(f"\n{len(tests) - failed}/{len(tests)} Tests bestanden")
+    extra = f", {skipped} übersprungen" if skipped else ""
+    print(f"\n{len(tests) - failed - skipped}/{len(tests)} Tests bestanden{extra}")
     return 1 if failed else 0
 
 

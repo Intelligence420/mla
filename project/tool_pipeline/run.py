@@ -41,6 +41,7 @@ from .intermediate_representation.reshape import (
 )
 from .measure.baselines import measure_baselines
 from .measure.bench import benchmark, time_first_launch
+from .measure.fusion import measure_sequential
 from .measure.metrics import (
     compute_metrics,
     compute_metrics_elementwise,
@@ -160,8 +161,8 @@ def _build_memory_bound_inputs(config: RunConfig, ir):
     out_dt = _TORCH_DTYPE[config.acc_dtype]
 
     if isinstance(ir, ElementwiseIR):
-        # Op bestimmt die Arity (copy=1, add/mul=2) — muss zum Ausdruck passen.
-        expected_arity = 1 if config.op == "copy" else 2
+        # Op bestimmt die Arity (copy/relu=1 unär, add/mul=2 binär) — muss zum Ausdruck passen.
+        expected_arity = 1 if config.op in ("copy", "relu") else 2
         if ir.arity != expected_arity:
             raise ValueError(
                 f"Elementwise-Op {config.op!r} erwartet {expected_arity} Operanden, "
@@ -418,6 +419,13 @@ def run(config: RunConfig, progress=None, run_id=None, run_name=None,
     # EINEN aggregierten Roofline-Punkt (1-run=1-Punkt-Vertrag).
     # =====================================================================
     if isinstance(ir, NAryContractionIR):
+        # Epilog-Fusion (TZ 9) ist bewusst NUR für 2-Operanden-Kontraktionen umgesetzt
+        # (Scope-Grenze); auf einer n-ären Kette würde der Epilog still unangewandt
+        # bleiben → hier laut ablehnen statt still falsch zu rechnen.
+        if config.epilog:
+            return _result(STATUS_COMPILE_ERROR,
+                           error="Epilog-Fusion ist nur für 2-Operanden-Kontraktionen "
+                                 "unterstützt (nicht für n-äre Ketten).")
         err = check_dtype_combo(config.dtype, config.acc_dtype)
         if err:
             return _result(STATUS_COMPILE_ERROR, error=f"input build: NotImplementedError: {err}")
@@ -508,6 +516,23 @@ def run(config: RunConfig, progress=None, run_id=None, run_name=None,
     except Exception as e:
         return _result(STATUS_COMPILE_ERROR, error=f"input build: {type(e).__name__}: {e}")
 
+    # Epilog-Fusion (TZ 9): den/die zusätzlichen Operanden bauen (deterministisch, Seed
+    # in _build_inputs bereits gesetzt). ``bias`` braucht D in kanonischer Ausgabe-Form
+    # (B,M,N); ``relu``/``None`` keinen. ``launch_args`` trägt die family-korrekte Arity
+    # (bias ⇒ launch(A,B,D,C)); ``epilog_ref_operands`` (natürliche Output-Shape) geht in
+    # die verify-Referenz „einsum GEFOLGT vom Epilog". Der Nicht-Fusions-Pfad (epilog=None)
+    # bleibt dadurch launch(A,B,C) / verify([A,B]) — unverändert.
+    epilog_operands: tuple = ()
+    epilog_ref_operands: list = []
+    if config.epilog == "bias":
+        try:
+            D_c = _build_operand(config.dtype, canonical.c_shape)   # (B,M,N), Compute-dtype
+        except Exception as e:
+            return _result(STATUS_COMPILE_ERROR, error=f"epilog build: {type(e).__name__}: {e}")
+        epilog_operands = (D_c,)
+        epilog_ref_operands = [from_canonical_output(canonical, D_c)]
+    launch_args = (A_c, B_c, *epilog_operands, C_c)
+
     # 3) Quelltext → ladbarer Kernel (persistiert + gecacht). load_kernel emittiert
     #    lazy selbst (nur bei Cache-Miss) → kein doppeltes emit auf dem Cache-Pfad.
     try:
@@ -526,8 +551,9 @@ def run(config: RunConfig, progress=None, run_id=None, run_name=None,
         return _result(STATUS_COMPILE_ERROR, error=f"{type(e).__name__}: {e}")
 
     # 4) Kalt-Lauf = compile_ms (host-seitiger cuTile-JIT); füllt C für verify.
+    #    launch_args trägt die family-korrekte Arity (bias ⇒ zusätzlicher D-Operand).
     try:
-        timing["compile_ms"] = round(time_first_launch(comp.launch, A_c, B_c, C_c), 3)
+        timing["compile_ms"] = round(time_first_launch(comp.launch, *launch_args), 3)
     except ct.TileError as e:
         return _result(STATUS_COMPILE_ERROR, error=f"cuTile-JIT: {type(e).__name__}: {str(e)[:400]}")
     except Exception as e:
@@ -537,7 +563,9 @@ def run(config: RunConfig, progress=None, run_id=None, run_name=None,
     #    zurückführen, dann gegen die fp32-`torch.einsum`-Referenz prüfen.
     try:
         C_nat = from_canonical_output(canonical, C_c)   # (1,M,N) → natürliche Output-Shape
-        accuracy = verify(C_nat, [A_nat, B_nat], config)
+        # Bei Fusion: Referenz = einsum GEFOLGT vom Epilog (epilog_ref_operands = [D_nat]
+        # bei bias, sonst leer). epilog=None ⇒ [A_nat, B_nat] unverändert.
+        accuracy = verify(C_nat, [A_nat, B_nat, *epilog_ref_operands], config)
     except NotImplementedError as e:
         return _result(STATUS_COMPILE_ERROR, error=f"verify: {type(e).__name__}: {e}")
     except Exception as e:
@@ -551,7 +579,7 @@ def run(config: RunConfig, progress=None, run_id=None, run_name=None,
 
     # 6) Warme Messung (=run_ms) + Metriken (TFLOP/s)
     try:
-        b = benchmark(comp.launch, A_c, B_c, C_c,
+        b = benchmark(comp.launch, *launch_args,
                       warmup=config.bench_warmup, iters=config.bench_iters,
                       progress=progress)
         timing["run_ms"] = round(b["run_ms"], 5)      # Median (unveränderter Key)
@@ -561,11 +589,26 @@ def run(config: RunConfig, progress=None, run_id=None, run_name=None,
         timing["bench_iters"] = b["iters"]
         # compute_metrics-dict komplett übernehmen (nicht neu bauen) → die
         # TZ-4-Keys (GB/s, arithm. Intensität, %-Peak) fließen automatisch mit;
-        # dtype/acc_dtype werden für Bytes/Peak gebraucht.
-        metrics = compute_metrics(M, N, K, b["run_ms"], config.dtype, config.acc_dtype, B=B)
+        # dtype/acc_dtype werden für Bytes/Peak gebraucht. epilog=bias zählt den
+        # D-Read in die fused-Bytes (höhere AI als der sequentielle Pfad).
+        metrics = compute_metrics(M, N, K, b["run_ms"], config.dtype, config.acc_dtype,
+                                  B=B, epilog=config.epilog)
         metrics["tflops"] = round(metrics["tflops"], 3)
     except Exception as e:
         return _result(STATUS_RUN_ERROR, error=f"bench: {type(e).__name__}: {str(e)[:400]}")
+
+    # Fusion (TZ 9): fused-vs-sequentiell als Zweitmessung (analog baselines, graceful).
+    # Nur bei gesetztem Epilog; misst den sequentiellen Zwei-Kernel-Pfad (Plain-
+    # Kontraktion + Elementwise-Epilog) unter derselben bench-Schleife und legt den
+    # Vergleich (speedup/Bytes/AI) in metrics["fusion"] ab. Ein Fehler hier kippt den
+    # bereits verifizierten+gemessenen fused-Lauf NICHT (measure_sequential ist graceful).
+    if config.epilog:
+        metrics["fusion"] = measure_sequential(
+            config, A_c, B_c, C_c,
+            epilog_operands[0] if epilog_operands else None,
+            canonical, [A_nat, B_nat, *epilog_ref_operands], timing["run_ms"],
+            warmup=config.bench_warmup, iters=config.bench_iters,
+        )
 
     # GPU-Zustand direkt NACH der Messung (Takt/Temp/Power spiegeln die gemessene
     # Last) — additiv in provenance, pro Lauf. Graceful (leer, falls nvidia-smi fehlt).
