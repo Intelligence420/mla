@@ -142,8 +142,9 @@ Stream-Switch-Verschaltung wird vom ObjectFIFO-Lowering automatisch
 geroutet.
 
 **``dma_memcpy_nd`` und Buffer-Descriptors.** Die Eingabe-DMAs werden auf
-die neuen FIFO-Queues abgebildet (siehe :ref:`ch10_access`). Da jedes
-Shim-Tile **16 Buffer-Descriptors** besitzt und die FIFOs auf
+die neuen FIFO-Queues abgebildet
+(siehe :ref:`Zugriffsmuster <ch10_access>`).
+Da jedes Shim-Tile **16 Buffer-Descriptors** besitzt und die FIFOs auf
 *verschiedenen* Shim-Tiles liegen, dürfen BD-IDs zwischen Spalten
 wiederverwendet werden. Pro Shim werden höchstens 8 IDs belegt
 (``out`` 0–3, ``in0`` 4–5, ``in1`` 6–7), also deutlich unter dem Limit.
