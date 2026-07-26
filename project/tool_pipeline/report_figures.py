@@ -1,12 +1,14 @@
 """tool_pipeline.report_figures — Report-Figuren aus ``results.jsonl`` (headless).
 
 Liest die **jüngste** ``CLI-Report-Sweep``-Charge aus dem Store (verify-before-trust:
-**nur** ``status=="ok"``) und rendert vier PNGs nach ``sphinx/source/_static/gsc/``:
+**nur** ``status=="ok"``) und rendert sechs PNGs nach ``sphinx/source/_static/gsc/``:
 
   1. ``durchsatz_formate.png``    — Kontraktion Durchsatz je Zahlenformat (cuTile vs cuBLAS)
   2. ``genauigkeit_durchsatz.png`` — Genauigkeit ↔ Durchsatz (Trade-off je Format)
   3. ``roofline.png``             — die Headline: memory- vs compute-bound (beide Seiten)
   4. ``tile_swizzle.png``         — Tile- & GROUP_M-Vergleich (fp16, TZ-7.5-Multi-Config)
+  5. ``fusion.png``               — Fusions-Speedup über der arithmetischen Intensität
+  6. ``group_m.png``              — GROUP_M-Achse auf einem großen Blockgitter (4096³)
 
 **Torch-/GPU-frei** (nur ``matplotlib``/``json`` + die reinen ``hardware``-Kennwerte):
 die PNGs werden **vorab** erzeugt und eingecheckt, damit ``cd sphinx && make html``
@@ -44,6 +46,15 @@ _DEFAULT_OUT = store.PROJECT_DIR.parent / "sphinx" / "source" / "_static" / "gsc
 # Anzeige-Label je Format.
 _FMT_LABEL = {"fp16": "fp16", "bf16": "bf16", "tf32": "tf32",
               "fp8e4m3": "fp8 e4m3", "fp8e5m2": "fp8 e5m2", "fp32": "fp32"}
+
+# Größen-Filter der quadratischen Kontraktions-Teil-Sweeps (Spiegel von
+# ``cli._SWEEP_SIZE_CONTRACTION`` / ``cli._SWEEP_SIZE_GROUP_M``; bewusst als eigene
+# Konstante statt Import, damit dieses Modul dash-/cli-frei bleibt). Der Sweep fährt
+# denselben Ausdruck ``ik,kj->ij`` auf ZWEI quadratischen Größen: 1024³ trägt den
+# Format-/Tile-/Roofline-Vergleich, 4096³ die GROUP_M-Achse. Ohne den Filter rutschten
+# die 4096³-Läufe als zusätzliche „fp16"-Balken in die 1024³-Figuren.
+_SIZE_FORMAT_COMPARE = 1024
+_SIZE_GROUP_M = 4096
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +107,11 @@ def _is_square(r: dict) -> bool:
     return None not in (m, n, k) and m == n == k
 
 
+def _is_cube(r: dict, size: int) -> bool:
+    """M==N==K==``size`` — trennt die beiden quadratischen Teil-Sweeps (1024³ vs. 4096³)."""
+    return _is_square(r) and _sizes(r).get("M") == size
+
+
 def _is_nary(r: dict) -> bool:
     return _cfg(r).get("family") == "contraction" and _cfg(r).get("expr", "").count(",") >= 2
 
@@ -104,7 +120,8 @@ def _format_group(rows: list[dict]) -> list[dict]:
     """Die vier Format-Vergleichs-Configs (Tile 128/128/64, ohne Swizzle), sortiert
     in der kanonischen Format-Reihenfolge fp16, bf16, tf32, fp8e4m3."""
     order = {"fp16": 0, "bf16": 1, "tf32": 2, "fp8e4m3": 3}
-    grp = [r for r in rows if _is_contraction_gemm(r) and _is_square(r)
+    grp = [r for r in rows if _is_contraction_gemm(r)
+           and _is_cube(r, _SIZE_FORMAT_COMPARE)
            and not _cfg(r).get("swizzle")
            and _cfg(r).get("tile") == {"TM": 128, "TN": 128, "TK": 64}]
     return sorted(grp, key=lambda r: order.get(_cfg(r).get("dtype"), 99))
@@ -234,7 +251,8 @@ def fig_roofline(rows: list[dict], out: Path) -> Path | None:
         key = "nary" if _is_nary(r) else _cfg(r).get("family")
         # Kontraktion nur die vier Format-Punkte (Tile/Swizzle-Varianten liegen
         # aufeinander → kein Roofline-Mehrwert, nur Klumpen).
-        if key == "contraction" and not (_is_contraction_gemm(r) and _is_square(r)
+        if key == "contraction" and not (_is_contraction_gemm(r)
+                                          and _is_cube(r, _SIZE_FORMAT_COMPARE)
                                           and not _cfg(r).get("swizzle")
                                           and _cfg(r).get("tile") == {"TM": 128, "TN": 128, "TK": 64}):
             continue
@@ -258,9 +276,26 @@ def fig_roofline(rows: list[dict], out: Path) -> Path | None:
         ax.annotate(f"Peak {dtype}  {peak:.0f} TFLOP/s", xy=(ai_max, peak),
                     xytext=(-4, 3), textcoords="offset points", ha="right", va="bottom",
                     fontsize=8, color=_MUTED)
-    ax.annotate(f"Bandbreite {MEM_BANDWIDTH_GBPS:.0f} GB/s", xy=(6, (MEM_BANDWIDTH_GBPS / 1000.0) * 6),
+    ax.annotate(f"Bandbreite {MEM_BANDWIDTH_GBPS:.0f} GB/s (theoretisch)",
+                xy=(6, (MEM_BANDWIDTH_GBPS / 1000.0) * 6),
                 xytext=(6, -14), textcoords="offset points", rotation=32,
                 fontsize=8, color=_MUTED)
+
+    # Zweite, **gemessene** Bandbreiten-Schräge: der schnellste ``copy``-Lauf (0 FLOP,
+    # reine Datenbewegung) ist die praktisch erreichbare Obergrenze. Sie liegt unter der
+    # theoretischen und ist die ehrlichere Bezugslinie für alle memory-bound-Punkte —
+    # ohne sie sieht ein Punkt bei 80 % Peak-BW aus wie „20 % Luft nach oben", obwohl
+    # die Maschine diese Luft gar nicht hat.
+    copy_gbps = [r["metrics"].get("gbps") for r in rows
+                 if _cfg(r).get("op") == "copy" and r["metrics"].get("gbps")]
+    if copy_gbps:
+        bw_real = max(copy_gbps)
+        ax.plot(xs, (bw_real / 1000.0) * xs, color=_MUTED, linewidth=1.4,
+                linestyle=(0, (4, 3)), zorder=2)
+        ax.annotate(f"gemessen: {bw_real:.0f} GB/s (copy)",
+                    xy=(0.9, (bw_real / 1000.0) * 0.9),
+                    xytext=(4, -16), textcoords="offset points", rotation=32,
+                    fontsize=8, color=_SECOND)
 
     # Messpunkte je Familie.
     for f in fams.values():
@@ -295,7 +330,8 @@ def fig_roofline(rows: list[dict], out: Path) -> Path | None:
 # Figur 4 — Tile- & GROUP_M-Vergleich (fp16, TZ-7.5-Multi-Config)
 # ---------------------------------------------------------------------------
 def fig_tile_swizzle(rows: list[dict], out: Path) -> Path | None:
-    gemm = [r for r in rows if _is_contraction_gemm(r) and _is_square(r)
+    gemm = [r for r in rows if _is_contraction_gemm(r)
+            and _is_cube(r, _SIZE_FORMAT_COMPARE)
             and _cfg(r).get("dtype") == "fp16"]
     if not gemm:
         return None
@@ -451,15 +487,74 @@ def fig_fusion(rows: list[dict], out: Path) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
+# Figur 6 — GROUP_M-Achse auf einem großen Blockgitter (4096³)
+# ---------------------------------------------------------------------------
+def fig_group_m(rows: list[dict], out: Path) -> Path | None:
+    """GROUP_M-Achse dort, wo sie wirken **kann**: 4096³ ⇒ 32×32-Blockgitter.
+
+    Bei 1024³ (Figur 4) entsteht mit TM=TN=128 nur ein 8×8-Gitter und damit eine
+    einzige Swizzle-Gruppe — jedes GROUP_M ≥ 8 erzeugt dieselbe Permutation, die Achse
+    ist strukturell wirkungslos. Auf dem 32×32-Gitter werden aus G2…G32 echte
+    16/8/4/2/1 Gruppen, und die Kurve zeigt ein **Optimum**: zu kleine Gruppen bringen
+    kaum L2-Wiederverwendung, zu große sprengen den Cache. Der Balken „ohne Swizzle"
+    ist der Bezugspunkt; alle Läufe sind derselbe verifizierte Kernel bei identischem
+    Format und Tile — variiert wird ausschließlich die Block→Kachel-Zuordnung."""
+    grp = [r for r in rows if _is_contraction_gemm(r) and _is_cube(r, _SIZE_GROUP_M)
+           and _cfg(r).get("dtype") == "fp16"
+           and _cfg(r).get("tile") == {"TM": 128, "TN": 128, "TK": 64}]
+    if len(grp) < 2:
+        return None
+
+    base = [r for r in grp if not _cfg(r).get("swizzle")]
+    swz = sorted((r for r in grp if _cfg(r).get("swizzle")),
+                 key=lambda r: _cfg(r).get("group_m") or 0)
+    if not base or not swz:
+        return None
+
+    n_tiles = _SIZE_GROUP_M // 128            # Blockgitter-Kantenlänge (32)
+    labels = ["ohne\nSwizzle"] + [f"G{_cfg(r).get('group_m')}" for r in swz]
+    vals = [base[0]["metrics"].get("tflops")] + [r["metrics"].get("tflops") for r in swz]
+    # Zweite Zeile der x-Beschriftung: wie viele echte Gruppen entstehen.
+    groups = [""] + [f"{max(1, n_tiles // (_cfg(r).get('group_m') or 1))} Gr." for r in swz]
+    best = max(range(len(vals)), key=lambda i: vals[i] or 0)
+    # Farbe trennt Bezugspunkt (Ink-nah) von der Achse (Blau); das Optimum wird über
+    # die *Form* hervorgehoben (Umrandung), nicht über eine dritte Farbe.
+    colors = [_MUTED] + [_BLUE] * len(swz)
+
+    fig, ax = _new_fig(8.4, 4.8)
+    bars = ax.bar(range(len(vals)), vals, 0.62, color=colors, zorder=3)
+    bars[best].set_edgecolor(_INK)
+    bars[best].set_linewidth(1.6)
+    ref = vals[0] or 1.0
+    for i, (rect, v) in enumerate(zip(bars, vals)):
+        if not v:
+            continue
+        txt = f"{v:.0f}" if i == 0 else f"{v:.0f}\n{v / ref:.2f}×"
+        ax.annotate(txt, (rect.get_x() + rect.get_width() / 2, v),
+                    xytext=(0, 3), textcoords="offset points", ha="center",
+                    fontsize=8.5, color=_SECOND)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels([f"{a}\n{b}" if b else a for a, b in zip(labels, groups)], fontsize=9)
+    ax.set_ylabel("Durchsatz  [TFLOP/s]", color=_SECOND, fontsize=10)
+    ax.set_ylim(0, max(v for v in vals if v) * 1.26)
+    ax.grid(axis="y", color=_GRID, linewidth=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    _title(ax, f"L2-Swizzle: GROUP_M auf einem {n_tiles}×{n_tiles}-Blockgitter "
+               f"(fp16, {_SIZE_GROUP_M}³)",
+           "identischer verifizierter Kernel — nur die Block→Kachel-Zuordnung variiert")
+    return _save(fig, out, "group_m.png")
+
+
+# ---------------------------------------------------------------------------
 # Einstieg
 # ---------------------------------------------------------------------------
 def generate_all(out: Path = _DEFAULT_OUT, path: Path = store.RESULTS_JSONL) -> list[Path]:
-    """Alle fünf Figuren erzeugen; Liste der geschriebenen Pfade zurück (überspringt
+    """Alle sechs Figuren erzeugen; Liste der geschriebenen Pfade zurück (überspringt
     Figuren ohne passende Daten still, gibt aber die Anzahl aus)."""
     rows = load_report_rows(path)
     made = []
     for fn in (fig_durchsatz_formate, fig_genauigkeit_durchsatz, fig_roofline,
-               fig_tile_swizzle, fig_fusion):
+               fig_tile_swizzle, fig_fusion, fig_group_m):
         p = fn(rows, out)
         if p is not None:
             made.append(p)
