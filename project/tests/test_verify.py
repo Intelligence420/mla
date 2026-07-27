@@ -1,4 +1,4 @@
-"""Headless-Tests des verify-before-trust-Gates (TZ 3 / TODO 1).
+"""Headless-Tests des verify-before-trust-Gates.
 
 `verify()` ist ein reiner Urteiler (Output-Tensor → Vergleich vs fp32-Referenz),
 also ohne Dash **und ohne GPU** prüfbar: die (dtype, acc_dtype)-Toleranztabelle,

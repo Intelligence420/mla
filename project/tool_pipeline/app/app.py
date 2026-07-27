@@ -8,7 +8,7 @@ Layout ein; `main()` startet den Server. Aufgerufen wird das über
 (und damit weder torch noch cuda.tile). Der DiskcacheManager startet
 Background-Callbacks in Worker-**Prozessen** (fork); hielte der Haupt-Prozess bereits
 einen CUDA-Kontext, wäre der im Fork kaputt. Deshalb importiert erst der
-Callback-*Body* (im Worker) die eine Naht `run()` — siehe `callbacks.py` (TZ 2 / TODO 6).
+Callback-*Body* (im Worker) die eine Naht `run()` — siehe `callbacks.py`.
 
 Host/Port sind über die Umgebungsvariablen ``TP_HOST`` / ``TP_PORT`` überschreibbar
 (Default ``127.0.0.1:8050``); z. B. ``TP_HOST=0.0.0.0`` für Zugriff über SSH-Tunnel/LAN.
@@ -55,10 +55,9 @@ def create_app() -> Dash:
     )
     app.layout = build_layout()
 
-    # Callbacks werden in TZ 2 / TODO 6 registriert (Import mit Seiteneffekt: die
-    # @callback-Dekoratoren tragen sich in die globale Registry ein). Bewusst hier
-    # (nicht im Modulkopf) und erst wenn callbacks.py gefüllt ist, damit der
-    # Haupt-Prozess `run()`/torch NICHT importiert.
+    # Import mit Seiteneffekt: die @callback-Dekoratoren tragen sich in die globale
+    # Registry ein. Bewusst hier und nicht im Modulkopf, damit der Haupt-Prozess
+    # `run()`/torch NICHT importiert.
     from . import callbacks  # noqa: F401
 
     if hasattr(callbacks, "register"):
