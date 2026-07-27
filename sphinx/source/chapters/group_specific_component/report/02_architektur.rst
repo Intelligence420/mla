@@ -18,7 +18,7 @@ Das gesamte System hängt an **einer** Schnittstelle:
    run(config: RunConfig) -> RunResult
 
 Zwei Datentypen, eine Funktion. Die Oberfläche baut ein ``RunConfig``, der Kern
-liefert ein ``RunResult`` — und *nichts* darüber hinaus wird zwischen beiden
+liefert ein ``RunResult`` und nichts darüber hinaus wird zwischen beiden
 Seiten geteilt. Das ist die wichtigste Entscheidung der Architektur, und sie hat
 vier konkrete Konsequenzen:
 
@@ -36,7 +36,7 @@ vier konkrete Konsequenzen:
 ``run()`` wirft nie
 -------------------
 
-Der Vertrag hat eine ungewöhnliche Zusatzklausel: **``run()`` löst keine Exception
+Der Vertrag hat eine Zusatzklausel: **``run()`` löst keine Exception
 nach außen aus.** Jeder Ausgang wird stattdessen in einen von vier Zuständen
 kategorisiert:
 
@@ -63,9 +63,9 @@ kategorisiert:
 Der Grund für diese Klausel ist die Oberfläche: Ein Tool, in dem man beliebige
 einsum-Ausdrücke und Kachelgrößen *ausprobieren* soll, produziert zwangsläufig
 ungültige Eingaben. Würde ``run()`` werfen, müsste jede Aufrufstelle jeden
-Fehlertyp kennen; stattdessen rendert die GUI vier bekannte Zustände. Ein
+Fehlertyp kennen. Stattdessen rendert die GUI vier bekannte Zustände. Ein
 Nebeneffekt macht die Sache robust: Selbst ein Fehler beim *Speichern* des
-Ergebnisses kippt den Lauf nicht — er wird an ``error`` angehängt, das
+Ergebnisses kippt den Lauf nicht, er wird an ``error`` angehängt, das
 ``RunResult`` aber trotzdem geliefert.
 
 Der Vertrag im Detail: RunConfig
@@ -121,11 +121,9 @@ invalidieren.
      - Messaufwand (Default 10 / 30)
      - **nein**
 
-Warum ``group_m`` nur *bedingt* in den Slug eingeht, ist ein gutes Beispiel für
-eine bewusst unschöne Entscheidung: Der Default 8 war früher hart verdrahtet. Ginge
+Warum ``group_m`` nur *bedingt* in den Slug eingeht, ist aufgrund einer bewussten jedoch unschöne Entscheidung: Der Default 8 war in der Startphase hart verdrahtet und die veränderung wurde erst spät nachgetragen. Ginge
 er nun unbedingt in den Namen ein, hießen alle bestehenden, eingecheckten
-Kernel-Dateien plötzlich anders — 300 Artefakte würden neu geschrieben, obwohl ihr
-Inhalt identisch ist. Deshalb bleibt ``GROUP_M = 8`` das bare ``__sw``, und nur
+Kernel-Dateien plötzlich anders. Deshalb bleibt ``GROUP_M = 8`` das bare ``__sw``, und nur
 abweichende Werte erzeugen ``__sw_g16``. Die Regel, auf die es ankommt, ist trotzdem
 erfüllt: **verschiedener Quelltext ⇒ verschiedener Slug.**
 
@@ -198,7 +196,7 @@ Modul-Landkarte
 Die Import-Regel (und warum sie existiert)
 ------------------------------------------
 
-Es gibt eine harte Regel, die sich durch alle Module zieht:
+Es gibt eine Festlegung, die sich durch alle Module zieht:
 
 .. admonition:: Naht-Regel
 
@@ -210,7 +208,7 @@ Es gibt eine harte Regel, die sich durch alle Module zieht:
 Der zweite Teil klingt nach Pedanterie, verhindert aber einen echten, schwer zu
 findenden Fehler. Die Kette:
 
-1. Ein cuTile-Lauf braucht mehrere hundert Millisekunden bis Sekunden (JIT!). In
+1. Ein cuTile-Lauf braucht mehrere hundert Millisekunden bis Sekunden (JIT). In
    einer Weboberfläche darf das den Server nicht blockieren ⇒ **Hintergrund-Job**.
 2. Dash führt Hintergrund-Jobs über einen ``DiskcacheManager`` in eigenen
    **Worker-Prozessen** aus, die per ``fork`` aus dem Hauptprozess entstehen.
@@ -225,8 +223,7 @@ findenden Fehler. Die Kette:
 Diese Regel hat einen angenehmen Nebeneffekt, der sich durch den ganzen Bericht
 zieht: Weil die Oberfläche torch-frei ist, sind ihre Chart- und
 Render-Funktionen **reine Funktionen** ``RunResult → Figur/Komponente`` und ohne
-GPU testbar. Aus demselben Grund baut auch dieser Sphinx-Bericht ohne GPU: die
-Figuren-Erzeugung liest fertige JSON-Zeilen, nicht die GPU.
+GPU testbar. 
 
 Umgekehrt gilt die Regel auch: Kein Kern-Modul hängt auf Modulebene an der
 Oberfläche. ``cli.py`` benutzt die Config-Bau-Helfer aus

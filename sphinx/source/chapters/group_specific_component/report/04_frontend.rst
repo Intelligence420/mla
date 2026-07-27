@@ -8,10 +8,9 @@ Teil 4 — Das Frontend
    :local:
    :depth: 2
 
-Die Oberfläche ist die Schauseite des Projekts, aber sie hat eine unangenehme
-technische Aufgabe: Sie muss aus einem Webserver heraus einen **mehrsekündigen
+Die Oberfläche ist die Schauseite des Projekts. Sie muss aus einem Webserver heraus einen **mehrsekündigen
 GPU-Job** starten, dabei bedienbar bleiben, Fortschritt zeigen, abbrechbar sein
-und sich mit anderen Nutzern derselben GPU verträgen. Das ist der eigentliche
+und sich mit anderen Nutzern derselben GPU teilen können. Das ist der eigentliche
 Inhalt dieses Teils.
 
 Warum Plotly Dash
@@ -56,7 +55,7 @@ Die Chart-Funktionen sind sogar ganz ohne GPU testbar.
 Der Hintergrund-Job — und die Fork-Falle
 ========================================
 
-Ein Lauf besteht aus JIT (Hunderte von ms), Verifikation und 10 + 30 Iterationen.
+Ein Lauf besteht aus JIT, Verifikation und 10 + 30 Iterationen.
 Das darf den Dash-Server nicht blockieren, also läuft es als Hintergrund-Callback
 über einen ``DiskcacheManager``:
 
@@ -95,7 +94,7 @@ GPU-Läufe prozessübergreifend — die GUI und der CLI-Sweep benutzen denselben
 Zwei Details, die das robust machen:
 
 * **Ein Lock für den ganzen Batch.** Ein „Vergleichen"-Klick über vier Formate ist
-  *eine* GPU-Session; würde jeder Lauf den Lock einzeln nehmen, könnte sich ein
+  *eine* GPU-Session. Würde jeder Lauf den Lock einzeln nehmen, könnte sich ein
   fremder Prozess dazwischenschieben und die Vergleichbarkeit der vier Zahlen
   zerstören.
 * **Bei Prozess-Tod gibt das Betriebssystem den ``flock`` automatisch frei.**
@@ -106,8 +105,8 @@ Zwei Details, die das robust machen:
 * Wird der Lock nicht innerhalb von 60 s frei, meldet das Werkzeug „GPU belegt"
   statt endlos zu warten.
 
-Fortschritt, der etwas bedeutet
--------------------------------
+Fortschrittsbalken
+------------------
 
 Ein unbestimmter Spinner sagt nichts. Die Anzeige ist deshalb **determinat auf zwei
 Ebenen**: Der Balken füllt sich pro fertiger Konfiguration („Format 2/4"), und
@@ -196,7 +195,7 @@ KPIs → Verify → Diagramme → Code.
 Der Aufbau im Einzelnen:
 
 * **Verify-Chips** für jede Konfiguration des Batches. Ein einziges rotes
-  ``FAIL`` fällt hier sofort auf, ohne dass man in die Diagramme schauen muss.
+  ``FAIL`` fällt hier sofort auf
 * **„Detail je Format"** — eine Auswahlleiste, die den Rest des Bereichs
   (KPIs, Verify, Code) auf eine Konfiguration des Batches umschaltet. Die
   Diagramme bleiben dabei vergleichend, die Kennzahlen werden spezifisch.
@@ -231,8 +230,7 @@ Die drei Diagramme sind reine Funktionen ``RunResult-Liste → Figur``:
    Format-Identität, die Hervorhebung des primären Laufs läuft über die Form
    (Rahmen), nicht über eine Sonderfarbe.
 
-* **Genauigkeit ↔ Durchsatz** (Streudiagramm, log-Y) — der Trade-off; unten
-  rechts ist gut.
+* **Genauigkeit ↔ Durchsatz** (Streudiagramm, log-Y) — der Trade-off. 
 * **Roofline** (log-log) — Bandbreiten-Schräge und Rechen-Decken kommen aus
   ``hardware.py``, die Punkte aus den Läufen.
 
@@ -250,8 +248,7 @@ Die drei Diagramme sind reine Funktionen ``RunResult-Liste → Figur``:
 Das Farbsystem
 --------------
 
-Eine Kleinigkeit mit großer Wirkung auf die Lesbarkeit: **Eine Farbe je
-Zahlenformat, stabil über alle Diagramme.** fp16 ist überall blau, bf16 überall
+**Eine Farbe je Zahlenformat, stabil über alle Diagramme.** fp16 ist überall blau, bf16 überall
 aqua. Die Farben werden aus derselben Kombinationsliste abgeleitet wie die
 Auswahl — sie können also nicht zyklisch neu vergeben werden, wenn eine andere
 Menge Formate gewählt ist. Das **primäre** Format wird nicht über eine
@@ -290,7 +287,7 @@ History: Läufe verwalten
 
 Direkt unter der Topbar liegt ein einklappbares Panel — in der Gesamtansicht oben
 als Leiste „Vergangene Läufe — ansehen · vergleichen · umbenennen · löschen"
-sichtbar. Es listet die Testläufe aus ``results.jsonl``; man kann einen Lauf
+sichtbar. Es listet die Testläufe aus ``results.jsonl``. Man kann einen Lauf
 **ansehen** (die Charts werden aus den gespeicherten Ergebnissen neu gerendert —
 ohne GPU!), **vergleichen**, **umbenennen** und **löschen**. Weil das Panel nur
 liest bzw. den Store atomar neu schreibt, braucht es weder GPU noch torch — es ist
