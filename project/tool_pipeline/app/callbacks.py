@@ -6,7 +6,7 @@ Batch → die **eine Naht** ``run(config)`` je Format → drei Vergleichs-Charts
 (Durchsatz + Genauigkeit↔Durchsatz + Roofline) plus KPIs/Verify/Code des primären
 Formats in den Main-Bereich.
 
-Zwei Design-Punkte (PLAN §2/§8 + die TZ-2/TZ-3-Entscheidungen):
+Zwei Design-Punkte (die TZ-2/TZ-3-Entscheidungen):
 
 * **Fork-Sicherheit:** ``run``/torch/cuda werden **lazy im Worker** importiert
   (in ``execute_run``), nie im Modulkopf → der Haupt-Dash-Prozess bleibt CUDA-frei.

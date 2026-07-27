@@ -1,7 +1,7 @@
 """tool_pipeline.run — der Orchestrator UND der Vertrag Core↔GUI.
 
 `run(config) -> RunResult` ist die **einzige Naht**: die Dash-App (TZ 2) ruft
-ausschließlich diese Funktion in ihrem Hintergrund-Job. Ablauf (Plan §3):
+ausschließlich diese Funktion in ihrem Hintergrund-Job. Ablauf:
 
     parse → reshape(B1) → emit(C1) → compile(+Cache) → Kalt-Lauf(=compile_ms)
           → verify(fp32) → bench(=run_ms) → metrics → Store

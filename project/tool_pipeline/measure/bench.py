@@ -1,6 +1,6 @@
 """tool_pipeline.measure.bench — Zeitmessung (CUDA-Events + Wall-Clock).
 
-Zwei Messungen, bewusst getrennt (die Plan-Reihenfolge schiebt `verify`
+Zwei Messungen, bewusst getrennt (die Pipeline-Reihenfolge schiebt `verify`
 dazwischen):
 
 * `time_first_launch` — **Wall-Clock** des ersten (kalten) Launches. Der
@@ -31,7 +31,7 @@ import torch
 # (die GB10-L2-Größe ist in den Analyse-Dateien nicht belegt → konservativ groß,
 # so wie `triton.do_bench` einen ~256-MB-Clear-Buffer nutzt). Der Puffer wird
 # zwischen den getakteten Iterationen genullt und verdrängt so die Kernel-Daten
-# aus dem L2 → jede Messung startet „kalt“ (cold-L2, PLAN §3 Default).
+# aus dem L2 → jede Messung startet „kalt“ (cold-L2 als Default).
 _L2_FLUSH_BYTES = 256 * 1024 * 1024
 
 
@@ -84,7 +84,7 @@ def benchmark(launch: Callable, *operands: torch.Tensor,
                      liegt auf dem Gerät des Outputs (``operands[-1]``).
     :param warmup:   ungetaktete Aufwärm-Läufe (stabilisieren Takt/Caches).
     :param iters:    getaktete Läufe; je Lauf ein eigenes Event-Paar.
-    :param flush_l2: L2 zwischen den Iterationen leeren (cold-L2, PLAN §3
+    :param flush_l2: L2 zwischen den Iterationen leeren (cold-L2 als
                      Default). Der Flush wird VOR dem Start-Event abgesetzt und
                      zählt daher NICHT in die gemessene Kernel-Zeit.
     :param progress: optionaler Callback ``(done, iters)`` — wird nach JEDER

@@ -31,7 +31,7 @@ STATUS_RUN_ERROR = "run_error"          # compiliert, crasht aber beim Launch/Ru
 # ---------------------------------------------------------------------------
 # dtype/acc-Regeln (Teil des Core↔GUI-Vertrags, TZ 3).
 # ---------------------------------------------------------------------------
-# Erlaubte Akkumulator-dtypes je Compute-dtype (PLAN §5, empirisch belegt):
+# Erlaubte Akkumulator-dtypes je Compute-dtype (empirisch belegt):
 # bf16 & tf32 MÜSSEN in fp32 akkumulieren; fp16 & fp8 dürfen fp16 oder fp32;
 # fp32 (Anker) nur fp32. **Single Source of Truth der Acc-Regeln** — gelesen von
 # `run._build_inputs` (frühe Prüfung, Stufe 2) und den GUI-Controls; `measure.verify`

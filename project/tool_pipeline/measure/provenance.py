@@ -4,7 +4,7 @@ Erfasst Takt/Temperatur/Leistung/Auslastung der GPU via `nvidia-smi` — reine
 **Reproduzierbarkeits-Metadaten** (keine Performance-Kennzahlen), damit jede
 `results.jsonl`-Zeile selbst-beschreibend ist: unter welchem GPU-Zustand wurde
 gemessen? Bewusst über `nvidia-smi` statt `pynvml`: nvidia-smi ist auf dem Host
-vorhanden, `pynvml` ist nicht gepinnt (PLAN §8). Fehlt nvidia-smi oder scheitert
+vorhanden, `pynvml` ist nicht gepinnt. Fehlt nvidia-smi oder scheitert
 der Aufruf/das Parsen, wird ein **leeres dict** geliefert (graceful) — nie ein
 Fehler, der den Lauf kippt. Torch-/cuTile-frei (headless testbar).
 """

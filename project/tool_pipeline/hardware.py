@@ -5,7 +5,7 @@ Single Source of Truth der Hardware-Zahlen für die abgeleiteten Metriken
 Bewusst **reine Daten** (torch-/cuTile-frei), damit auch die fork-sichere GUI
 und headless-Tests sie ohne GPU-Kontext laden können.
 
-Quelle der Zahlen: `project/project-development/analysis/RESULTS_gb10.md` (+ PLAN §5),
+Quelle der Zahlen: `project/project-development/analysis/RESULTS_gb10.md`,
 empirisch auf der GB10 (Grace-Blackwell, sm_121) geklärt. TZ 4 hält es bewusst
 **minimal** (nur Peak-Tabelle + Bandbreite + Byte-Größen); das Roofline-Chart,
 das dieselben Zahlen weiternutzt, ist TZ 5.
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-# --- Maschine (Reproduzierbarkeit; PLAN §5) ---
+# --- Maschine (Reproduzierbarkeit) ---
 GPU_NAME = "NVIDIA GB10 (Grace-Blackwell, sm_121)"
 
 # --- Speicherbandbreite ---
