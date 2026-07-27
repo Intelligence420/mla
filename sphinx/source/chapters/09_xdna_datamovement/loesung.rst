@@ -81,10 +81,8 @@ vorliegt; der dadurch akkumulierte Rundungsfehler wächst entsprechend
 (siehe :ref:`ch09_verifikation`).
 
 Der Kernel akkumuliert (statt zu überschreiben) — siehe
-:ref:`ch09_akkumulation`. Damit setzt diese Abgabe direkt eine der
-zentralen Forderungen aus dem Assignment-08-Feedback um
-(„Es ist ein explizites Laden von ``OUT`` verlangt",
-:ref:`ch08_feedback`).
+:ref:`ch09_akkumulation`. Damit wird ``OUT`` explizit geladen, wie es
+die Aufgabenstellung verlangt.
 
 Task 1 — MLIR-AIE-Operationen
 =============================
@@ -202,17 +200,16 @@ ObjectFIFOs liefern die Tiles in genau der konsumierten Reihenfolge
 
 .. _ch09_akkumulation:
 
-Akkumulierender Kernel (Bezug zum A08-Feedback)
------------------------------------------------
+Akkumulierender Kernel
+----------------------
 
 Da ``matmul`` pro ``(a,b)`` **16-mal** (über ``c``) auf dasselbe
 ``out``-Tile aufgerufen wird, muss der Kernel **akkumulieren**: Der
 A08-Kernel überschrieb ``out`` (``mm.mul`` + ``store``); in A09 bliebe
 damit nur der letzte ``c``-Block stehen. Der Kernel liest daher das
 aktuelle ``out``-Tile, addiert den Beitrag des ``c``-Blocks und
-schreibt zurück (Read-Modify-Write). Das ist exakt das vom
-Assignment-08-Feedback geforderte „explizite OUT-Laden"
-(:ref:`ch08_feedback`).
+schreibt zurück (Read-Modify-Write). Das ist exakt das geforderte
+„explizite OUT-Laden".
 
 Geplant war ``mm.from_vector(...)`` zum Vorbelegen des Akkumulators.
 Die in dieser ``mlir-aie``-Version (1.3.1) vorhandene
