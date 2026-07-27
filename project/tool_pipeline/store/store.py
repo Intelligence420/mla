@@ -6,7 +6,7 @@ Zwei persistente Artefakte, beide unter `project/results/`:
   JSON Lines: transparent, git-diff-bar, mit `pandas.read_json(lines=True)`
   ladbar (Report-Datenquelle).
 * `kernels/<slug>.py` — der persistierte generierte Kernel-Quelltext. Dient
-  zugleich als **Compile-Cache-Artefakt** und als UI-Code-Anzeige (später).
+  zugleich als **Compile-Cache-Artefakt** und als Quelle der UI-Code-Anzeige.
 
 Der `<slug>` ist ein **lesbarer, normalisierter** Name aus genau den Feldern,
 die den Quelltext bestimmen — `(expr, dtype, acc_dtype, tile, swizzle)`, z. B.

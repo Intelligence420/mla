@@ -7,7 +7,7 @@ Output):
 
   emit(config) -> Quelltext -> **Datei** results/kernels/<slug>.py -> importieren.
 
-**Wichtig (empirisch verifiziert, TODO 4):** cuTile liest den Kernel-Quelltext
+**Wichtig (empirisch verifiziert):** cuTile liest den Kernel-Quelltext
 per ``inspect.getsourcelines`` und braucht dafür eine **echte Datei** auf der
 Platte — ein reines ``exec(src)`` eines Strings scheitert mit
 ``OSError: could not get source code``. Deshalb wird der emittierte Text erst
