@@ -3,7 +3,7 @@
 
 Reine Funktionen ``RunResult-Liste → plotly.Figure`` — Dash-frei, torch-/cuda-frei
 (Naht-/Fork-Regel), damit sie headless (``tests/test_app_charts.py``) prüfbar sind
-und der Haupt-Prozess CUDA-frei bleibt. Verdrahtet werden sie im Callback (TODO 7).
+und der Haupt-Prozess CUDA-frei bleibt. Verdrahtet werden sie im Callback.
 
 Nur **verifizierte** Läufe (``status == "ok"``) werden zu Punkten — Zahlen landen
 erst im Chart, nachdem sie gegen fp32 geprüft wurden (verify-before-trust).

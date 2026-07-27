@@ -15,8 +15,8 @@ kann statt abzustürzen:
 * `run_error`      — Kernel crasht zur Laufzeit (Launch/Bench).
 * `ok`             — compiliert, verifiziert, gemessen.
 
-TZ 1: nur `ik,kj->ij`, fp16→fp32, feste Tile. Spätere Teil-Ziele erweitern
-einzelne Stufen — der Ablauf hier bleibt.
+Die Stufen unterscheiden sich je nach Familie, Format und Tile — dieser Ablauf
+ist für alle Läufe derselbe.
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def _build_operand(dtype: str, shape: tuple):
     if dtype in ("fp8e4m3", "fp8e5m2"):
         fp8 = torch.float8_e4m3fn if dtype == "fp8e4m3" else torch.float8_e5m2
         return torch.randn(*shape, dtype=torch.float16, device="cuda").to(fp8)
-    raise NotImplementedError(f"input-dtype {dtype!r} noch nicht implementiert.")
+    raise NotImplementedError(f"input-dtype {dtype!r} wird nicht unterstuetzt.")
 
 
 def _build_natural_operands(dtype: str, shape_a: tuple, shape_b: tuple):

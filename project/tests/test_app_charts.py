@@ -1,4 +1,4 @@
-"""Headless-Tests der Chart-Builder (TZ 3 / TODO 6).
+"""Headless-Tests der Chart-Builder.
 
 Die Charts sind reine Funktionen ``RunResult-Liste → plotly.Figure`` und daher
 ohne Dash-Server + ohne GPU prüfbar: nur verifizierte Läufe werden zu Punkten,

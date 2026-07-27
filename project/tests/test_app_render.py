@@ -1,4 +1,4 @@
-"""Headless-Tests der reinen Render-Funktionen (TZ 2 / TODO 4).
+"""Headless-Tests der reinen Render-Funktionen.
 
 Prüft, dass ``kpis``/``code_panel`` aus einem ``RunResult`` **jeden** Status sauber
 zu Dash-Komponenten rendern (ok / verify_failed / compile_error / run_error) —
