@@ -8,134 +8,144 @@ Teil 5 — Beispiel Analyse
    :local:
    :depth: 2
 
-Alle Zahlen dieses Teils stammen aus **einer** verifizierten Sweep-Charge
-(``CLI-Report-Sweep``, 33 Konfigurationen, alle ``ok``) auf der GB10. Die
-Kontraktions-Läufe des Format-Vergleichs sind ``ik,kj->ij`` bei :math:`1024^3`, die
-memory-bound-Läufe bei :math:`4096^2`, die ``GROUP_M``-Achse bei :math:`4096^3`.
+Alle Kennwerte dieses Teils stammen aus einer einzigen verifizierten Sweep-Charge
+(``CLI-Report-Sweep``, 33 Konfigurationen, Status durchgängig ``ok``) auf der
+GB10. Sie sind damit unter identischen Hardware- und Softwarebedingungen erhoben
+und nicht aus mehreren Läufen zusammengesetzt. Der Formatvergleich verwendet den
+Ausdruck ``ik,kj->ij`` bei :math:`1024^3`. Die speichergebundenen Familien werden
+bei :math:`4096^2` gemessen, die ``GROUP_M``-Reihe bei :math:`4096^3`.
 
-Ein Lauf im Röntgenbild
-=======================
+Einzellauf über alle Pipeline-Stufen
+====================================
 
-Bevor die Aggregate kommen: **ein** Lauf, durch alle Stufen verfolgt, mit den
-tatsächlich gespeicherten Werten. Das ist derselbe Lauf, der in der ersten Zeile
-der Format-Tabelle weiter unten steht.
+Zur Nachvollziehbarkeit der folgenden Aggregate wird zunächst ein einzelner Lauf
+vollständig dokumentiert. Angegeben sind die tatsächlich gespeicherten Werte. Der
+Lauf entspricht der ersten Zeile der Formatvergleichstabelle weiter unten.
 
 .. list-table::
    :header-rows: 1
    :widths: 20 80
 
    * - Stufe
-     - Was dabei entstand
+     - Ergebnis
    * - **Eingabe**
      - ``ik,kj->ij`` · ``{i: 1024, k: 1024, j: 1024}`` · fp16 → fp32 ·
        Tile 128/128/64 · kein Swizzle · Baseline cuBLAS · 10 warmup / 30 iters
    * - **[1] parse**
-     - ``ContractionIR``: M=[i], N=[j], K=[k], Batch=[] — die einfachste
-       Klassifikation, aber derselbe Code, der auch ``acspx,bspy->abcyx`` zerlegt
+     - ``ContractionIR`` mit M=[i], N=[j], K=[k], Batch=[]. Es handelt sich um
+       die einfachste mögliche Klassifikation, erzeugt jedoch von demselben Code,
+       der auch ``acspx,bspy->abcyx`` zerlegt.
    * - **[2] B1-Reshape**
-     - ``Canonical(M=1024, N=1024, K=1024, B=1)``; der Umbau ist hier die
-       Identität (``transform_needed = False``) — ein 2D-Plain-GEMM ist schon
-       kanonisch, bekommt aber trotzdem die Batch-Achse der Länge 1
+     - ``Canonical(M=1024, N=1024, K=1024, B=1)``. Der Umbau ist die Identität
+       (``transform_needed = False``), da ein zweidimensionales GEMM bereits
+       kanonisch vorliegt. Die Batch-Achse wird mit Länge 1 ergänzt.
    * - **[3] Codegen**
-     - 75 Zeilen cuTile-Quelltext; Literale ``TM=128 TN=128 TK=64``,
-       Akkumulator ``ct.float32``, kein Cast-Block (fp16 ist nativ), kein
-       Swizzle-Block, kein Epilog-Block
+     - 75 Zeilen cuTile-Quelltext mit den Literalen ``TM=128 TN=128 TK=64`` und
+       dem Akkumulator ``ct.float32``. Cast-, Swizzle- und Epilog-Block
+       entfallen, da fp16 nativ unterstützt wird und keine der beiden Optionen
+       gewählt ist.
    * - **[4] compile**
-     - Slug ``ik_kj_to_ij__fp16-fp32__TM128_TN128_TK64`` →
-       ``results/kernels/ik_kj_to_ij__fp16-fp32__TM128_TN128_TK64.py``; Grid
-       :math:`(8, 8, 1)` = 64 Blöcke, K-Schleife über 16 Kacheln
+     - Slug ``ik_kj_to_ij__fp16-fp32__TM128_TN128_TK64``, abgelegt als
+       ``results/kernels/ik_kj_to_ij__fp16-fp32__TM128_TN128_TK64.py``. Das Grid
+       umfasst :math:`(8, 8, 1)`, also 64 Blöcke, die K-Schleife 16 Kacheln.
    * - **[5] Kalt-Lauf**
-     - ``compile_ms = 50,7`` — der cuTile-JIT (host-seitig), gemessen per
-       Wall-Clock
+     - ``compile_ms = 50,7``, gemessen als Wall-Clock-Zeit des host-seitigen
+       cuTile-JIT.
    * - **[6] verify**
-     - gegen ``torch.einsum("ik,kj->ij", A.float(), B.float())``:
-       ``max_abs_err = 3,20·10⁻⁴``, ``mean_abs_err = 3,19·10⁻⁵``,
-       ``rel_err = 1,29·10⁻⁶`` — **PASS** bei ``atol=0,2``, ``rtol=0,02``
+     - Referenz ``torch.einsum("ik,kj->ij", A.float(), B.float())``. Es ergeben
+       sich ``max_abs_err = 3,20·10⁻⁴``, ``mean_abs_err = 3,19·10⁻⁵`` und
+       ``rel_err = 1,29·10⁻⁶``. Das Ergebnis ist ein PASS bei ``atol = 0,2`` und
+       ``rtol = 0,02``.
    * - **[7] Messung**
-     - 30 getaktete Iterationen: ``run_ms = 0,07582`` (Median),
-       ``min = 0,07360``, ``p90 = 0,08307``, ``σ = 0,00820``
+     - 30 getaktete Iterationen mit ``run_ms = 0,07582`` als Median sowie
+       ``min = 0,07360``, ``p90 = 0,08307`` und ``σ = 0,00820``.
    * - **Kennzahlen**
-     - :math:`2 \cdot 1024^3 = 2{,}147` GFLOP / 0,07582 ms = **28,32 TFLOP/s**;
-       8 MiB Traffic ⇒ **110,6 GB/s**; AI = 256 FLOP/Byte; 13,3 % des
-       fp16-Rechen-Peaks, 40,5 % der theoretischen Bandbreite
+     - Aus :math:`2 \cdot 1024^3 = 2{,}147` GFLOP und 0,07582 ms folgen
+       28,32 TFLOP/s. Der Traffic von 8 MiB entspricht 110,6 GB/s bei einer
+       arithmetischen Intensität von 256 FLOP/Byte. Das sind 13,3 % des
+       fp16-Rechenpeaks und 40,5 % der theoretischen Bandbreite.
    * - **Baseline**
-     - cuBLAS (``torch.matmul``, gleiche Operanden, gleiche Schleife):
-       0,0553 ms ⇒ 38,84 TFLOP/s ⇒ unser Kernel erreicht **72,9 %**
+     - cuBLAS über ``torch.matmul`` mit gleichen Operanden und gleicher
+       Messschleife benötigt 0,0553 ms und erreicht 38,84 TFLOP/s. Der
+       generierte Kernel erreicht 72,9 % dieses Werts.
    * - **Provenienz**
-     - GPU „NVIDIA GB10", SM-Takt 2418 MHz, 38 °C, 9,45 W, Auslastung 0 %
-       (direkt **nach** der Messung abgefragt — die GPU war da bereits wieder
-       idle)
+     - GPU „NVIDIA GB10", SM-Takt 2418 MHz, 38 °C, 9,45 W, Auslastung 0 %. Die
+       Abfrage erfolgt nach der Messschleife, die GPU befand sich zu diesem
+       Zeitpunkt bereits im Idle-Zustand.
    * - **[8] Store**
-     - eine JSON-Zeile in ``results/results.jsonl``, mit ``run_id`` der Charge
+     - Eine JSON-Zeile in ``results/results.jsonl`` mit der ``run_id`` der
+       Charge.
 
-Zwei Dinge lohnen einen zweiten Blick. **Erstens** die Einordnung der
-28,32 TFLOP/s: Gegen den fp16-Peak (213) sind das 13 %, was nach wenig klingt.
-Gegen die *operative* Decke bei AI = 256 — die Bandbreiten-Schräge mit
-:math:`0{,}273 \cdot 256 = 69{,}9` TFLOP/s — sind es 41 %. Und cuBLAS selbst kommt
-mit 38,8 TFLOP/s auch nur auf 56 % dieser Decke. Die Roofline ist eben eine
-Schranke, nicht ein Versprechen. **Zweitens** die Genauigkeit: Der maximale
-absolute Fehler von :math:`3{,}2 \cdot 10^{-4}` bei einer Summe über 1024
-fp16-Produkte ist das, was ein fp32-Akkumulator leistet — genau deshalb schreibt
-die Aufgabenstellung ihn vor.
+Zwei Werte dieser Tabelle bedürfen einer Einordnung.
 
-Die Roofline: GB10 ist memory-bound
-===================================
+Der Durchsatz von 28,32 TFLOP/s entspricht 13 % des fp16-Rechenpeaks von
+213 TFLOP/s. Bei einer arithmetischen Intensität von 256 FLOP/Byte ist der Peak
+jedoch nicht die bindende Schranke. Bindend ist die Bandbreiten-Schräge mit
+:math:`0{,}273 \cdot 256 = 69{,}9` TFLOP/s, und darauf bezogen beträgt die
+Ausnutzung 41 %. cuBLAS erreicht mit 38,8 TFLOP/s 56 % derselben Schranke.
+
+Der maximale absolute Fehler von :math:`3{,}2 \cdot 10^{-4}` entspricht der
+Erwartung für eine Summe über 1024 fp16-Produkte bei fp32-Akkumulation.
+
+Einordnung im Roofline-Modell
+=============================
 
 .. figure:: /_static/gsc/roofline.png
    :align: center
    :width: 100%
    :alt: Roofline-Diagramm der GB10 mit memory-bound- und compute-nahen Punkten
 
-   Roofline (GB10). Zwei Schrägen: die theoretischen 273 GB/s und — gestrichelt
-   darunter — die **gemessenen** 223 GB/s aus dem ``copy``-Lauf. Die
-   memory-bound-Familien liegen weit links (AI 0,08–0,5), die Kontraktion rechts
-   (AI 171–512), die n-äre Kette als ein aggregierter Punkt dazwischen.
+   Roofline der GB10 mit zwei Bandbreiten-Schrägen. Die obere entspricht den
+   theoretischen 273 GB/s, die gestrichelte den im ``copy``-Lauf gemessenen
+   223 GB/s. Die speichergebundenen Familien liegen bei einer arithmetischen
+   Intensität von 0,08 bis 0,5, die Kontraktionen bei 171 bis 512. Die n-äre
+   Kette ist als ein aggregierter Punkt eingetragen.
 
-Der Ridge-Point der GB10 liegt bei ≈ 780 FLOP/Byte (mit der gemessenen Bandbreite
-sogar bei ≈ 955) — weit jenseits der arithmetischen Intensität selbst großer
-GEMMs. **Für alle Punkte des Format-Vergleichs ist damit die Bandbreiten-Schräge
-die operative Decke**, nicht der Rechen-Peak; die flachen 213 TFLOP/s werden nie
-erreicht und *können* bei diesen Intensitäten auch nicht erreicht werden.
+Der Ridge-Point der GB10 liegt bei etwa 780 FLOP/Byte, bezogen auf die gemessene
+Bandbreite bei etwa 955 FLOP/Byte. Beide Werte liegen oberhalb der arithmetischen
+Intensität auch großer GEMMs. Für alle Punkte des Formatvergleichs ist deshalb die
+Bandbreiten-Schräge die bindende Schranke und nicht der Rechenpeak. Die
+213 TFLOP/s sind bei diesen Intensitäten grundsätzlich nicht erreichbar.
 
-Die gemessene zweite Schräge macht die Aussage erst ehrlich: Wenn eine
-elementweise Addition 80,6 % der *theoretischen* Bandbreite erreicht, sind das
-99 % der *gemessenen* — es ist nichts mehr zu holen. Die Punkte, die im Bild weit
-unter beiden Schrägen liegen, sind genau die, bei denen sich Tuning lohnt.
+Die zweite, gemessene Schräge dient als praktische Obergrenze. Eine elementweise
+Addition erreicht 80,6 % der theoretischen und damit 99 % der gemessenen
+Bandbreite. Optimierungspotenzial besteht folglich nur bei den Punkten, die
+deutlich unter beiden Schrägen liegen.
 
 .. note::
 
-   Eine Grenze des Bildes: Die ``copy``-Läufe selbst sind **keine Punkte** in der
-   Figur, sondern ihre gestrichelte Linie. Mit :math:`AI = 0` (null FLOP) haben sie
-   auf einer logarithmischen Achse keinen Ort. Genau deshalb sind sie als Decke
-   eingezeichnet — dort, wo sie inhaltlich hingehören.
+   Die ``copy``-Läufe sind in der Figur nicht als Punkte, sondern als
+   gestrichelte Linie dargestellt. Mit null FLOP und damit einer arithmetischen
+   Intensität von 0 besitzen sie auf einer logarithmischen Achse keine Position.
+   Ihre Darstellung als Obergrenze ist deshalb die inhaltlich korrekte.
 
-Der einzige Punkt der Charge, der **rechts** vom Ridge liegt, ist das
-:math:`4096^3`-GEMM mit AI = 1024. Dort bindet tatsächlich die Rechen-Decke, und
-der Kernel erreicht mit 73,7 TFLOP/s **34,6 % des fp16-Peaks** — mehr als das
-Doppelte des Anteils bei :math:`1024^3`. Er steht bewusst nicht in der
-Roofline-Figur (er würde die Format-Punkte verdecken), sondern trägt den
-``GROUP_M``-Befund weiter unten.
+Ein einziger Punkt der Charge liegt rechts vom Ridge-Point, das
+:math:`4096^3`-GEMM mit einer arithmetischen Intensität von 1024. Dort ist die
+Rechenschranke bindend, und der Kernel erreicht mit 73,7 TFLOP/s 34,6 % des
+fp16-Peaks, also mehr als das Doppelte des Anteils bei :math:`1024^3`. Der Punkt
+ist nicht in der Roofline-Figur eingetragen, da er die Formatpunkte überdecken
+würde. Er wird im Abschnitt zur Blockumordnung ausgewertet.
 
-Durchsatz und Genauigkeit je Format
-===================================
+Formatvergleich: Durchsatz und Genauigkeit
+==========================================
 
 .. figure:: /_static/gsc/durchsatz_formate.png
    :align: center
    :width: 100%
    :alt: Balkendiagramm Durchsatz je Zahlenformat, cuTile gegen cuBLAS
 
-   Kontraktion je Format: der generierte cuTile-Kernel gegen die
-   cuBLAS-Obergrenze (``torch.matmul``). Für fp8 gibt es keinen direkten
-   ``matmul``-Pfad — deshalb fehlt die Vergleichssäule.
+   Durchsatz der Kontraktion je Zahlenformat, generierter cuTile-Kernel gegen
+   die cuBLAS-Obergrenze aus ``torch.matmul``. Für fp8 existiert kein direkter
+   ``matmul``-Pfad, weshalb die Vergleichssäule entfällt.
 
 .. figure:: /_static/gsc/genauigkeit_durchsatz.png
    :align: center
    :width: 90%
    :alt: Streudiagramm Genauigkeit gegen Durchsatz je Format
 
-   Genauigkeit ↔ Durchsatz. fp16/bf16 sind genau, fp8 ist am schnellsten, aber am
-   ungenauesten; tf32 ist hier der schlechteste Kompromiss — langsam **und**
-   ungenau.
+   Genauigkeit gegen Durchsatz. fp16 und bf16 erreichen die geringsten Fehler,
+   fp8 den höchsten Durchsatz bei größtem Fehler. tf32 ist in beiden Dimensionen
+   unterlegen.
 
 .. list-table:: Kontraktion :math:`1024^3`, Tile 128/128/64 (verifiziert)
    :header-rows: 1
@@ -177,34 +187,34 @@ Durchsatz und Genauigkeit je Format
      - 8,4·10⁻⁴
      - 93
 
-Was daraus zu lernen ist:
+Aus dem Vergleich ergeben sich vier Befunde.
 
-* **Der einfache f-String-Codegen erreicht bei fp16/bf16 drei Viertel von
-  cuBLAS** (73–75 %) — ohne Autotuning, ohne Software-Pipelining, ohne
-  handoptimierte Ladepfade. Für eine Kernel-Fabrik aus ein paar hundert Zeilen
-  Template ist das der überraschendste Befund des Projekts.
-* **fp8 ist mit 47,7 TFLOP/s klar am schnellsten** und zahlt es mit dem größten
-  Fehler (3,4·10⁻¹). Der Grund für den Vorsprung ist zur Hälfte Bandbreite: 1 Byte
-  je Eingabeelement verdoppelt die arithmetische Intensität auf 512.
-* **tf32 ist der schlechteste Kompromiss** — langsamer als fp16 *und* um zwei
-  Größenordnungen ungenauer. Auf dieser Maschine gibt es kaum einen Grund, es zu
-  wählen: Sein Rechen-Peak liegt bei 53 statt 213 TFLOP/s, und seine Operanden
-  belegen 4 Byte statt 2, was die Intensität auf 171 drückt.
-* **Für fp8 gibt es keine cuBLAS-Zahl**, und das Tool sagt auch warum: ``torch``
-  meldet ``"baddbmm_cuda" not implemented for 'Float8_e4m3fn'``. Die Baseline
-  trägt ``available: false`` samt Grund — das ist der Unterschied zwischen einer
-  fehlenden Säule und einer stillschweigend weggelassenen.
+* Der auf f-Strings basierende Codegen erreicht bei fp16 und bf16 73 bis 75 % des
+  cuBLAS-Durchsatzes. Erreicht wird das ohne Autotuning, ohne
+  Software-Pipelining und ohne handoptimierte Ladepfade. Für eine
+  Template-Generierung dieses Umfangs ist der Abstand zur Bibliotheksimplementierung
+  damit geringer als erwartet.
+* fp8 liefert mit 47,7 TFLOP/s den höchsten Durchsatz bei zugleich größtem Fehler
+  von 3,4·10⁻¹. Ein Teil des Vorsprungs ist auf die Bandbreite zurückzuführen, da
+  ein Byte je Eingabeelement die arithmetische Intensität auf 512 verdoppelt.
+* tf32 ist in dieser Messreihe dominiert. Es ist langsamer als fp16 und
+  gleichzeitig um zwei Größenordnungen ungenauer. Der Rechenpeak liegt mit
+  53 TFLOP/s deutlich unter den 213 TFLOP/s von fp16, und die Operanden belegen
+  4 statt 2 Byte, was die arithmetische Intensität auf 171 senkt.
+* Für fp8 liegt keine cuBLAS-Referenz vor. ``torch`` meldet ``"baddbmm_cuda" not
+  implemented for 'Float8_e4m3fn'``. Die Baseline wird deshalb mit
+  ``available: false`` und dem Grund gespeichert, statt ohne Angabe zu entfallen.
 
-Tuning-Raum I: die Kachelung
-============================
+Kachelung als Tuning-Achse
+==========================
 
 .. figure:: /_static/gsc/tile_swizzle.png
    :align: center
    :width: 100%
    :alt: Balkendiagramm Durchsatz über Tile-Größen und Swizzle-Gruppengrößen
 
-   fp16-Tuning-Raum bei :math:`1024^3`: **derselbe** verifizierte Kernel, nur
-   Kachelung bzw. Block-Umordnung variiert.
+   fp16-Tuning-Raum bei :math:`1024^3`. Zugrunde liegt derselbe verifizierte
+   Kernel, variiert werden ausschließlich Kachelung und Blockumordnung.
 
 .. list-table:: fp16, :math:`1024^3` — Kachelung und L2-Swizzle
    :header-rows: 1
@@ -217,50 +227,51 @@ Tuning-Raum I: die Kachelung
    * - Tile 256/128/64
      - **5,5**
      - 0,392
-     - der Einbruch — Faktor 5,2 gegenüber der besten Kachel
+     - Minimum der Reihe, Faktor 5,2 unter der besten Kachel
    * - Tile 64/64/32
      - 25,6
      - 0,084
-     - kleine Kacheln: mehr Blöcke, weniger Wiederverwendung je Block
+     - Mehr Blöcke, geringere Wiederverwendung je Block
    * - Tile 128/128/64
      - 28,3
      - 0,076
-     - der Referenzpunkt aller anderen Messungen
+     - Referenzkonfiguration aller übrigen Messungen
    * - + Swizzle G8
      - 29,1
      - 0,074
-     - dieselbe Permutation wie G16/G32 — siehe unten
+     - Identische Permutation wie G16 und G32, siehe folgender Abschnitt
    * - + Swizzle G16
      - 29,0
      - 0,074
-     - dieselbe Permutation wie G8/G32
+     - Identische Permutation wie G8 und G32
    * - + Swizzle G32
      - 29,2
      - 0,074
-     - dieselbe Permutation wie G8/G16
+     - Identische Permutation wie G8 und G16
 
-**Die Kachelwahl ist der stärkste einzelne Hebel des Werkzeugs.** Ein ungünstiges
-Tile (256/128/64) bricht auf 5,5 TFLOP/s ein — Faktor 5,2 gegenüber 128/128/64,
-bei identischem Ergebnis und identischem Ausdruck. Die plausible Erklärung: Bei
-:math:`M = 1024` und :math:`TM = 256` bleiben nur noch :math:`4 \times 8 = 32`
-Blöcke für 48 SMs — ein Drittel der Maschine bekommt nichts zu tun, und die
-größeren Kacheln erhöhen zugleich den Registerdruck. Genau solche Effekte macht
-das Werkzeug sichtbar, ohne dass man sie vorher kennen muss.
+Die Kachelwahl ist die wirksamste einzelne Konfigurationsachse des Werkzeugs. Die
+Kachel 256/128/64 fällt auf 5,5 TFLOP/s ab, was einem Faktor 5,2 gegenüber
+128/128/64 entspricht, und zwar bei identischem Ausdruck und identischem
+Ergebnis. Als Ursache kommt die Blockzahl in Betracht. Bei :math:`M = 1024` und
+:math:`TM = 256` entstehen nur :math:`4 \times 8 = 32` Blöcke für 48 SMs, sodass
+ein Teil der Multiprozessoren unbeschäftigt bleibt. Zusätzlich erhöhen größere
+Kacheln den Registerdruck. Ein Nachweis dieser Ursache erfordert Profiling und
+wird mit den vorliegenden Daten nicht geführt. Für die Fragestellung des Werkzeugs
+genügt, dass der Effekt reproduzierbar messbar ist.
 
-Tuning-Raum II: der L2-Swizzle hängt an der Gittergröße
-=======================================================
+Blockumordnung: Abhängigkeit von der Gittergröße
+================================================
 
-Die drei Swizzle-Zeilen oben liegen innerhalb von 0,7 % beieinander. Das ist
-**kein** Messergebnis über ``GROUP_M``, sondern Struktur — und diese Erklärung war
-in einer früheren Fassung dieses Berichts eine unbelegte Behauptung. Jetzt ist sie
-gemessen.
+Die drei Swizzle-Konfigurationen der vorigen Tabelle liegen innerhalb von 0,7 %
+beieinander. Dieser Befund ist strukturell bedingt und kein Ergebnis über
+``GROUP_M``.
 
-Zuerst die Struktur: :math:`1024^3` mit ``TM = TN = 128`` ergibt ein
-:math:`8 \times 8`-Blockgitter. Die Rasterung begrenzt die Gruppe auf
-``min(num_pid_m - first_pid_m, GROUP_M)``, also auf 8 — es entsteht **eine
-einzige Gruppe**, und für jedes ``GROUP_M ≥ 8`` ist die Block-Permutation
-*identisch*. Die drei Zeilen sind faktisch dreimal derselbe Kernel; ihre Streuung
-ist die Messgenauigkeit.
+Der Grund liegt in der Gittergröße. :math:`1024^3` mit ``TM = TN = 128`` ergibt
+ein :math:`8 \times 8`-Blockgitter. Die Rasterung begrenzt die Gruppengröße auf
+``min(num_pid_m - first_pid_m, GROUP_M)``, hier also auf 8. Es entsteht eine
+einzige Gruppe, und für jedes ``GROUP_M ≥ 8`` ist die Blockpermutation identisch.
+Die drei Zeilen entsprechen damit demselben Kernel, ihre Streuung ist die
+Messunsicherheit.
 
 Messbar wird die Achse erst auf einem Gitter, das mehrere Gruppen zulässt.
 :math:`4096^3` ergibt :math:`32 \times 32` Blöcke:
@@ -270,9 +281,9 @@ Messbar wird die Achse erst auf einem Gitter, das mehrere Gruppen zulässt.
    :width: 100%
    :alt: Balkendiagramm Durchsatz über GROUP_M bei 4096 hoch 3
 
-   ``GROUP_M`` auf einem :math:`32 \times 32`-Blockgitter. Identischer
-   verifizierter Kernel, identisches Format und Tile — variiert wird
-   ausschließlich die Block→Kachel-Zuordnung.
+   ``GROUP_M`` auf einem :math:`32 \times 32`-Blockgitter. Kernel, Zahlenformat
+   und Kachelung sind identisch, variiert wird ausschließlich die Zuordnung von
+   Blöcken zu Kacheln.
 
 .. list-table:: fp16, :math:`4096^3`, Tile 128/128/64 — ``GROUP_M`` (verifiziert)
    :header-rows: 1
@@ -314,33 +325,32 @@ Messbar wird die Achse erst auf einem Gitter, das mehrere Gruppen zulässt.
      - 3,543
      - 1,07×
 
-Das ist der stärkste neue Befund dieses Berichts, und er hat drei Teile:
+Die Reihe stützt drei Aussagen.
 
-1. **Der L2-Swizzle ist kein Feintuning, sondern ein Faktor 2.** Auf einem
-   hinreichend großen Gitter verdoppelt eine reine Umordnung der
-   Block-Reihenfolge den Durchsatz — bei *bit-identischem* Ergebnis (die
-   Permutation ist bijektiv, und die Verifikation liefert für alle sechs Läufe
-   denselben Fehler von 2,62·10⁻³). Kein Byte mehr oder weniger wird gerechnet;
-   die Daten liegen nur zum richtigen Zeitpunkt im L2.
-2. **``GROUP_M`` hat ein Optimum, nicht eine Richtung.** Zu kleine Gruppen (G2)
-   bringen kaum Wiederverwendung, zu große (G32) sprengen den Cache. Das Maximum
-   liegt bei G8 — genau dem Wert, der als Triton-Konvention hart verdrahtet war,
-   was diese Konvention nachträglich rechtfertigt. Ein Werkzeug, das nur „Swizzle
-   an/aus" könnte, hätte diese Kurve nie gezeigt.
-3. **G32 fällt fast auf den Bezugspunkt zurück** (1,07×) — und das ist die
-   *Bestätigung* der Struktur-Erklärung von oben: Bei ``GROUP_M`` = Gitterhöhe
-   entsteht wieder nur eine Gruppe, die Permutation degeneriert zu einer bloßen
-   Transposition der Durchlaufreihenfolge. Derselbe Mechanismus, der bei
-   :math:`1024^3` alle Werte ≥ 8 gleichmacht, macht hier G32 wirkungslos.
+1. Die Blockumordnung ist kein Feinjustierungseffekt, sondern verändert den
+   Durchsatz um den Faktor 2,03. Das Ergebnis bleibt dabei bit-identisch, da die
+   Permutation bijektiv ist. Die Verifikation liefert für alle sechs Läufe
+   denselben Fehler von 2,62·10⁻³. Verändert wird ausschließlich der Zeitpunkt,
+   zu dem eine Kachel im L2 vorliegt.
+2. ``GROUP_M`` besitzt ein Optimum und keine monotone Wirkungsrichtung. Kleine
+   Gruppen wie G2 erzeugen wenig Wiederverwendung, große wie G32 überschreiten
+   die Cache-Kapazität. Das Maximum liegt bei G8, also bei dem Wert, der in
+   Triton-Beispielen als Konvention verwendet wird. Die Messung bestätigt diese
+   Konvention für den vorliegenden Fall. Eine Implementierung, die ``GROUP_M``
+   nicht als freien Parameter führt, kann den Verlauf nicht abbilden.
+3. G32 fällt mit 1,07× nahezu auf den Bezugspunkt zurück. Das bestätigt die
+   strukturelle Erklärung des vorigen Abschnitts. Ist ``GROUP_M`` gleich der
+   Gitterhöhe, entsteht wieder eine einzige Gruppe, und die Permutation
+   degeneriert zu einer Transposition der Durchlaufreihenfolge. Es handelt sich um
+   denselben Mechanismus, der bei :math:`1024^3` alle Werte ab 8 gleichsetzt.
 
-Die Lehre daraus ist allgemeiner als der Messwert: **Eine Tuning-Achse kann auf
-einer zu kleinen Testform strukturell unsichtbar sein.** Hätten wir nur bei
-:math:`1024^3` gemessen, wäre der Schluss „der Swizzle bringt 3 %" gewesen — er ist
-falsch, und zwar nicht wegen eines Messfehlers, sondern weil die Form die Frage
-nicht zulässt.
+Methodisch folgt daraus, dass eine Tuning-Achse auf einer zu klein gewählten
+Testform strukturell unsichtbar bleiben kann. Eine Messung ausschließlich bei
+:math:`1024^3` hätte den Effekt der Blockumordnung mit 3 % angegeben. Dieser Wert
+wäre nicht durch Messfehler falsch, sondern durch die Wahl der Problemform.
 
-Memory-bound: Bandbreite als Primärmetrik
-=========================================
+Speichergebundene Familien: Bandbreite als Primärmetrik
+=======================================================
 
 .. list-table:: Elementwise & Reduktion & Copy, :math:`4096^2` (verifiziert)
    :header-rows: 1
@@ -407,57 +417,59 @@ Memory-bound: Bandbreite als Primärmetrik
      - 0,25
      - 3,8·10⁻⁵
 
-* **Die elementweise Addition ist bandbreitengesättigt.** 80–82 % der
-  theoretischen Bandbreite sind — gemessen an der ``copy``-Obergrenze von
-  222,9 GB/s — **98–101 %** des praktisch Erreichbaren. Hier ist nichts mehr zu
-  optimieren; der Kernel *ist* die Maschine.
-* **Die Kopie ist der Bezugspunkt und zugleich ein Kuriosum:** ``fp16 → fp16``
-  (4 Byte/Element) ist mit 209,7 GB/s **langsamer** als ``fp32 → fp32``
-  (8 Byte/Element, 222,2 GB/s). Wer nur Bytes zählt, erwartet das Gegenteil. Die
-  Erklärung: Bei gleicher Elementzahl bewegt der schmale Fall nur halb so viele
-  Bytes, während der Pro-Element-Overhead (Adressierung, Kachel-Verwaltung,
-  Launch) gleich bleibt — die Bandbreite ist dann nicht mehr der einzige
-  Engpass. Dasselbe Muster erklärt die Reduktion.
-* **Die Reduktion liegt in fp16/bf16 bei 63 %, in fp32 bei 79 %** — dieselbe
-  Ursache: Sie liest im schmalen Format halb so viele Bytes und wird dadurch
-  relativ stärker von allem anderen begrenzt.
-* **Die Reduktion ist formatunabhängig genau** (≈ 3·10⁻⁵ in allen drei Formaten),
-  weil sie unabhängig vom Eingabeformat im fp32-Akkumulator summiert. Dass dieser
-  Satz stimmt, ist das Ergebnis eines gefangenen Bugs — siehe unten.
+* Die elementweise Addition ist bandbreitengesättigt. Die 80 bis 82 % der
+  theoretischen Bandbreite entsprechen 98 bis 101 % der gemessenen
+  ``copy``-Obergrenze von 222,9 GB/s. Ein Optimierungsspielraum besteht damit
+  nicht mehr.
+* Die Kopie dient als Bezugspunkt und zeigt ein zunächst kontraintuitives
+  Verhalten. ``fp16 → fp16`` bewegt 4 Byte je Element und erreicht mit
+  209,7 GB/s weniger als ``fp32 → fp32`` mit 8 Byte je Element und 222,2 GB/s.
+  Erklärbar ist das über den Overhead. Bei gleicher Elementzahl bewegt der
+  schmale Fall halb so viele Bytes, während die Kosten je Element für
+  Adressierung, Kachelverwaltung und Launch konstant bleiben. Die Bandbreite ist
+  dann nicht mehr der einzige begrenzende Faktor.
+* Die Reduktion erreicht in fp16 und bf16 63 % und in fp32 79 % der theoretischen
+  Bandbreite. Die Ursache ist dieselbe, da sie im schmalen Format halb so viele
+  Bytes liest und deshalb relativ stärker von den übrigen Kosten begrenzt wird.
+* Die Genauigkeit der Reduktion ist mit etwa 3·10⁻⁵ formatunabhängig, da
+  unabhängig vom Eingabeformat im fp32-Akkumulator summiert wird. Diese
+  Eigenschaft gilt erst nach der Korrektur eines Codegen-Defekts, der weiter
+  unten dokumentiert ist.
 
-Die n-äre Kette als ein Punkt
-=============================
+N-äre Kette
+===========
 
-Die Kette ``ij,jk,kl->il`` bei :math:`256^4` wird in zwei paarweise GEMMs zerlegt
-(geplanter Pfad ``ij,jk->ik``, dann ``kl,ik->il``), gegen ``torch.einsum`` über den
-**vollen** Ausdruck in fp32 verifiziert und als **ein** aggregierter Punkt
-gemessen: **1,64 TFLOP/s bei AI = 64 FLOP/Byte**.
+Die Kette ``ij,jk,kl->il`` bei :math:`256^4` wird in zwei paarweise GEMMs
+zerlegt. Der geplante Pfad lautet ``ij,jk->ik`` und anschließend ``kl,ik->il``.
+Verifiziert wird gegen ``torch.einsum`` über den vollständigen Ausdruck in fp32,
+gemessen wird die Kette als ein aggregierter Punkt. Das Ergebnis sind
+1,64 TFLOP/s bei einer arithmetischen Intensität von 64 FLOP/Byte.
 
-Dass die Intensität *unter* der eines einzelnen GEMMs liegt, ist erwartbar und
-genau der Punkt: Der Zwischentensor wird geschrieben und wieder gelesen, was in
-die aggregierten Bytes eingeht. Die Kette ist damit ein Beispiel für das, was das
-Fusions-Kapitel als nächstes systematisch untersucht.
+Dass die Intensität unter der eines einzelnen GEMMs liegt, ist erwartungskonform.
+Der Zwischentensor wird geschrieben und erneut gelesen, was in die aggregierten
+Bytes eingeht. Der folgende Abschnitt untersucht dieselbe Kostenart systematisch.
 
 .. note::
 
-   Ist ``opt_einsum`` installiert, kann der Planer eine **andere** Zerlegung wählen
-   als der Links-nach-rechts-Fold — dann wird auch etwas anderes gemessen. Der
-   geplante Pfad steht deshalb in jeder ``results.jsonl``-Zeile
-   (``provenance.sizes.path``).
+   Bei installiertem ``opt_einsum`` kann der Planer eine andere Zerlegung wählen
+   als den Fold von links nach rechts, wodurch ein anderer Kernel-Pfad gemessen
+   wird. Der geplante Pfad ist deshalb in jeder Zeile von ``results.jsonl`` unter
+   ``provenance.sizes.path`` protokolliert.
 
-Fusion: wann lohnt ein Epilog auf dem Akkumulator?
-==================================================
+Fusion des Epilogs auf dem Akkumulator
+======================================
 
-Wer eine Kontraktion und eine anschließende elementweise Operation
-(:math:`C = A \cdot B`, dann :math:`+D` oder :math:`\max(\cdot, 0)`) als **zwei**
-Kernel fährt, schreibt das Zwischenergebnis nach DRAM und liest es sofort wieder —
-auf einer memory-bound Maschine bezahlt man diesen Umweg voll. Gespart wird durch
-die Fusion genau dieser Roundtrip, :math:`2 \cdot 4 \cdot M \cdot N` Bytes.
+Werden eine Kontraktion und die anschließende elementweise Operation, also
+:math:`C = A \cdot B` gefolgt von :math:`+D` oder :math:`\max(\cdot, 0)`, in zwei
+getrennten Kerneln ausgeführt, wird das Zwischenergebnis nach DRAM geschrieben
+und unmittelbar danach wieder gelesen. Auf einer speichergebundenen Maschine geht
+dieser Umweg vollständig in die Laufzeit ein. Die Fusion vermeidet genau diesen
+Roundtrip von :math:`2 \cdot 4 \cdot M \cdot N` Bytes.
 
-Die entscheidende Beobachtung: **Die Ersparnis ist absolut konstant, die
-Kontraktion selbst wird mit steigendem :math:`K` immer teurer.** Der Sweep variiert
-deshalb die arithmetische Intensität und nicht die Arbeitsmenge — die schmale und
-die quadratische Form haben mit 2,15 GFLOP dieselbe FLOP-Zahl:
+Die eingesparte Datenmenge ist von :math:`K` unabhängig, die Kosten der
+Kontraktion steigen dagegen mit :math:`K`. Der Sweep variiert deshalb die
+arithmetische Intensität und nicht die Arbeitsmenge. Die schmale und die
+quadratische Form weisen mit 2,15 GFLOP dieselbe FLOP-Zahl auf:
 
 .. list-table:: Fusion vs. sequentiell (fp16 → fp32, gegen ``torch.einsum`` + Epilog verifiziert)
    :header-rows: 1
@@ -519,97 +531,100 @@ die quadratische Form haben mit 2,15 GFLOP dieselbe FLOP-Zahl:
    :alt: Speedup der Fusion über der arithmetischen Intensität, je Epilog eine Kurve
 
    Fusions-Speedup über der arithmetischen Intensität. Links die schmale Form
-   (4096·4096·64), in der Mitte :math:`1024^3`, rechts die tiefe Form
-   (1024·1024·8192). Beide Kurven fallen monoton gegen die Referenzlinie 1,0.
+   4096·4096·64, in der Mitte :math:`1024^3`, rechts die tiefe Form
+   1024·1024·8192. Beide Kurven fallen monoton gegen die Referenzlinie 1,0.
 
-Das Ergebnis ist ein **Trend**, kein Einzelbefund:
+Der Verlauf ist ein monotoner Trend über drei Formen und kein Einzelbefund.
 
-* Bei der **schmalen, memory-bound** Form ist der fusionierte Kernel mehr als
-  doppelt so schnell (2,12× / 2,71×) — dort dominiert der gesparte 128-MiB-
-  Roundtrip die Laufzeit. Der fused Kernel erreicht dabei 195 GB/s, also **87 %
-  der gemessenen Bandbreiten-Obergrenze**: Er ist nicht nur schneller, er ist
-  nahe am Maschinenlimit.
-* Bei der **tiefen, compute-dominierten** Form schrumpft der Gewinn auf 1,03–1,04×:
-  Die Kontraktion braucht dort 0,36 ms, der gesparte 8-MiB-Roundtrip nur etwa
-  0,01–0,02 ms — er verschwindet im Rauschen der Rechenzeit.
-* ``relu`` gewinnt durchweg mehr als ``bias``, und das ist konsistent:
-  ``relu`` braucht keinen zusätzlichen Operanden, der fused Kernel liest also
-  wirklich nur A und B, während ``bias`` das Bias-Feld D zusätzlich lesen muss.
+* Bei der schmalen, speichergebundenen Form liegt der Speedup bei 2,12× und
+  2,71×, da der eingesparte Roundtrip von 128 MiB die Laufzeit dominiert. Der
+  fusionierte Kernel erreicht dabei 195 GB/s, also 87 % der gemessenen
+  Bandbreitenobergrenze, und liegt damit nahe am Maschinenlimit.
+* Bei der tiefen, rechendominierten Form beträgt der Speedup 1,03 bis 1,04×. Die
+  Kontraktion benötigt dort 0,36 ms, der eingesparte Roundtrip von 8 MiB
+  rechnerisch 0,01 bis 0,02 ms, was in der Streuung der Rechenzeit aufgeht.
+* ``relu`` erreicht durchgängig höhere Speedups als ``bias``. Das ist
+  konsistent, da ``relu`` keinen zusätzlichen Operanden benötigt und der
+  fusionierte Kernel damit nur A und B liest, während ``bias`` zusätzlich das
+  Bias-Feld D lädt.
 
-Damit ordnet sich auch der Befund aus Assignment 04 ein, der dieses Teil-Ziel
-motiviert hat: Dort war die Fusion mit **0,984×** minimal *langsamer* als der
-sequentielle Pfad (Kontraktion 12,83 ms gegenüber einem Epilog von 0,067 ms). Diese
-Form liegt noch weiter rechts als unsere tiefste — jenseits des Punktes, an dem der
-gesparte Speicherverkehr überhaupt messbar ist, bleibt nur der zusätzliche Aufwand
-des größeren Kernels übrig. Die ehrliche Aussage lautet deshalb nicht „Fusion ist
-schneller", sondern:
+In dieselbe Systematik ordnet sich der Befund aus Assignment 04 ein, der dieses
+Teilziel motiviert hat. Dort lag die Fusion mit 0,984× geringfügig unter dem
+sequentiellen Pfad, bei einer Kontraktion von 12,83 ms gegenüber einem Epilog von
+0,067 ms. Diese Form liegt bezüglich der arithmetischen Intensität oberhalb der
+hier tiefsten Form. Jenseits des Punktes, an dem der eingesparte Speicherverkehr
+messbar ist, verbleibt nur der Zusatzaufwand des größeren Kernels. Die zulässige
+Aussage lautet daher nicht, dass Fusion schneller ist, sondern:
 
 .. admonition:: Kernaussage
 
-   **Fusion zahlt sich in dem Maß aus, in dem die Operation bandbreiten- und
-   nicht rechenlimitiert ist** — und die GB10 ist mit ihrem Ridge-Point von
-   ≈ 780 FLOP/Byte eine Maschine, auf der dieser Bereich groß ist.
+   Der Gewinn der Fusion skaliert mit dem Grad, in dem eine Operation
+   bandbreiten- und nicht rechenlimitiert ist. Die GB10 besitzt mit einem
+   Ridge-Point von etwa 780 FLOP/Byte einen großen bandbreitenlimitierten
+   Bereich.
 
-Zwei Eigenschaften der Umsetzung sind dabei bewusst konservativ. **Erstens** ist
-die Fusion rein additiv: ohne gewählten Epilog erzeugt der Codegen byte-identischen
-Quelltext und denselben Slug wie vorher — durch einen Textvergleich im Test
-festgeschrieben. **Zweitens** misst das Tool den sequentiellen Vergleichspfad
-**selbst** (zweiter Kernel-Paar-Lauf im selben ``run()``, gleiche Messschleife) und
-verifiziert auch dessen Ergebnis gegen fp32. Der Speedup ist damit kein Vergleich
-gegen eine Schätzung, sondern gegen eine gemessene, verifizierte Alternative.
-Schlägt diese Zweitmessung fehl, verliert der Lauf nur den Vergleich, nicht sein
-eigenes Ergebnis.
+Zwei Eigenschaften der Umsetzung sind bewusst konservativ gewählt. Erstens ist
+die Fusion rein additiv. Ohne gewählten Epilog erzeugt der Codegen
+byte-identischen Quelltext und denselben Slug wie vor der Erweiterung, was ein
+Textvergleich im Test absichert. Zweitens wird der sequentielle Vergleichspfad
+selbst gemessen, als zweiter Kernel-Paar-Lauf im selben ``run()`` mit identischer
+Messschleife, und ebenfalls gegen fp32 verifiziert. Der Speedup ist damit ein
+Vergleich gegen eine gemessene und verifizierte Alternative und nicht gegen eine
+Schätzung. Schlägt diese Zweitmessung fehl, entfällt nur der Vergleich, nicht das
+Ergebnis des Laufs.
 
-verify-before-trust in Aktion
+Verifikation: ein erkannter Codegen-Defekt
+==========================================
+
+Die dokumentierte Charge umfasst 33 Konfigurationen, die alle die
+fp32-Verifikation bestehen. Dieser Stand ist selbst ein Resultat des Gates, da
+eine vorangehende Charge einen Fehlschlag enthielt.
+
+**Beobachtung.** Die bf16-Reduktion über :math:`4096^2` überschritt die Toleranz
+deutlich, mit einem maximalen absoluten Fehler von 1,574 bei einem ``atol`` von
+1,0. Der Lauf erhielt den Status ``verify_failed``, wurde ohne Durchsatzwert
+gespeichert und ging in keine Figur ein. Naheliegend wäre die Deutung gewesen,
+dass bf16 mit 8 Mantissenbits für eine Summe über 4096 Summanden zu grob
+auflöst. Diese Deutung war falsch.
+
+**Ursache.** Der Defekt lag im eigenen Codegen. Das Reduktions-Template besitzt
+zwei Pfade. Der K-Loop-Fallback akkumulierte im angeforderten Akkumulatorformat,
+der für alle Report-Größen gewählte single-shot-Pfad dagegen im Eingabeformat.
+Dort stand ``ct.sum(tile, axis=1)`` anstelle von ``ct.sum(ct.astype(tile,
+ct.float32), axis=1)``, sodass der Parameter ``acc_dtype`` auf diesem Pfad
+wirkungslos blieb. Auffällig wurde der Defekt an einer Stelle, an der die
+Erwartung entgegengesetzt ist. Dieselbe Eingabe über eine doppelt so lange Achse
+reduziert, also jenseits von :math:`K = 16384` und damit über den Loop-Pfad, war
+drei Größenordnungen genauer. Der Unterschied lag folglich nicht in der Länge der
+Summe, sondern im Akkumulatorformat.
+
+**Korrektur.** Die Korrektur besteht in einer Zeile, dem Cast vor ``ct.sum``
+analog zum Loop-Pfad. Danach liefert dieselbe bf16-Reduktion einen Fehler von
+3,05·10⁻⁵, also einen um den Faktor 51 000 kleineren Wert. Der Lauf besteht die
+Verifikation und ist in der Tabelle der speichergebundenen Familien enthalten.
+Die fp16-Reduktion lag zuvor mit einem Fehler von 0,22 innerhalb ihrer Toleranz
+und war als ``ok`` gewertet worden. Sie verbesserte sich mit derselben Korrektur
+auf 3,05·10⁻⁵.
+
+**Bewertung.** Das Gate hat keine Eigenschaft eines Zahlenformats angezeigt,
+sondern einen Defekt im generierten Kernel, und zwar bevor eine falsch
+etikettierte Genauigkeitsangabe in diesen Bericht eingegangen ist. Ohne
+fp32-Referenz wäre der Defekt nicht erkennbar gewesen, da ein Wert von 1,574 bei
+einer Zeilensumme über 4096 bf16-Werte als Formatgrenze interpretierbar ist und
+der fp16-Fall mit 0,22 unauffällig blieb. Genau gegen diese Klasse stiller
+Falschergebnisse muss generierter Kernel-Code abgesichert werden.
+
+Ein Toleranzfall bleibt daneben inhaltlich echt. Bei tieferen n-ären fp16-Ketten
+summiert sich ab :math:`384^4` der Fehler beider GEMM-Schritte über die Toleranz.
+Der Bericht zeigt die Kette deshalb bei :math:`256^4`. Solche Fälle werden als
+Fehlschlag gemeldet und nicht mit einem Ergebniswert versehen.
+
+Messstreuung und Compile-Zeit
 =============================
 
-Der abgebildete Sweep umfasst 33 Konfigurationen, und **alle 33** bestehen die
-fp32-Verifikation. Dieser saubere Stand ist allerdings selbst das Ergebnis des
-Prinzips — denn eine Charge vorher tat er es nicht, und der eine Fehlschlag war
-lehrreich genug, um hier ausführlich zu stehen.
-
-**Der Fund.** Die bf16-Reduktion über :math:`4096^2` überschritt die Toleranz
-deutlich: maximaler absoluter Fehler **1,574** bei einem ``atol`` von 1,0. Der Lauf
-bekam ``verify_failed``, **keine** Durchsatzzahl und erschien in keiner Figur. Die
-naheliegende Erklärung wäre gewesen, dass bf16 mit seinen 8 Mantissenbits über 4096
-Summanden schlicht zu grob ist — eine Format-Grenze, plausibel formuliert und bequem
-zu glauben. Sie war falsch.
-
-**Die Ursache lag im eigenen Codegen.** Das Reduktions-Template hat zwei Pfade. Der
-K-Loop-Fallback akkumulierte korrekt im angeforderten Akku-Format, der
-single-shot-Pfad — der für alle Report-Größen gewählt wird — dagegen **im
-Eingabeformat**: ``ct.sum(tile, axis=1)`` statt ``ct.sum(ct.astype(tile,
-ct.float32), axis=1)``. Der ``acc_dtype``-Regler war auf diesem Pfad wirkungslos.
-Auffällig wurde das an einer Stelle, an der die Intuition genau anders herum zeigt:
-Dieselbe Eingabe über eine **doppelt so lange** Achse reduziert (jenseits von
-:math:`K = 16384`, also über den Loop-Pfad) war drei Größenordnungen *genauer*.
-Nicht die Länge der Summe war der Unterschied, sondern der Akkumulator.
-
-**Die Korrektur** ist eine Zeile — der Cast vor ``ct.sum``, exakt wie im Loop-Pfad.
-Danach liefert dieselbe bf16-Reduktion einen Fehler von **3,05·10⁻⁵**, rund
-**51 000×** kleiner, besteht die Verifikation und steht in der
-memory-bound-Tabelle oben. Die fp16-Reduktion, die zuvor mit einem Fehler von 0,22
-*innerhalb* ihrer Toleranz lag und deshalb als ``ok`` durchgegangen war, verbesserte
-sich im selben Zug auf 3,05·10⁻⁵.
-
-**Das ist der eigentliche Wert des Gates.** Es hat keine Eigenschaft eines
-Zahlenformats gemeldet, sondern einen **echten Defekt im generierten Kernel** — und
-zwar bevor eine falsch beschriftete Genauigkeitszahl in diesen Report gelangte. Ohne
-die fp32-Referenz wäre der Fehler unsichtbar geblieben: 1,574 auf einer Zeilensumme
-über 4096 bf16-Werte sieht nach einem Format-Limit aus, nicht nach einem Bug, und der
-fp16-Fall hätte mit 0,22 nie Verdacht erregt. Genau das ist die Klasse stiller
-Falschergebnisse, gegen die generierter Kernel-Code abgesichert werden muss.
-
-Ein Toleranz-Fall bleibt zudem echt: Bei tieferen n-ären fp16-Ketten summiert sich ab
-:math:`384^4` der Fehler beider GEMM-Schritte über die Toleranz — deshalb zeigt der
-Report die Kette bewusst bei :math:`256^4`. Das Tool meldet solche Fälle laut, statt
-still eine falsche Zahl zu liefern.
-
-Messqualität: was die Zahlen wert sind
-======================================
-
-Ein Bericht, der Durchsätze auf drei Stellen angibt, sollte sagen, wie stabil sie
-sind. Die Charge liefert das mit, weil jede Messung eine Verteilung ist:
+Durchsatzangaben mit drei signifikanten Stellen erfordern eine Angabe zur
+Stabilität. Da jede Messung als Verteilung über 30 Iterationen gespeichert wird,
+ist diese Angabe aus derselben Charge ableitbar:
 
 .. list-table:: Streuung über 30 getaktete Iterationen (dieselbe Charge)
    :header-rows: 1
@@ -646,31 +661,33 @@ sind. Die Charge liefert das mit, weil jede Messung eine Verteilung ist:
      - 0,4 %
      - 1,01
 
-Das Muster ist konsistent und erklärbar: **Die memory-bound-Läufe sind extrem
-reproduzierbar** (σ unter 1 %), weil sie durchgehend an der Bandbreite hängen — es
-gibt kaum etwas, das variieren kann. **Die Kontraktionen streuen mit ~10 %
-deutlich mehr**, und ihr p90 liegt 10–23 % über dem Median: Hier wirken Takt- und
-Cache-Effekte, und der L2-Flush zwischen den Iterationen tut genau das, was er
-soll — er erzeugt für jede Iteration einen kalten Startzustand, dessen Kosten von
-der Verdrängungsreihenfolge abhängen. Deshalb ist ``run_ms`` der **Median**: Ein
-Mittelwert würde von den p90-Ausreißern nach oben gezogen.
+Das Muster ist konsistent. Die speichergebundenen Läufe sind mit einem
+relativen σ unter 1 % gut reproduzierbar, da sie durchgängig an der Bandbreite
+anliegen und wenig Spielraum für Variation besteht. Die Kontraktionen streuen mit
+etwa 10 % stärker, und ihr p90 liegt 10 bis 23 % über dem Median. Hier wirken
+Takt- und Cache-Effekte, und der L2-Flush zwischen den Iterationen erzeugt
+absichtlich für jede Iteration einen kalten Startzustand, dessen Kosten von der
+Verdrängungsreihenfolge abhängen. Als Kennwert wird deshalb der Median
+gespeichert, da ein arithmetisches Mittel von den p90-Ausreißern nach oben
+verzerrt würde.
 
-Zur **Compile-Zeit** gehört eine Einschränkung, die man kennen muss.
-``compile_ms`` misst den *ersten Launch im laufenden Prozess*. In dieser Charge
-liegt er zwischen 9,8 und 50,7 ms — aber nur, weil viele Läufe einen Kernel-Slug
-benutzen, der im selben Prozess schon einmal compiliert wurde (der
-:math:`4096^3`-Sweep etwa nutzt dasselbe Artefakt wie der :math:`1024^3`-Sweep).
-Für einen **wirklich neuen** Kernel in einem frischen Prozess reichen die Werte im
-Store von rund **310 ms bis über 1,7 s** — den Spitzenwert halten die
-tf32-Varianten der großen Tensor-Kontraktion ``acspx,bspy->abcyx``, deren
-Kernel-Cast den JIT zusätzlich beschäftigt. Die Zahl ist also keine
-Kernel-Eigenschaft, sondern eine Prozess-Historie; genau deshalb steht sie
-getrennt von ``run_ms`` und geht in keine Kennzahl ein.
+Für die Compile-Zeit gilt eine Einschränkung. ``compile_ms`` erfasst den ersten
+Launch im laufenden Prozess. In dieser Charge liegen die Werte zwischen 9,8 und
+50,7 ms, allerdings nur deshalb, weil viele Läufe einen Kernel-Slug verwenden,
+der im selben Prozess bereits compiliert wurde. Der :math:`4096^3`-Sweep nutzt
+beispielsweise dasselbe Artefakt wie der :math:`1024^3`-Sweep. Für einen erstmals
+compilierten Kernel in einem frischen Prozess reichen die Werte im Store von rund
+310 ms bis über 1,7 s, wobei der Maximalwert auf die tf32-Varianten der
+Tensor-Kontraktion ``acspx,bspy->abcyx`` fällt, deren Kernel-Cast den JIT
+zusätzlich belastet. Die Größe beschreibt damit keine Kerneleigenschaft, sondern
+den Zustand des Prozesses. Sie wird deshalb getrennt von ``run_ms`` geführt und
+geht in keine Kennzahl ein.
 
-Grenzen der Aussagen
-====================
+Gültigkeitsgrenzen
+==================
 
-Was dieser Bericht **nicht** behauptet:
+Die folgenden Einschränkungen begrenzen die Reichweite der berichteten
+Ergebnisse:
 
 .. list-table::
    :header-rows: 1
@@ -678,30 +695,30 @@ Was dieser Bericht **nicht** behauptet:
 
    * - Grenze
      - Konsequenz
-   * - **GB/s sind eine Untergrenze**
-     - Die Byte-Zahlen sind der algorithmische Mindest-Traffic ohne
-       Tiling-Rereads. Der reale DRAM-Verkehr einer Kontraktion ist höher; „% der
-       Bandbreite" ist entsprechend konservativ. Für die memory-bound-Familien
-       (jedes Element genau einmal gelesen) ist die Zahl dagegen scharf.
-   * - **Kein Autotuning**
-     - Alle Kachel-/Swizzle-Zahlen sind *gemessene Einzelkonfigurationen*, keine
-       gefundenen Optima. Dass G8 bei :math:`4096^3` das Maximum der geprüften
-       Werte ist, heißt nicht, dass es global optimal ist.
-   * - **Die Peaks sind Fremdmessungen**
-     - Rechen-Peaks stammen aus einem veröffentlichten Microbenchmark, nicht aus
-       einem Whitepaper. Alle „%-Peak"-Angaben erben diese Unsicherheit. Die
-       Bandbreiten-Decke haben wir dagegen selbst gemessen.
-   * - **Nur zwei Operanden pro Kernel**
-     - n-äre Ausdrücke werden zerlegt; Diagonalen und Spuren (``ii->i``) sind
-       nicht unterstützt und werden laut abgelehnt.
-   * - **Epilog nur bei 2-Operanden-Kontraktionen**
-     - Auf einer n-ären Kette würde der Epilog still unangewendet bleiben —
-       deshalb lehnt das Tool die Kombination ausdrücklich ab, statt sie
-       stillschweigend zu ignorieren.
-   * - **Eine Maschine, eine GPU**
-     - Alle Ergebnisse gelten für **diese** GB10. Es gibt keine Multi-GPU-Läufe
-       und keinen Vergleich gegen andere Hardware.
-   * - **Reduktions-Fallback nicht aus A02 belegt**
+   * - GB/s sind eine Untergrenze
+     - Die Byte-Zahlen entsprechen dem algorithmischen Mindest-Traffic ohne
+       Tiling-Rereads. Der reale DRAM-Verkehr einer Kontraktion ist höher, die
+       Angabe in Prozent der Bandbreite entsprechend konservativ. Für die
+       speichergebundenen Familien ist der Wert scharf, da jedes Element genau
+       einmal gelesen wird.
+   * - Kein Autotuning
+     - Alle Kachel- und Swizzle-Angaben sind gemessene Einzelkonfigurationen und
+       keine gefundenen Optima. Dass G8 bei :math:`4096^3` das Maximum der
+       geprüften Werte bildet, belegt keine globale Optimalität.
+   * - Rechenpeaks aus Fremdmessung
+     - Die Rechenpeaks stammen aus einem veröffentlichten Microbenchmark und
+       nicht aus einem Whitepaper. Alle Angaben in Prozent des Peaks erben diese
+       Unsicherheit. Die Bandbreitenschranke ist demgegenüber selbst gemessen.
+   * - Nur zwei Operanden pro Kernel
+     - N-äre Ausdrücke werden zerlegt. Diagonalen und Spuren wie ``ii->i`` sind
+       nicht unterstützt und werden mit Fehlermeldung abgelehnt.
+   * - Epilog nur bei 2-Operanden-Kontraktionen
+     - Auf einer n-ären Kette bliebe der Epilog ohne Wirkung. Die Kombination
+       wird deshalb explizit abgelehnt und nicht stillschweigend ignoriert.
+   * - Eine Maschine, eine GPU
+     - Alle Ergebnisse gelten für diese GB10. Es liegen keine Multi-GPU-Läufe und
+       kein Vergleich gegen andere Hardware vor.
+   * - Reduktions-Fallback nicht aus A02 belegt
      - Der K-Loop-Pfad des Reduktions-Templates ist gegen ``torch`` verifiziert,
-       aber nicht durch eine Assignment-Vorlage abgesichert. Er ist im generierten
-       Code als solcher markiert.
+       jedoch nicht durch eine Assignment-Vorlage abgesichert. Im generierten
+       Code ist er entsprechend markiert.
