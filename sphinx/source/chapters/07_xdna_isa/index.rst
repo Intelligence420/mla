@@ -17,4 +17,3 @@ anschließend ein hand-scheduled BF16-Vektor-Add-Kernel
 
    aufgabe
    loesung
-   feedback

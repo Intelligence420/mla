@@ -20,4 +20,3 @@ XDNA-Tensor-Kernel gelegt.
 
    aufgabe
    loesung
-   feedback
