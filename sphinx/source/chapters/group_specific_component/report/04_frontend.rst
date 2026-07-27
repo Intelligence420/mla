@@ -119,40 +119,6 @@ dass alles durchlief.
 Aufbau der Oberfläche
 =====================
 
-.. code-block:: text
-
-   ┌───────────────────────────────────────────────────────────────────────────┐
-   │ cuTile Performance Lab      einsum/GEMM · live generiert · verifiziert    │  Topbar
-   ├───────────────────────────────────────────────────────────────────────────┤
-   │ ▸ Vergangene Läufe (History: ansehen · vergleichen · umbenennen · löschen)│
-   ├──────────────────────────┬────────────────────────────────────────────────┤
-   │ Operation                │  Lauf erfolgreich — verifiziert und gemessen.  │
-   │  Familie   ▾             │  [fp16→fp32: PASS] [fp16→fp32 sw: PASS] …      │
-   │  Preset    ▾             │  Detail je Format:  fp16→fp32 | tf32→fp32 | …  │
-   │  Ausdruck  [ik,kj->ij  ] │  M=… N=… K=… · GB10 · 2502 MHz · 63 °C · 44 W  │
-   │  Epilog    ▾ (keiner)    │  ┌──────────┬──────────┬──────────────────┐    │
-   │                          │  │ Durchsatz│ Laufzeit │ Compile (kalt)   │    │
-   │ Größen je Index          │  │ Bandbr.  │ AI       │ Fusion vs. seq.  │    │
-   │  i [1024]  k [1024]      │  │ gesparter DRAM-Umweg                   │    │
-   │  j [1024]                │  └──────────┴──────────┴──────────────────┘    │
-   │                          │  Verify: PASS  max_abs_err = 2,99e-03          │
-   │ Zahlenformate            │  ┌── Durchsatz je Konfiguration ───────────┐   │
-   │  ☑ fp16→fp32  ☑ bf16→…   │  │  ▌▌▌▌▌▌                                 │   │
-   │  ☐ tf32→fp32  ☑ fp8→fp16 │  ├── Genauigkeit ↔ Durchsatz ──────────────┤   │
-   │                          │  │        ·  ·        ·                    │   │
-   │ Kachelung (Tile)         │  ├── Roofline (log-log) ───────────────────┤   │
-   │  TM/TN/TK  + Tile-Konfig │  │  ╱                                      │   │
-   │ L2-Swizzle (Mehrfach)    │  └─────────────────────────────────────────┘   │
-   │  ☑ aus ☐G1 ☐G2 ☐G4 ☐G8   │  ┌── Generiertes cuTile-Kernel ────────────┐   │
-   │  ☐ G16 ☐ G32             │  │  @ct.kernel                          [⧉]│   │
-   │ Baselines  ☑ cuBLAS      │  │  def gemm(A, B, C, M, N, K):            │   │
-   │ Messung  warmup/iters    │  │      i = ct.bid(0)  …                   │   │
-   │                          │  └─────────────────────────────────────────┘   │
-   │ [ Vergleichen ] [ Abbr. ]│                                                │
-   │ ▓▓▓▓▓▓▓▓░░░  Format 3/4  │                                                │
-   └──────────────────────────┴────────────────────────────────────────────────┘
-        Sidebar (Controls)                    Main (Ergebnis)
-
 .. figure:: /_static/gsc/gui_overview.png
    :align: center
    :width: 100%

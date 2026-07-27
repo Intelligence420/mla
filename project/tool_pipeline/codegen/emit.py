@@ -3,7 +3,7 @@
 `emit(config)` ist der **Dirigent** der Codegen-Stufe (C1): Er routet auf das
 Template der Operations-Familie, ruft dessen Builder und stellt dem erzeugten
 Modul einen **deterministischen** Kopf-Kommentar voran (Ausdruck/dtype/Tile —
-für die spätere UI-Code-Anzeige und zur Nachvollziehbarkeit des persistierten
+für die UI-Code-Anzeige und zur Nachvollziehbarkeit des persistierten
 Artefakts, Risiko ③). Bewusst **kein** Zeitstempel im Quelltext: der Text muss
 byte-stabil sein, sonst weicht der Datei-Inhalt bei gleichem Slug ab.
 

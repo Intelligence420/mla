@@ -1,9 +1,9 @@
-"""KPI-Karten + Verify-/Status-Anzeige (TZ 2 / TODO 4).
+"""KPI-Karten + Verify-/Status-Anzeige.
 
 Reine ``RunResult -> Dash-Komponente``-Funktionen, Dash-frei testbar
 (``tests/test_app_render.py``). Sie müssen **jeden** Status sauber rendern
 (``ok`` / ``verify_failed`` / ``compile_error`` / ``run_error``): fehlende Werte
-werden zu „—" statt zu einem Crash. Der Background-Callback (TODO 6) komponiert
+werden zu „—" statt zu einem Crash. Der Background-Callback komponiert
 Status → Kontext → KPIs → Verify → Code (siehe ``code_panel.py``) in den Main-Bereich.
 
 Naht-Regel (README): importiert nur ``tool_pipeline.schema`` (RunResult) —

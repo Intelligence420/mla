@@ -24,9 +24,10 @@ bekannten Schema in **M / N / K / Batch**-Dimensionen:
 
 Für `ik,kj->ij` ⇒ M=[i], N=[j], K=[k], Batch=[].
 
-Umfang: genau **2 Operanden**, Output **explizit** (`->…`) **oder implizit**
-(einsum-Konvention, TZ 6), keine Diagonalen/Wiederholungen je Operand. Bewusst
-draußen (später/optional): n-äres einsum (>2 Operanden), Diagonalen/Spuren. Die
+Umfang: **2 Operanden** direkt, **>2 Operanden** als Kette paarweiser Schritte
+(`NAryContractionIR`); Output **explizit** (`->…`) **oder implizit**
+(einsum-Konvention). Diagonalen/Spuren (wiederholter Index je Operand) sind
+nicht Teil des Umfangs und werden beim Parsen abgelehnt. Die
 `M/N/K/Batch`-Klassifikation ist die allgemeine — der echte, view-/stride-basierte
 B1-Reshape (fuse/permute → kanonisches Batched-GEMM) setzt in `reshape.py`
 (config/optimizer-getrieben) darauf auf.
@@ -58,8 +59,8 @@ class ContractionIR:
 
     `m_dims`/`n_dims`/`batch_dims` in **Output-Reihenfolge**, `k_dims` in der
     Reihenfolge von Operand 0. `M`/`N`/`K`/`B` sind die *fusionierten* Größen
-    (Produkt je Kategorie) — für TZ 1 (ein Index je Kategorie) trivial, für die
-    spätere allgemeine Kontraktion (TZ 6) genau die kanonischen GEMM-Maße.
+    (Produkt je Kategorie) — bei einem Index je Kategorie trivial, im allgemeinen
+    Fall genau die kanonischen GEMM-Maße.
     """
 
     expr: str
