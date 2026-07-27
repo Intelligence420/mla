@@ -1,9 +1,9 @@
-"""Read-only, syntaxhervorgehobenes Panel für den generierten cuTile-Quelltext (TZ 2 / TODO 4).
+"""Read-only, syntaxhervorgehobenes Panel für den generierten cuTile-Quelltext.
 
 Reine Funktion ``render_code_panel(source, kernel_path) -> Dash-Komponente``. Die
-Quelle liefert der Callback (TODO 6) aus ``RunResult.kernel_source`` (additiv in
-TODO 5); ``kernel_path`` dient als Beschriftung. Bewusst als Argument (nicht aus
-dem RunResult gelesen) → in TODO 4 ohne Schema-Erweiterung testbar.
+Quelle liefert der Callback aus ``RunResult.kernel_source``; ``kernel_path`` dient
+als Beschriftung. Beides wird bewusst als Argument übergeben und nicht aus dem
+RunResult gelesen — so ist das Panel ohne Schema-Kenntnis testbar.
 
 Syntax-Highlighting via ``dcc.Markdown`` (bundelt highlight.js). Der generierte
 cuTile-Quelltext enthält keine ```-Zäune, daher ist die Markdown-Einbettung sicher.
