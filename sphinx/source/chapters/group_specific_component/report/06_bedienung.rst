@@ -9,9 +9,7 @@ Teil 6 — Starten und Benutzen
    :depth: 2
 
 Dieser Teil ist die Bedienungsanleitung: **welche Befehle es gibt, was sie tun und
-in welcher Reihenfolge man sie benutzt** — von der leeren Shell bis zum
-verifizierten Messergebnis. Er setzt nichts aus den vorherigen Teilen voraus; wer
-nur das Werkzeug bedienen will, liest ausschließlich hier.
+in welcher Reihenfolge man sie benutzt**.
 
 Es gibt zwei Wege, und sie führen durch **dieselbe** Pipeline: die Oberfläche
 (interaktiv, zum Ausprobieren) und die Kommandozeile (headless, für
@@ -32,7 +30,7 @@ Vier Zeilen, aus dem Wurzelverzeichnis des Checkouts, auf dem GPU-Host:
    python -m tool_pipeline            # GUI → http://127.0.0.1:8050
 
 Danach im Browser einen Ausdruck wählen, ein oder mehrere Zahlenformate ankreuzen
-und **▶ Vergleichen** drücken.
+und **"▶ Vergleichen"** drücken.
 
 Voraussetzungen
 ===============
@@ -44,8 +42,7 @@ Voraussetzungen
    * - Was
      - Warum / woher
    * - ``torch`` mit CUDA, ``cuda.tile``, ``triton``
-     - der eigentliche Stack. Er existiert **nur auf dem Lab-Rechner** (GB10);
-       lokal scheitert bereits der Import. Diese Pakete stehen bewusst **nicht**
+     - der eigentliche Stack. Er existiert **auf dem Lab-Rechner** (GB10). Diese Pakete stehen bewusst **nicht**
        in ``project/requirements.txt``, damit ein ``pip install`` das vorhandene
        venv des Hosts nicht überschreibt.
    * - ``project/requirements.txt``
@@ -73,7 +70,7 @@ Die Oberfläche starten
    python -m tool_pipeline
 
 Der Dash-Server läuft **blockierend** im Vordergrund und ist danach unter
-http://127.0.0.1:8050 erreichbar; beendet wird er mit ``Ctrl-C``. Zwei
+http://127.0.0.1:8050 erreichbar. Beendet wird er mit ``Ctrl-C``. Zwei
 Umgebungsvariablen ändern die Bindung, falls Port oder Host belegt sind:
 
 .. code-block:: bash
@@ -184,7 +181,7 @@ Läufe wiederfinden: die History
 -------------------------------
 
 Direkt unter der Topbar liegt das einklappbare Panel **„Vergangene Läufe"**. Es
-listet die Chargen aus ``results/results.jsonl``; man kann einen Lauf **ansehen**
+listet die Chargen aus ``results/results.jsonl``. Man kann einen Lauf **ansehen**
 (die Charts werden aus den gespeicherten Ergebnissen neu gezeichnet — **ohne
 GPU**), mehrere **vergleichen**, sie **umbenennen** und **löschen**. Das Panel
 liest bzw. schreibt nur die JSONL-Datei und braucht deshalb weder GPU noch
@@ -307,7 +304,7 @@ Tabellen im Bericht angleichen → ``make html``. Von Hand eingetippte Zahlen w�
 nicht reproduzierbar.
 
 Von der Testsuite setzt ein Teil eine **CUDA-GPU voraus** (die Codegen- und
-Mess-Tests compilieren die generierten Kernel wirklich); die übrigen laufen
+Mess-Tests compilieren die generierten Kernel wirklich). Die übrigen laufen
 überall. Welche Datei was abdeckt, steht in
 :ref:`Teil 7 <gsc_report_anhang>`.
 
