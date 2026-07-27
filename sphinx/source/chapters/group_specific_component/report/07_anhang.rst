@@ -218,8 +218,45 @@ Der Build (``cd sphinx && make html``, siehe :ref:`Teil 6
 eingecheckten PNGs. Auf ``main`` wird er zusätzlich per GitHub Actions gebaut und auf GitHub
 Pages veröffentlicht.
 
-Quellen der Hardware-Kennwerte
-==============================
+Quellen
+=======
+
+Vorlesungsfolien des Moduls
+---------------------------
+
+Grundlage des Projekts sind die Folien des Moduls **Machine Learning
+Accelerators** (FSU Jena). Sie liegen als PDF unter
+``slides/``; die Prüfungsanforderungen an die Group-Specific Component stehen in
+``slides/pruefungsleistungen.pdf``. Für diesen Bericht tragend sind die
+GPU-Kapitel:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 44 56
+
+   * - Foliensatz
+     - Was daraus in diesen Bericht eingeht
+   * - ``01_tensors_and_einsum.pdf``
+     - einsum-Notation, Index-Klassifikation nach M/N/K/Batch — die Sprache, in
+       der das Werkzeug seine Eingabe annimmt (Teil 3, Stufe *parse*)
+   * - ``02_gpu_architecture.pdf``
+     - Speicherhierarchie, Occupancy und das **Roofline-Modell** — die Brille,
+       durch die dieser Bericht jede Messung liest (Teil 1)
+   * - ``03_matmul_gpu.pdf``
+     - getiltes GEMM mit Tensor-Cores, FP16-Eingang mit FP32-Akkumulator — das
+       Muster, dem der generierte Kernel folgt (Teil 3, Stufe *codegen*)
+   * - ``04_tensor_contract_gpu.pdf``
+     - Tensor-Kontraktion als GEMM: Permutieren und Zusammenfassen der Indizes,
+       also genau der ``B1``-View der *reshape*-Stufe
+   * - ``05_contraction_interface_and_swizzling.pdf``
+     - L2-Swizzling und ``GROUP_M`` — Herkunft der Swizzle-Achse, deren Wirkung
+       Teil 5 mit 2,03× bei 4096³ belegt
+   * - ``06_optimizations_and_multi_input_einsums.pdf``
+     - Epilog-Fusion und mehrstufige/n-äre einsums — Grundlage der
+       Fusions-Messreihe und der paarweisen Zerlegung
+
+Hardware-Kennwerte
+------------------
 
 * ``nvidia-smi`` lokal (GB10, ``sm_121``, CUDA 13.0, Treiber 580.159.03)
 * DGX-Spark-Hardwaredokumentation (Speichergröße, Bandbreite)
