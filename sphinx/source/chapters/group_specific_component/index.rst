@@ -5,7 +5,7 @@ Group-Specific Component
 ########################
 
 **Selbstgewähltes Projekt**. Dieser Bereich bündelt alle
-Artefakte dieses Projekts: die beiden Pitch-Ideen, den Vortrag und den
+Artefakte dieses Projekts: den Projektplan, die beiden Pitch-Ideen und den
 abschließenden Projektbericht.
 
 Die zugehörigen Prüfungsleistungen (siehe ``slides/pruefungsleistungen.pdf``):
@@ -21,7 +21,7 @@ Die zugehörigen Prüfungsleistungen (siehe ``slides/pruefungsleistungen.pdf``):
      - :ref:`Pitch <gsc_pitch>`
      - Beide Projektideen aus Assignment 10, je ≥ 2 Slides, ~5 min/Idee
    * - **08.07.2026**
-     - :ref:`Presentation <gsc_presentation>`
+     - **Presentation**
      - 20-min-Vortrag über das gewählte Projekt; lauffähiger Prototyp + Ergebnisse
    * - **27.07.2026**
      - :ref:`Project Report <gsc_report>`
@@ -32,5 +32,4 @@ Die zugehörigen Prüfungsleistungen (siehe ``slides/pruefungsleistungen.pdf``):
 
    projektplan
    pitch
-   presentation
    report/index
