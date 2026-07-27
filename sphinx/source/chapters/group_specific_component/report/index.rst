@@ -50,8 +50,8 @@ wird in Teil 1 hergeleitet — erst danach kommt die Umsetzung.
      - Warum Plotly Dash, wie übersteht eine Weboberfläche einen mehrsekündigen
        GPU-Job, und wie ist die Bedienung aufgebaut?
    * - :ref:`5 — Beispiel Analyse <gsc_report_ergebnisse>`
-     - Was kommt dabei heraus — ein Lauf im Röntgenbild, dann die Messungen,
-       ihre Qualität und die Grenzen der Aussagen.
+     - Was kommt dabei heraus — ein vollständig dokumentierter Einzellauf, dann
+       die Messreihen, ihre Streuung und die Gültigkeitsgrenzen.
    * - :ref:`6 — Starten und Benutzen <gsc_report_bedienung>`
      - Wie starte und bediene ich das Werkzeug konkret? Alle Befehle, die
        Oberfläche Schritt für Schritt, die CLI-Schalter und die Fehlerbilder.
