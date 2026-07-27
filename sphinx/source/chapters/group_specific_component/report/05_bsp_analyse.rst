@@ -1,8 +1,8 @@
 .. _gsc_report_ergebnisse:
 
-##################################
-Teil 5 — Ergebnisse & Erkenntnisse
-##################################
+##########################
+Teil 5 — Beispiel Analyse
+##########################
 
 .. contents:: Inhalt dieses Teils
    :local:

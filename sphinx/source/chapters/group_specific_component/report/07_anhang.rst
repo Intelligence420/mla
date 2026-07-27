@@ -1,55 +1,17 @@
 .. _gsc_report_anhang:
 
 ######################################
-Teil 6 — Anhang: Reproduzierbarkeit
+Teil 7 — Anhang: Reproduzierbarkeit
 ######################################
 
 .. contents:: Inhalt dieses Teils
    :local:
    :depth: 2
 
-Alles in diesem Bericht ist mit vier Befehlen nachvollziehbar. Dieser Teil sagt,
-welche das sind, was genau gemessen wird und wie die Daten aussehen.
-
-Voraussetzungen
-===============
-
-Der volle Stack (torch mit CUDA, ``cuda.tile``, ``triton``) existiert nur auf dem
-Lab-Rechner; lokal scheitert bereits der Import. Alles, was **keine** GPU braucht
-(Parsing, Metrik-Formeln, Charts, dieser Sphinx-Bericht), läuft überall.
-
-.. code-block:: bash
-
-   source ../.venv/bin/activate       # venv des GPU-Hosts (Pfad je Maschine)
-   pip install -r requirements.txt    # einmalig: Dash/Plotly/pandas/matplotlib
-
-``torch``, ``cuda.tile``, ``triton`` und ``cupy`` stehen bewusst **nicht** in
-``requirements.txt`` — sie kommen aus dem vorhandenen venv des Hosts und dürfen
-nicht versehentlich überschrieben werden.
-
-Die vier Befehle
-================
-
-.. code-block:: bash
-
-   # 1) Interaktiv: die Oberfläche starten (Browser auf 127.0.0.1:8050)
-   python -m tool_pipeline
-
-   # 2) Headless: ein einzelner Lauf
-   python -m tool_pipeline.cli --M 1024 --N 1024 --K 1024
-   python -m tool_pipeline.cli --family elementwise --op add --expr ij,ij->ij --size 4096
-   python -m tool_pipeline.cli --epilog bias --M 4096 --N 4096 --K 64
-
-   # 3) Der Report-Sweep: alle 33 Konfigurationen unter EINEM GPU-Lock (~2-3 min)
-   python -m tool_pipeline.cli --sweep
-   python -m tool_pipeline.cli --show-configs    # nur auflisten, ohne GPU
-
-   # 4) Die Figuren neu erzeugen (torch-frei, liest nur results.jsonl)
-   python -m tool_pipeline.report_figures
-
-Der Exit-Code ist skript-/CI-tauglich: 0 bei Erfolg (Einzellauf ``ok`` bzw. Sweep
-**alle** ``ok``), 1 bei mindestens einem Fehlschlag, 2 wenn der GPU-Lock nicht
-frei wurde.
+Alles in diesem Bericht ist nachvollziehbar. **Welche Befehle** man dafür braucht
+und wie man sie benutzt, steht vollständig in :ref:`Teil 6 — Starten und Benutzen
+<gsc_report_bedienung>`. Dieser Teil beantwortet das, was danach kommt: *was*
+genau gemessen wird, wie die Daten aussehen und was die Tests abdecken.
 
 Was der Sweep misst
 ===================
@@ -191,8 +153,8 @@ Auswerten ohne das Werkzeug
 Tests
 =====
 
-``python -m pytest tests/ -q`` — **286 Tests**, Laufzeit rund 6 Sekunden auf dem
-Lab-Rechner:
+Die Suite umfasst **286 Tests** und läuft rund 6 Sekunden auf dem Lab-Rechner
+(Aufruf: :ref:`Teil 6 <gsc_report_bedienung>`):
 
 .. list-table::
    :header-rows: 1
@@ -251,12 +213,9 @@ Lab-Rechner:
 Den Bericht bauen
 =================
 
-.. code-block:: bash
-
-   cd sphinx && make html      # Ausgabe: sphinx/build/html/index.html
-
-Der Build ist **GPU- und torch-frei**: Er liest ausschließlich die eingecheckten
-PNGs. Auf ``main`` wird er zusätzlich per GitHub Actions gebaut und auf GitHub
+Der Build (``cd sphinx && make html``, siehe :ref:`Teil 6
+<gsc_report_bedienung>`) ist **GPU- und torch-frei**: Er liest ausschließlich die
+eingecheckten PNGs. Auf ``main`` wird er zusätzlich per GitHub Actions gebaut und auf GitHub
 Pages veröffentlicht.
 
 Quellen der Hardware-Kennwerte

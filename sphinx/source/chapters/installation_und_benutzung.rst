@@ -90,19 +90,16 @@ Alle weiteren Aufrufe erfolgen **aus dem Ordner** ``project/``:
    python -m tool_pipeline.report_figures  # (3) Report-Figuren (torch-frei, ohne GUI)
    python -m pytest tests/ -q              # (4) Testsuite
 
-(1) startet die Oberfläche: einsum-Ausdruck, Zahlenformat, Kachelung und Swizzle
-wählen, „Run" drücken — das Tool generiert den cuTile-Kernel, verifiziert ihn gegen
-fp32, misst ihn und zeigt Charts plus den generierten Quelltext.
+(1) startet die Oberfläche, (2) fährt den kuratierten Satz Konfigurationen, aus
+dem der Report seine Zahlen zieht, (3) erzeugt daraus die PNGs unter
+``sphinx/source/_static/gsc/`` (ohne GPU), (4) ist die Testsuite — teils
+headless, teils GPU-pflichtig.
 
-(2) fährt ohne GUI den kuratierten Satz Konfigurationen, aus dem der Report seine
-Zahlen zieht, und hängt jeden verifizierten Lauf an ``project/results/results.jsonl``
-an. Ein Einzellauf geht ebenso, z. B.
-``python -m tool_pipeline.cli --family reduction --expr ij->i --size 4096``;
-``--show-configs`` listet den Sweep, ohne die GPU anzufassen. (3) erzeugt daraus die
-PNGs unter ``sphinx/source/_static/gsc/`` und braucht **keine** GPU.
+.. seealso::
 
-Die Testsuite (4) teilt sich in headless-Tests (laufen überall) und Codegen-/Messtests,
-die eine **CUDA-GPU voraussetzen** — sie compilieren die generierten Kernel wirklich.
+   Die vollständige Bedienungsanleitung — jeder CLI-Schalter, die Oberfläche
+   Schritt für Schritt, Exit-Codes und die Fehlerbilder — steht in
+   :ref:`Teil 6 des Projektberichts <gsc_report_bedienung>`.
 
 NPU-Assignments ausführen (07–10)
 ============================================
