@@ -49,11 +49,14 @@ wird in Teil 1 hergeleitet — erst danach kommt die Umsetzung.
    * - :ref:`4 — Das Frontend <gsc_report_frontend>`
      - Warum Plotly Dash, wie übersteht eine Weboberfläche einen mehrsekündigen
        GPU-Job, und wie ist die Bedienung aufgebaut?
-   * - :ref:`5 — Ergebnisse & Erkenntnisse <gsc_report_ergebnisse>`
+   * - :ref:`5 — Beispiel Analyse <gsc_report_ergebnisse>`
      - Was kommt dabei heraus — ein Lauf im Röntgenbild, dann die Messungen,
        ihre Qualität und die Grenzen der Aussagen.
-   * - :ref:`6 — Anhang <gsc_report_anhang>`
-     - Wie wiederhole ich das alles? Befehle, Sweep-Inhalt, Datenschema, Tests.
+   * - :ref:`6 — Starten und Benutzen <gsc_report_bedienung>`
+     - Wie starte und bediene ich das Werkzeug konkret? Alle Befehle, die
+       Oberfläche Schritt für Schritt, die CLI-Schalter und die Fehlerbilder.
+   * - :ref:`7 — Anhang <gsc_report_anhang>`
+     - Was steckt im Sweep, wie sehen die Daten aus, was decken die Tests ab?
 
 Die Kernaussagen in fünf Sätzen
 ===============================
@@ -83,5 +86,6 @@ Jede ist in Teil 5 mit Messwerten belegt:
    02_architektur
    03_pipeline
    04_frontend
-   05_ergebnisse
-   06_anhang
+   05_bsp_analyse
+   06_bedienung
+   07_anhang
