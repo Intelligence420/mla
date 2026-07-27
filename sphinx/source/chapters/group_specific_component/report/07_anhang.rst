@@ -8,7 +8,7 @@ Teil 7 — Anhang: Reproduzierbarkeit
    :local:
    :depth: 2
 
-Alles in diesem Bericht ist nachvollziehbar. **Welche Befehle** man dafür braucht
+**Welche Befehle** man dafür braucht
 und wie man sie benutzt, steht vollständig in :ref:`Teil 6 — Starten und Benutzen
 <gsc_report_bedienung>`. Dieser Teil beantwortet das, was danach kommt: *was*
 genau gemessen wird, wie die Daten aussehen und was die Tests abdecken.
@@ -137,7 +137,7 @@ Schema einer ``results.jsonl``-Zeile
 
 Das Feld ``kernel_source`` (der Quelltext für die Code-Anzeige) wird bewusst
 **nicht** mitgeschrieben — er liegt bereits unter ``kernel_path``. Zeilen aus
-älteren Läufen ohne ``run_id``/``epilog``/``group_m`` bleiben lesbar; fehlende
+älteren Läufen ohne ``run_id``/``epilog``/``group_m`` bleiben lesbar. Fehlende
 Felder werden beim Laden ergänzt.
 
 Auswerten ohne das Werkzeug
@@ -226,7 +226,7 @@ Vorlesungsfolien des Moduls
 
 Grundlage des Projekts sind die Folien des Moduls **Machine Learning
 Accelerators** (FSU Jena). Sie liegen als PDF unter
-``slides/``; die Prüfungsanforderungen an die Group-Specific Component stehen in
+``slides/``. Die Prüfungsanforderungen an die Group-Specific Component stehen in
 ``slides/pruefungsleistungen.pdf``. Für diesen Bericht tragend sind die
 GPU-Kapitel:
 

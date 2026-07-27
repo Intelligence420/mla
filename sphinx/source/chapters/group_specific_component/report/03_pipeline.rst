@@ -45,7 +45,7 @@ familienspezifische Analyse an:
 Die M/N/K/Batch-Klassifikation
 ------------------------------
 
-Sie ist das Herz des Kontraktions-Pfades und besteht aus vier Regeln über die
+Sie ist das Grundgerüst des Kontraktions-Pfades und besteht aus vier Regeln über die
 Indexbuchstaben. Für Operanden :math:`I_0, I_1` und Output :math:`O`:
 
 .. list-table::
@@ -101,12 +101,12 @@ Die n-äre Kette
 Mehr als zwei Operanden werden **nicht** zu einem eigenen Kernel-Typ, sondern in
 eine Folge paarweiser Kontraktionen zerlegt, die jede durch den bewiesenen
 2-Operanden-Pfad läuft. Die Reihenfolge kommt von ``opt_einsum.contract_path``,
-falls installiert; sonst greift ein deterministischer Links-nach-rechts-Fold. Für
+falls installiert. Ansonsten greift ein deterministischer Links-nach-rechts-Fold. Für
 ``ij,jk,kl->il`` ergibt das die Schritte ``ij,jk->ik`` und dann ``kl,ik->il``.
 
 Das ist eine bewusste Entscheidung gegen einen n-är-Kernel: Ein einzelner Kernel
-für beliebig viele Operanden wäre ein neues, unbewiesenes Codegen-Muster;
-paarweise Zerlegung benutzt dagegen ausschließlich die Struktur, die schon gegen
+für beliebig viele Operanden wäre ein neues, unbewiesenes Codegen-Muster. 
+Paarweise Zerlegung benutzt dagegen ausschließlich die Struktur, die schon gegen
 ``torch.einsum`` verifiziert ist. Der Preis steht ehrlich in den Ergebnissen: Die
 Zwischentensoren kosten Speicherverkehr, weshalb die Kette eine *niedrigere*
 arithmetische Intensität hat als ein einzelnes GEMM.
@@ -208,7 +208,7 @@ einem echten Anwendungsfall gratis wäre.
    Per-Tensor-Strides), ``fuse_dims``/``permute_dims`` und den Adjazenztest. Die
    Host-Tiling-Heuristik der Assignments (PRIM/SEQ/PAR-Scheduling) wird **nicht**
    aufgerufen — wir kacheln im Template, nicht auf dem Host. Sie ist der
-   Vollständigkeit halber mitgeführt und im Modul als ungenutzt markiert; das
+   Vollständigkeit halber mitgeführt und im Modul als ungenutzt markiert. Das
    erschien uns ehrlicher, als einen halben Port zu zeigen.
 
 .. _gsc_report_codegen:
@@ -328,8 +328,8 @@ Was hier passiert und warum es so aussieht:
   ``ct.Constant[int]`` sorgt dafür, dass der JIT M/N/K trotzdem als Konstanten
   sehen und einrechnen kann.
 
-Die bewiesene Orientierung
---------------------------
+Die MMA Orientierung
+--------------------
 
 ``ct.mma(a, b, acc)`` mit :math:`a = (TM, TK)`, :math:`b = (TK, TN)` ergibt
 :math:`(TM, TN)` — **kein** Operanden-Swap, **kein** Permute. Das klingt
@@ -340,8 +340,8 @@ Deshalb ist diese eine Struktur dreifach unabhängig gegen ``torch.einsum``
 verifiziert, es gibt einen Test, der die Orientierung explizit bewacht, und jedes
 Template trägt sie im Docstring — direkt in der generierten Datei.
 
-Zahlenformate: zwei Tabellen, die alles entscheiden
----------------------------------------------------
+Zahlenformate
+-------------
 
 Der Codegen kennt zwei kleine Abbildungen, aus denen sich das gesamte
 Format-Verhalten ergibt:
@@ -358,8 +358,8 @@ Format-Verhalten ergibt:
      - fp16-Akku ist schneller, aber gröber — beides legitim, also wählbar
    * - bf16, tf32
      - **nur** fp32
-     - bf16/tf32 sind reine *Compute*-Formate; ein Akku in bf16 wäre numerisch
-       unbrauchbar
+     - bf16/tf32 sind reine *Compute*-Formate. Ein Akku in bf16 wäre numerisch
+       uninteresannt
    * - fp8 e4m3 / e5m2
      - fp16 **oder** fp32
      - wie fp16
@@ -385,13 +385,13 @@ Der Hintergrund ist lehrreich: tf32 ist kein Speicherformat, sondern ein
 Rechenmodus — die Operanden liegen als fp32 im Speicher (4 Byte). ``ct.mma``
 besitzt in diesem cuTile-Build **kein** Präzisions-Flag; ohne den expliziten Cast
 liefe die Multiplikation still auf den CUDA-Cores statt auf den Tensor-Cores.
-Das Ergebnis wäre *rechnerisch korrekt*, aber rund **30× langsamer** (0,2 statt
+Das Ergebnis wäre *rechnerisch korrekt*, aber **langsamer** (0,2 statt
 6 TFLOP/s im Vorab-Test). Genau die Klasse von Fehler, die eine Verifikation
 niemals fängt — weil das Ergebnis stimmt. Nur ein Blick auf den Durchsatz verrät
 sie, und man muss wissen, wonach man sucht.
 
-Der L2-Swizzle: dieselben Kacheln, andere Reihenfolge
------------------------------------------------------
+L2-Swizzle: dieselben Kacheln, andere Reihenfolge
+-------------------------------------------------
 
 Ohne Swizzle bearbeitet Block :math:`(i, j)` die Kachel :math:`(i, j)` — die
 Blöcke laufen also zeilenweise über die Ausgabe. Das ist für den L2-Cache
@@ -454,19 +454,18 @@ Kernel-Signatur, ``launch``, Mess-Schleife, Metrik-Bytes — was nur deshalb
 schmerzfrei ist, weil die Mess-Schicht von Anfang an variadisch gebaut wurde
 („letzter Operand ist der Output").
 
-Das Anti-Drift-Prinzip
-----------------------
+Anti-Drift-Prinzip
+------------------
 
 Dreimal in der Geschichte des Werkzeugs kam eine neue Codegen-Achse dazu (Swizzle,
 ``GROUP_M``, Epilog). Jedes Mal galt dieselbe Regel:
 
 .. admonition:: Additiv heißt byte-identisch
 
-   Ist die neue Achse nicht gesetzt, muss der erzeugte Quelltext **byte-identisch**
-   zu vorher sein — kein zusätzlicher Kommentar, keine geänderte Doc-Zeile, kein
-   neuer Slug.
+   Ist die neue Achse nicht gesetzt, soll der erzeugte Quelltext **identisch**
+   zu vorher sein.
 
-Der Grund ist handfest. Ein Teil der Kernel-Artefakte ist als **Referenz
+Ein Teil der Kernel-Artefakte ist als **Referenz
 eingecheckt** (die übrigen entstehen bei jedem Lauf lokal neu). Würde eine
 Erweiterung den erzeugten Text auch nur um einen Kommentar verändern, schriebe
 der nächste Lauf all diese Dateien um: Der Compile-Cache wäre kalt, und jeder
@@ -475,13 +474,8 @@ Ein Test vergleicht deshalb den unfusionierten Quelltext zeichenweise mit dem
 Zustand davor — und genau deshalb steht die Epilog-Zeile im Datei-Header nur,
 *wenn* ein Epilog gesetzt ist.
 
-Die Probe aufs Exempel: Nach dem vollständigen Report-Sweep dieses Berichts
-(33 Konfigurationen, inklusive der neuen ``GROUP_M``- und ``copy``-Läufe) meldet
-``git status`` für ``results/kernels/`` **keine einzige Änderung** an einem
-getrackten Artefakt.
-
-Die memory-bound-Templates
---------------------------
+memory-bound-Templates
+----------------------
 
 Beide sind bewusst *keine* Varianten des GEMM-Templates, sondern eigene, kleinere
 Strukturen — ohne ``ct.mma``, ohne Akkumulator-Loop, ohne B1-Reshape.
@@ -559,7 +553,7 @@ Oberfläche** und **nachprüfbarer Beleg** dafür, was gemessen wurde.
 Der Slug
 --------
 
-Der Dateiname ist die zentrale Identität eines Kernels:
+Der Dateiname ist die Identität eines Kernels:
 
 .. code-block:: text
 
@@ -707,7 +701,7 @@ durchlässt, oder so streng, dass fp8 immer scheitert:
 
 Wichtig ist das Prinzip dahinter: Die Toleranzen sind aus **gemessenen** Fehlern
 der Vorab-Analyse abgeleitet, mit großzügigem Abstand nach oben. Ein korrekter
-Kernel soll über wechselnde Größen nie falsch-negativ sein; ein *grober* Fehler —
+Kernel soll über wechselnde Größen nie falsch-negativ sein. Ein *grober* Fehler —
 und eine vertauschte mma-Orientierung ist grob — wird trotzdem sicher gefangen. Die
 Tabelle ist zugleich die dritte Verteidigungslinie der Akkumulator-Regeln: Für eine
 unzulässige Kombination existiert kein Eintrag, was zu einem klaren Fehlerstatus
@@ -755,7 +749,7 @@ L2-Flush: kalt messen
 Zwischen den getakteten Iterationen wird ein 256-MiB-Puffer genullt und damit der
 L2-Cache geleert — dasselbe Vorgehen wie ``triton.do_bench``. Ohne diesen Flush
 würde die zweite Iteration Daten im Cache finden, die eine erste, echte Ausführung
-nie hätte; der gemessene Durchsatz wäre für kleine Formen systematisch zu gut. Der
+nie hätte. Der gemessene Durchsatz wäre für kleine Formen systematisch zu gut. Der
 Flush wird **vor** dem Start-Event abgesetzt und zählt daher (Stream-Reihenfolge)
 nicht in die Messung. Schlägt die Allokation des Puffers fehl, weil die geteilte
 GPU voll ist, wird ohne Flush weitergemessen — das ist besser, als einen
@@ -803,7 +797,7 @@ dtype-Größen, nicht aus Hardware-Zählern:
      - gegen ``hardware.PEAK_TFLOPS[dtype]`` bzw. 273 GB/s; ``None``, wo es keinen
        sinnvollen Nenner gibt (fp32/fp64 haben kein Tensor-Core-Dach)
 
-.. admonition:: Die wichtigste Einschränkung dieses Berichts
+.. admonition:: Eine Einschränkung dieses Berichts
 
    ``gemm_bytes`` ist der **algorithmische Mindest-Traffic**: Jeder Operand wird
    genau einmal gelesen. Real liest ein gekachelter Kernel Teile von A und B
@@ -893,8 +887,3 @@ CLI-Sweeps) teilen ``run_id``, ``run_name`` und ``created_at``. Damit ist ein
 umbenennen oder löschen kann — und in diesem Bericht die Grundlage dafür, dass
 „die Zahlen stammen aus **einer** Charge" überprüfbar ist. Altzeilen ohne diese
 Felder bleiben lesbar; der Store synthetisiert dann einen Fallback-Lauf.
-
-**Mutabel, aber sicher.** Umbenennen und Löschen schreiben die Datei komplett neu —
-und zwar atomar (Temp-Datei + ``os.replace``). Ein paralleler Leser sieht die alte
-**oder** die neue vollständige Datei, nie eine halbe. Die Byte-Form ist identisch
-zum Anhängen, sodass ein Rewrite keine kosmetischen Diffs erzeugt.

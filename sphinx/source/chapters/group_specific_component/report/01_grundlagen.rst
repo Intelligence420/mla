@@ -8,8 +8,7 @@ Teil 1 — Grundlagen: Maschine, Modell, API
    :local:
    :depth: 2
 
-Dieser Teil legt die drei Dinge fest, ohne die die Messwerte in Teil 5 nur Zahlen
-wären: **welche Maschine** gemessen wird, **mit welchem Modell** man ihre Grenzen
+Dieser Teil legt die drei Dinge fest: **welche Maschine** gemessen wird, **mit welchem Modell** man ihre Grenzen
 sichtbar macht, und **welche Programmierschnittstelle** die Kernel überhaupt
 benutzen.
 
@@ -45,14 +44,12 @@ alle drei sind unüblich gegenüber einer klassischen Rechenzentrums-GPU:
 
 **Woher die Zahlen kommen.** Die Bandbreite und die Speichergröße stehen in der
 DGX-Spark-Hardwaredokumentation. Für die Rechen-Peaks gibt es **kein** offizielles
-GB10-Whitepaper; die Werte stammen aus einem veröffentlichten
+GB10-Whitepaper. Die Werte stammen aus einem veröffentlichten
 ``mmapeak``-Microbenchmark und sind damit *gemessene*, nicht theoretische Peaks.
 Welche Zahlenformate cuTile auf dieser Maschine tatsächlich rechnen kann, haben wir
 nicht angenommen, sondern vorab selbst geprüft (``project-development/analysis/``):
 fp16, bf16, tf32, fp8 e4m3/e5m2 compilen, laufen und stimmen gegen eine
-fp32-Referenz; **fp4 und int4 existieren in diesem cuTile-Build nicht** (keine
-entsprechenden dtype-Symbole, die ``ct.mma``-Tabelle endet bei 8 Bit) und sind
-deshalb aus dem Werkzeug ausgeschlossen. Diese Vorab-Analyse ist der Grund, warum
+fp32-Referenz. Diese Vorab-Analyse ist der Grund, warum
 im Tool keine Format-Auswahl steht, die dann doch nicht funktioniert.
 
 **Was „unified memory" praktisch bedeutet.** Es gibt keinen separaten HBM-Stack
@@ -70,15 +67,15 @@ lohnt. Die GB10 ist eine Maschine, auf der man Bytes zählt, nicht FLOPs.
 
 .. note::
 
-   **Geteilte Maschine.** Der Lab-Rechner wird von mehreren Personen benutzt, und
+   **Geteilte Maschine.** Der Lab-Rechner kann von mehreren Personen benutzt werden und
    der Speicher ist unified — ein OOM-Crash trifft nicht nur den eigenen Prozess.
    Deshalb sind alle Größen im Werkzeug bewusst klein gehalten (die Report-Formen
    belegen einige zehn bis wenige hundert MiB), es gibt eine Speicher-Obergrenze in
    der Eingabevalidierung, und **alle** GPU-Läufe serialisieren über einen
    prozessübergreifenden Lock (siehe :ref:`Teil 4 <gsc_report_frontend>`).
 
-Das Roofline-Modell — von Hand hergeleitet
-==========================================
+Das Roofline-Modell 
+===================
 
 Zwei Größen begrenzen jeden Kernel: Er kann nicht mehr rechnen, als die
 Rechenwerke schaffen, und er kann nicht schneller rechnen, als die Daten
@@ -142,7 +139,7 @@ Für die GB10 eingesetzt:
 Wo landen unsere Operationen?
 -----------------------------
 
-Jetzt wird die Zahl greifbar. Ein quadratisches GEMM :math:`C = A \cdot B` mit
+Ein quadratisches GEMM :math:`C = A \cdot B` mit
 :math:`M = N = K = n`, fp16-Eingaben (2 Byte) und fp32-Ausgabe (4 Byte):
 
 .. math::
@@ -157,13 +154,12 @@ Jetzt wird die Zahl greifbar. Ein quadratisches GEMM :math:`C = A \cdot B` mit
 
 Für :math:`n = 1024` ergibt das :math:`AI = 256` — **weit links** vom
 Ridge-Point 780. Und das ist kein kleines Beispiel: Selbst :math:`n = 4096` (AI
-= 1024, unsere größte Form) liegt gerade eben *rechts* davon. Die
-Konsequenz ist der zentrale Satz dieses Projekts:
+= 1024, unsere größte Form) liegt gerade eben *rechts* davon. Dies führt zu einer
+Konsequenz für dieses Projekt:
 
 .. admonition:: Kernaussage
 
-   Auf der GB10 sind **die meisten Kontraktionen bandbreitenlimitiert**, obwohl
-   sie „Matrixmultiplikation" heißen. Die operative Decke ist bei :math:`AI = 256`
+   Auf der GB10 werden **die meisten Kontraktionen bandbreitenlimitiert sein**. Die operative Decke ist bei :math:`AI = 256`
    nicht der 213-TFLOP/s-Peak, sondern die Schräge:
    :math:`0{,}273 \cdot 256 = 69{,}9` TFLOP/s. Alles, was das Tool an einem GEMM
    tunen kann, spielt sich unterhalb dieser 70 TFLOP/s ab — nicht unterhalb von 213.
@@ -181,10 +177,10 @@ gehören Elementwise, Reduktion und Copy ins Werkzeug: Ohne sie wäre die Roofli
 eine Grafik mit vier Punkten in derselben Ecke; mit ihnen spannt sie vier
 Größenordnungen auf und zeigt beide Regime.
 
-Die ehrliche Version der Bandbreiten-Decke
-------------------------------------------
+Bandbreiten-Decke
+-----------------
 
-273 GB/s ist ein *theoretischer* Wert; ohne veröffentlichte STREAM-Zahl haben wir
+273 GB/s ist ein *theoretischer* Wert. Ohne veröffentlichte STREAM-Zahl haben wir
 im Werkzeug zunächst nur die Annahme „real 70–85 %" hinterlegt. Weil das für einen
 Bericht, der %-vom-Peak angibt, unbefriedigend ist, misst der Report-Sweep die
 Bandbreite inzwischen **selbst** — mit dem billigsten möglichen Kernel, einer
@@ -231,8 +227,7 @@ stärker memory-bound als die theoretische Rechnung sagt.
 cuTile in zwei Seiten
 =====================
 
-Alle Kernel dieses Projekts sind in **cuTile** (``cuda.tile``) geschrieben — der
-Programmierschnittstelle, um die es in der Vorlesung geht. Wer CUDA kennt, muss
+Alle Kernel dieses Projekts sind in **cuTile** (``cuda.tile``) geschrieben. Wer CUDA kennt, muss
 für das Verständnis des generierten Codes vor allem eine Umstellung mitmachen:
 
 .. list-table::
@@ -330,13 +325,12 @@ Für jede Kontraktion existiert ein großer Konfigurationsraum: **Zahlenformat**
 (Block→Kachel-Umordnung mit Gruppengröße ``GROUP_M``), die **Operations-Familie**
 (Kontraktion, elementweise, Reduktion) und die Frage, ob eine nachgelagerte
 elementweise Operation als eigener Kernel läuft oder in die Kontraktion
-**fusioniert** wird. Jede Achse verschiebt Durchsatz **und** Genauigkeit, oft
+**fusioniert** wird. Jede Achse verschiebt Durchsatz und Genauigkeit, oft
 gegenläufig — und der Bezug zum Hardware-Limit bleibt ohne Werkzeug unsichtbar.
 
 Ein Werkzeug, das GPU-Kernel *generiert* und dann *vermisst*, hat dabei sechs
 konkrete Fehlerquellen. Sie zu benennen ist keine Formalität: jede hat eine
-sichtbare Gegenmaßnahme im Code, und in einem Fall hat genau diese Gegenmaßnahme
-einen echten Bug gefangen (Teil 5).
+sichtbare Gegenmaßnahme im Code.
 
 .. list-table:: Risiken und ihre Gegenmaßnahme
    :header-rows: 1
