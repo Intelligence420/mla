@@ -1,7 +1,7 @@
 """Seiten-Layout: Controls-Sidebar (links) + Ergebnis-Main (KPIs / Code) rechts.
 
 Grundgerüst (Topbar · Sidebar · Main) mit CSS-Klassen; das Styling liegt in
-``assets/theme.css`` (TZ 2 / TODO 7). Sidebar-Inhalt = ``components/controls``;
+``assets/theme.css``. Sidebar-Inhalt = ``components/controls``;
 den Main-Bereich (id='main') füllt der Callback mit ``components/kpis`` +
 ``components/code_panel`` (siehe ``callbacks.py``).
 """

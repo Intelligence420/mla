@@ -9,13 +9,9 @@ das dtype→torch/cuTile-*Mapping*, Parsing oder Messung — das gehört in die
 jeweiligen Stufen. Die dtype/acc-*Regeln* (welche Format-Kombis überhaupt
 zulässig sind) sind dagegen Vertrags-Daten und liegen hier (`ALLOWED_ACC`),
 torch-/cuTile-frei, damit die fork-sichere GUI sie importieren kann.
-So bleiben spätere Achsen rein **additiv**: neuer dtype/Tile/Swizzle/Familie/
-Baseline = neues Feld oder neuer Status-Zweig, kein Umbau.
-
-TZ 1 nutzt davon nur: `family="contraction"`, `expr="ik,kj->ij"`, `dtype="fp16"`,
-`acc_dtype="fp32"`, feste `tile`, `swizzle=False`, `baselines=[]`. Die übrigen
-Felder sind für spätere Teil-Ziele schon vorgesehen, werden in TZ 1 aber nur
-durchgereicht/geechot.
+Dadurch ist jede Achse rein **additiv** angelegt: ein weiterer dtype, Tile,
+Swizzle, eine weitere Familie oder Baseline ist ein neues Feld oder ein neuer
+Status-Zweig, kein Umbau.
 """
 
 from __future__ import annotations
@@ -166,9 +162,9 @@ class RunResult:
     """Ergebnis eines Laufs (Rückgabe von `run()`).
 
     `config` echot die Eingabe; die übrigen Felder sind nach Belang gruppiert
-    (`accuracy`/`timing`/`metrics`/`provenance`), damit spätere Teil-Ziele dort
-    nur Schlüssel ergänzen (z. B. GB/s, %-Peak, Verteilung) statt das Schema
-    umzubauen. Bei Fehlern trägt `status` den Grund und `error` den Text.
+    (`accuracy`/`timing`/`metrics`/`provenance`); eine weitere Kennzahl (GB/s,
+    %-Peak, Verteilung) ist dort ein zusätzlicher Schlüssel und kein
+    Schema-Umbau. Bei Fehlern trägt `status` den Grund und `error` den Text.
 
     `kernel_source` trägt den generierten Quelltext für die GUI-Code-Anzeige (TZ 2).
     Er wird vom Store bewusst **nicht** ins `results.jsonl` geschrieben (Bloat) —
