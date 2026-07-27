@@ -14,4 +14,3 @@ Block-Swizzling.
 
    aufgabe
    loesung
-   feedback

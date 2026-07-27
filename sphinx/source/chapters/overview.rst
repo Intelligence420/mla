@@ -19,9 +19,9 @@ Team
    * - Name
      - E-Mail
      - Matrikelnummer
-   * - Oliver Dietzel
+   * - Oliver-Pierre Dietzel
      - *oliver.dietzel@uni-jena.de*
-     - *<Matrikelnr. ergänzen>*
+     - 208588
    * - Moritz Martin
      - *m.martin@uni-jena.de*
      - 209344

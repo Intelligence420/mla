@@ -1,0 +1,86 @@
+# ==========================================================================
+# Auto-generiert vom cuTile Performance Lab (Codegen C1).
+# Aus einer RunConfig erzeugt.
+# Ausdruck : ik,kj->ij
+# Format   : fp8e4m3 -> fp16 (Akku)
+# Tile     : TM=64 TN=64 TK=32 | swizzle=True
+# ==========================================================================
+"""Generierter cuTile-GEMM (Codegen C1) — kanonisches Batched-GEMM (B,M,K)x(B,K,N)->(B,M,N).
+
+Jede 2-Operanden-Kontraktion wird host-seitig (B1-Reshape) auf diese Form
+gebracht; dieser Kernel emittiert die EINE bewiesene Struktur (B=1 = Plain-GEMM).
+Input-dtype: fp8e4m3 (Laufzeit-torch-dtype, steht NICHT im Kernel-Koerper).
+Akkumulator: fp16 (ct.float16).
+Tile-Literale: TM=64, TN=64, TK=32 (fest in den Quelltext gebacken).
+
+Bewiesene Orientierung: a=(TM,TK), b=(TK,TN), ct.mma(a,b,acc)->(TM,TN),
+KEIN Operanden-Swap, KEIN Permute. i=bid(0)=M-Kachel, j=bid(1)=N-Kachel,
+bb=bid(2)=Batch. L2-Swizzle EIN (grouped-M-Rasterung, GROUP_M=8): i/j werden bijektiv umgeordnet (dieselbe Kachelmenge, L2-freundlichere Reihenfolge).
+"""
+
+import cuda.tile as ct
+import torch
+
+# Tile-Literale (aus der Config in den Quelltext substituiert)
+TM = 64
+TN = 64
+TK = 32
+GROUP_M = 8
+
+
+@ct.kernel
+def gemm(A, B, C,
+         M: ct.Constant[int],
+         N: ct.Constant[int],
+         K: ct.Constant[int]):
+    """Berechne eine (TM, TN)-Ausgabekachel von C[bb] = A[bb] @ B[bb]."""
+    # L2-Swizzle: grouped-M-Rasterung — dieselben (i, j) wie ohne Swizzle,
+    # nur in L2-freundlicherer Reihenfolge (Bloecke einer Gruppe teilen sich
+    # B-Spalten). Bijektiv -> Ergebnis unveraendert; Orientierung/mma unberuehrt.
+    num_pid_m = ct.cdiv(M, TM)
+    num_pid_n = ct.cdiv(N, TN)
+    pid = ct.bid(0) * num_pid_n + ct.bid(1)
+    num_pid_in_group = GROUP_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_M)
+    local = pid % num_pid_in_group
+    i = first_pid_m + (local % group_size_m)
+    j = local // group_size_m
+    bb = ct.bid(2)   # Batch-Achse (Swizzle ordnet nur i/j um)
+
+    # Akkumulator unabhaengig vom Input-dtype (Standardmuster aus cuTile).
+    acc = ct.full((TM, TN), 0, dtype=ct.float16)
+
+    # K-Schleife: ceil(K / TK) K-Kacheln; Padding-Zeros am Rand sind fuer den
+    # MAC neutral (0 * x + acc == acc), daher kein explizites Masking noetig.
+    # Batch-Offset steckt im fuehrenden Index-Slot (bb) des 3D-Tensors; das
+    # (1, TM, TK)-Tile selektiert die Batch-Scheibe bb und wird auf 2D reshaped.
+    for kk in range(ct.cdiv(K, TK)):
+        a = ct.load(A, index=(bb, i, kk), shape=(1, TM, TK),
+                    padding_mode=ct.PaddingMode.ZERO)
+        a = ct.reshape(a, (TM, TK))
+        b = ct.load(B, index=(bb, kk, j), shape=(1, TK, TN),
+                    padding_mode=ct.PaddingMode.ZERO)
+        b = ct.reshape(b, (TK, TN))
+        acc = ct.mma(a, b, acc)
+
+    # (TM, TN)-Ergebnis in die (1, TM, TN)-Batch-Scheibe zurueckformen; ct.store
+    # schneidet out-of-bounds Elemente am M/N-Rand automatisch ab.
+    ct.store(C, index=(bb, i, j),
+             tile=ct.reshape(ct.astype(acc, C.dtype), (1, TM, TN)))
+
+
+def launch(A, B, C):
+    """Starte den batched GEMM-Kernel: C[bb] = A[bb] @ B[bb] (C vorab alloziert).
+
+    A=(B,M,K), B=(B,K,N), C=(B,M,N). Grid = (cdiv(M,TM), cdiv(N,TN), B).
+    M/N/K sind ct.Constant[int]-Launch-Args; TM/TN/TK sind Quelltext-Literale;
+    die Batch-Groesse B kommt ueber die dritte Grid-Achse (bb=bid(2)).
+    """
+    Bb, M, K = A.shape
+    _, _, N = B.shape
+    grid = (ct.cdiv(M, TM), ct.cdiv(N, TN), Bb)
+    ct.launch(torch.cuda.current_stream().cuda_stream,
+              grid, gemm, (A, B, C, M, N, K))
+    return C

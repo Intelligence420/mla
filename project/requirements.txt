@@ -1,0 +1,29 @@
+# GUI + plotting (install into the existing project venv).
+# Versionen gepinnt (PLAN §8-Antipattern: kein Bleeding-Edge tracken).
+#
+# dash[diskcache] zieht das Background-Callback-Extra (psutil + multiprocess) —
+# nötig für den DiskcacheManager (mehrsekündiger cuTile-Compile als Hintergrund-Job).
+dash[diskcache]==4.4.0
+dash-bootstrap-components==2.0.4
+plotly==6.8.0
+kaleido==0.2.1         # optional: PNG-Export EINZELNER Plotly-Charts (charts.save_png) —
+                       # Entwicklungs-/Sichtprüfungs-Helfer, NICHT der Report-Pfad
+                       # (die Report-Figuren kommen aus report_figures.py via matplotlib)
+pandas==3.0.3
+diskcache==5.6.3       # In-Process-Cache-Backend des DiskcacheManager (direkt importiert)
+filelock==3.29.0       # prozessübergreifender GPU-Lock um run() (fcntl → Auto-Freigabe bei Cancel)
+
+# Report-Figuren (python -m tool_pipeline.report_figures) — torch-frei, ohne GUI.
+matplotlib==3.10.8
+numpy==2.4.4           # kommt transitiv über pandas mit; hier explizit, weil direkt importiert
+
+# OPTIONAL, absichtlich NICHT gepinnt-installiert: opt_einsum wird von
+# intermediate_representation/parse.py lazy importiert, um die Kontraktionsreihenfolge
+# n-ärer Ketten zu planen. Fehlt es, greift der Links-nach-rechts-Fold — jeder Schritt
+# wird ohnehin streng validiert und das Endergebnis gegen fp32 verifiziert, der Fold ist
+# also immer korrekt. Die Report-Zahlen der n-ären Kette sind OHNE opt_einsum gemessen;
+# eine Installation kann eine andere Zerlegung und damit andere TFLOP/s ergeben. Wer den
+# Planer will:  pip install opt_einsum==3.4.0
+# torch (CUDA), cuda.tile, triton und cupy kommen NICHT von hier — sie liegen im venv des
+# GPU-Hosts (das venv aktivieren, in dem torch mit CUDA, cuda.tile und triton installiert
+# sind); dieses File ergänzt nur die GUI-/Plot-/Store-Pakete.
