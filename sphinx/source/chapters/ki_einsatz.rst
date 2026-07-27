@@ -7,7 +7,7 @@ Bei der Bearbeitung dieses Projekts kamen KI-gestützte Werkzeuge zum Einsatz.
 Eingesetzte Werkzeuge und Modelle
 ============================================
 
-* **Claude Opus 4.7 und Opus 4.8** (`claude.ai <https://claude.ai/>`_)
+* **Claude Opus 4.7, Opus 4.8 und Opus 5** (`claude.ai <https://claude.ai/>`_)
 * **Gemini 3.6 Flash und 3.5 Flash-Light** (`gemini.google.com <https://gemini.google.com>`_)
 * **DeepL** (`deepl.com <https://www.deepl.com/de/translator>`_)
 * **Languagetool** (`languagetool.org <https://languagetool.org/de>`_)
